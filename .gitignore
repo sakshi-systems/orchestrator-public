@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Mypy
+.mypy_cache/
+
+# Sidecar atomic-write temp files
+*.json.tmp
+
+# Local config with secrets — root global and per-project .ai-factory/ overrides alike; per-developer, never committed
+orchestrator.json
+
+# Clones of the sources we follow, beside their tracked files in upstream/
+upstream/*/

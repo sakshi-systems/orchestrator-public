@@ -1,0 +1,22 @@
+[project]
+name = "orchestrator"
+version = "0.1.0"
+description = "Generic AI agent orchestrator — plans, implements, and reviews tasks from a roadmap"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[project.scripts]
+orchestrator = "orchestrator.main:cli"
+orchestrator-launch = "orchestrator.launcher:cli"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
