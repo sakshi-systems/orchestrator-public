@@ -30,10 +30,14 @@ def _make_runtime(config: OrchestratorConfig, project_dir: Path) -> tuple[AgentB
     """Construct the selected backend and bind its pre-task usage policy."""
     print(f"Agent runtime: {config.runtime}")
     if config.runtime == "codex":
-        backend = CodexAgentBackend()
-        return backend, partial(_check_codex_usage_limits, config, project_dir)
-    backend = ClaudeAgentBackend()
-    return backend, partial(_check_usage_limits, config)
+        backend = CodexAgentBackend(config.codex_agents)
+        usage_check = partial(_check_codex_usage_limits, config, project_dir)
+    else:
+        backend = ClaudeAgentBackend(config.claude_agents)
+        usage_check = partial(_check_usage_limits, config)
+    for role, settings in backend.role_settings.items():
+        print(f"  {role.value}: {settings.model} ({settings.effort})")
+    return backend, usage_check
 
 
 def _test_loop(project_dir: Path, config: OrchestratorConfig) -> None:

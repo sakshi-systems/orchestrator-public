@@ -8,12 +8,13 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import NamedTuple
+from types import MappingProxyType
 
 from . import state
 from .errors import NetworkError, RateLimitError
-from .ports import AgentRole
+from .ports import AgentRole, RoleSetting, resolve_role_settings
 from .process_control import kill_active_child
 
 
@@ -287,32 +288,38 @@ def _run_claude(
     raise RuntimeError("All retry attempts exhausted")
 
 
-class _NativePolicy(NamedTuple):
-    model: str
-    effort: str
-    allowed_tools: tuple[str, ...]
+_ROLE_DEFAULTS: dict[AgentRole, RoleSetting] = {
+    AgentRole.PLANNER_REVIEWER: RoleSetting("opus", "high"),
+    AgentRole.PLAN_REVIEWER: RoleSetting("opus", "high"),
+    AgentRole.IMPLEMENTER: RoleSetting("sonnet", "high"),
+}
 
-
-_ROLE_POLICY: dict[AgentRole, _NativePolicy] = {
-    AgentRole.PLANNER_REVIEWER: _NativePolicy("opus", "high", ("Read", "Write", "Glob", "Grep", "Bash")),
-    AgentRole.PLAN_REVIEWER: _NativePolicy("opus", "high", ("Read", "Write", "Glob", "Grep", "Bash")),
-    AgentRole.IMPLEMENTER: _NativePolicy("sonnet", "high", ("Read", "Write", "Edit", "Bash", "Glob", "Grep")),
+_ROLE_TOOLS: dict[AgentRole, tuple[str, ...]] = {
+    AgentRole.PLANNER_REVIEWER: ("Read", "Write", "Glob", "Grep", "Bash"),
+    AgentRole.PLAN_REVIEWER: ("Read", "Write", "Glob", "Grep", "Bash"),
+    AgentRole.IMPLEMENTER: ("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
 }
 
 
 class ClaudeAgentBackend:
     """Claude implementation of the agent-runtime port.
 
-    Chooses model, effort and tools from the role alone, and delivers the
-    instructions as the system prompt only on a fresh session — a resumed
+    Resolves model and effort at construction and keeps tools owned by role.
+    Delivers instructions as the system prompt only on a fresh session — a resumed
     session already carries them. Construction validates that the executable
     is available, without invoking it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, agents: Mapping[str, Mapping[str, str]] | None = None) -> None:
         global _CLAUDE_BIN
         if _CLAUDE_BIN is None:
             _CLAUDE_BIN = _resolve_claude()
+        self._role_settings = MappingProxyType(resolve_role_settings(agents, _ROLE_DEFAULTS))
+
+    @property
+    def role_settings(self) -> Mapping[AgentRole, RoleSetting]:
+        """The immutable snapshot of resolved settings for every role."""
+        return self._role_settings
 
     def run(
         self,
@@ -323,15 +330,15 @@ class ClaudeAgentBackend:
         instructions: str,
         session_id: str | None = None,
     ) -> tuple[str, str]:
-        policy = _ROLE_POLICY[role]
+        settings = self.role_settings[role]
         return _run_claude(
             prompt=prompt,
             cwd=cwd,
             system_prompt=instructions if not session_id else None,
             session_id=session_id,
-            allowed_tools=list(policy.allowed_tools),
-            model=policy.model,
-            effort=policy.effort,
+            allowed_tools=list(_ROLE_TOOLS[role]),
+            model=settings.model,
+            effort=settings.effort,
         )
 
 

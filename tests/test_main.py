@@ -35,7 +35,7 @@ from orchestrator.resume import (
 )
 from orchestrator.usage import _check_usage_limits, _parse_pct
 from orchestrator.agents import _load_prompt
-from orchestrator.ports import AgentRole
+from orchestrator.ports import AgentRole, RoleSetting
 from orchestrator.roadmap import mark_done
 from tests.fakes import FakeAgentBackend, target_path
 
@@ -1532,7 +1532,7 @@ def test_loops_construct_one_backend_and_forward_it(tmp_path, monkeypatch, loop_
     sentinel = FakeAgentBackend()
     selected = backend_name or "claude"
 
-    def factory():
+    def factory(agents=None):
         constructor_calls.append(sentinel)
         return sentinel
 
@@ -1615,7 +1615,119 @@ def test_selected_constructor_preflights_without_probe(tmp_path, monkeypatch, ca
         assert len(loops) == 1
     assert resolutions == [selected]
     assert not (tmp_path / ".ai-factory" / "plans").exists()
-    assert f"Agent runtime: {selected}" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    if missing:
+        assert output == f"Agent runtime: {selected}\n"
+    else:
+        assert output.startswith(f"Agent runtime: {selected}\n")
+
+
+@pytest.mark.parametrize("loop_name", ["_implement_loop", "_test_loop"])
+@pytest.mark.parametrize("selected", ["claude", "codex"])
+@pytest.mark.parametrize("overrides", [False, True])
+def test_loops_apply_and_print_resolved_settings(tmp_path, monkeypatch, capsys, loop_name, selected, overrides):
+    _write_loop_roadmaps(tmp_path)
+    block = {
+        "planner_reviewer": {"model": "operator-model"},
+        "implementer": {"effort": "operator-effort"},
+    } if overrides else {}
+    config = dataclasses.replace(
+        _flow_config(), runtime=selected, **{f"{selected}_agents": block},
+    )
+    selected_module = claude_module if selected == "claude" else codex_module
+    selected_name = "ClaudeAgentBackend" if selected == "claude" else "CodexAgentBackend"
+    other_name = "CodexAgentBackend" if selected == "claude" else "ClaudeAgentBackend"
+    real_backend = getattr(main_module, selected_name)
+    constructed = []
+    loops = []
+    monkeypatch.setattr(claude_module, "_CLAUDE_BIN", None)
+    monkeypatch.setattr(selected_module, "_resolve_" + selected, lambda: "/offline/" + selected)
+    other_module = codex_module if selected == "claude" else claude_module
+    monkeypatch.setattr(other_module, "_resolve_codex" if selected == "claude" else "_resolve_claude", _unexpected_runtime)
+    monkeypatch.setattr(main_module, other_name, _unexpected_runtime)
+    monkeypatch.setattr(main_module, "_check_usage_limits", _unexpected_runtime)
+    monkeypatch.setattr(main_module, "_check_codex_usage_limits", _unexpected_runtime)
+    monkeypatch.setattr(main_module, "process_task", _unexpected_runtime)
+
+    def construct(agents):
+        constructed.append(agents)
+        return real_backend(agents)
+
+    monkeypatch.setattr(main_module, selected_name, construct)
+    monkeypatch.setattr(main_module, "_run_dynamic_loop", lambda *a, **k: loops.append(k))
+
+    getattr(main_module, loop_name)(tmp_path, config)
+
+    assert len(constructed) == 1
+    assert constructed[0] is block
+    assert len(loops) == 1
+    if selected == "claude":
+        role_lines = [
+            "  planner_reviewer: opus (high)",
+            "  plan_reviewer: opus (high)",
+            "  implementer: sonnet (high)",
+        ]
+        if overrides:
+            role_lines[0] = "  planner_reviewer: operator-model (high)"
+            role_lines[2] = "  implementer: sonnet (operator-effort)"
+    else:
+        role_lines = [
+            "  planner_reviewer: gpt-6.1-sol (high)",
+            "  plan_reviewer: gpt-6.1-sol (high)",
+            "  implementer: gpt-6.1-sol (high)",
+        ]
+        if overrides:
+            role_lines[0] = "  planner_reviewer: operator-model (high)"
+            role_lines[2] = "  implementer: gpt-6.1-sol (operator-effort)"
+    assert capsys.readouterr().out == "\n".join([f"Agent runtime: {selected}", *role_lines]) + "\n"
+
+
+@pytest.mark.parametrize("selected", ["claude", "codex"])
+def test_runtime_reads_only_selected_block_and_prints_backend_mapping(tmp_path, monkeypatch, capsys, selected):
+    block = {"planner_reviewer": {"model": "raw-model", "effort": "raw-effort"}}
+
+    class SelectedConfig:
+        runtime = selected
+
+        @property
+        def claude_agents(self):
+            assert selected == "claude", "Unselected Claude block was read"
+            return block
+
+        @property
+        def codex_agents(self):
+            assert selected == "codex", "Unselected Codex block was read"
+            return block
+
+    backend = FakeAgentBackend()
+    backend.role_settings = {
+        AgentRole.IMPLEMENTER: RoleSetting("resolved-builder", "builder-effort"),
+        AgentRole.PLANNER_REVIEWER: RoleSetting("resolved-planner", "planner-effort"),
+        AgentRole.PLAN_REVIEWER: RoleSetting("resolved-reviewer", "reviewer-effort"),
+    }
+    constructed = []
+
+    def construct(agents):
+        constructed.append(agents)
+        return backend
+
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", construct if selected == "claude" else _unexpected_runtime)
+    monkeypatch.setattr(main_module, "CodexAgentBackend", construct if selected == "codex" else _unexpected_runtime)
+    monkeypatch.setattr(main_module, "_check_usage_limits", _unexpected_runtime)
+    monkeypatch.setattr(main_module, "_check_codex_usage_limits", _unexpected_runtime)
+
+    result, usage_check = main_module._make_runtime(SelectedConfig(), tmp_path)
+
+    assert result is backend
+    assert len(constructed) == 1
+    assert constructed[0] is block
+    assert callable(usage_check)
+    assert capsys.readouterr().out == (
+        f"Agent runtime: {selected}\n"
+        "  implementer: resolved-builder (builder-effort)\n"
+        "  planner_reviewer: resolved-planner (planner-effort)\n"
+        "  plan_reviewer: resolved-reviewer (reviewer-effort)\n"
+    )
 
 
 @pytest.mark.parametrize("loop_name", ["_implement_loop", "_test_loop"])
@@ -1635,8 +1747,8 @@ def test_mode_assembly_binds_merged_config(tmp_path, monkeypatch, loop_name, sel
     config = load_config(tmp_path)
     config.roadmap_path = None
     calls = []
-    monkeypatch.setattr(main_module, "ClaudeAgentBackend", (lambda: FakeAgentBackend()) if selected == "claude" else _unexpected_runtime)
-    monkeypatch.setattr(main_module, "CodexAgentBackend", (lambda: FakeAgentBackend()) if selected == "codex" else _unexpected_runtime)
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", (lambda agents=None: FakeAgentBackend()) if selected == "claude" else _unexpected_runtime)
+    monkeypatch.setattr(main_module, "CodexAgentBackend", (lambda agents=None: FakeAgentBackend()) if selected == "codex" else _unexpected_runtime)
     monkeypatch.setattr(main_module, "_check_usage_limits", (lambda c: calls.append((c, None))) if selected == "claude" else _unexpected_runtime)
     monkeypatch.setattr(main_module, "_check_codex_usage_limits", (lambda c, p: calls.append((c, p))) if selected == "codex" else _unexpected_runtime)
     monkeypatch.setattr(main_module, "_run_dynamic_loop", lambda *a, usage_check, **k: usage_check())
@@ -1664,7 +1776,7 @@ def test_real_loop_dispatches_selected_policy_before_each_task(tmp_path, monkeyp
     monkeypatch.setattr(pipeline_module, "_run_summary", lambda: "offline")
     config = dataclasses.replace(_flow_config(), runtime=selected)
 
-    def construct():
+    def construct(agents=None):
         events.append("constructor")
         return sentinel
 
@@ -2196,7 +2308,7 @@ def completion_env(tmp_path, monkeypatch):
         fn(*args, **kwargs)
         return "offline elapsed"
 
-    def constructor():
+    def constructor(agents=None):
         events.append("constructor")
         return FakeAgentBackend()
 

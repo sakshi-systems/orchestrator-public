@@ -19,11 +19,13 @@ import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 from . import state
 from .errors import NetworkError, RateLimitError
-from .ports import AgentRole
+from .ports import AgentRole, RoleSetting, resolve_role_settings
 from .process_control import kill_active_child
 
 
@@ -33,15 +35,10 @@ RETRY_DELAY = 30  # seconds
 _CALLER_IDENTITY_VARS = ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID")
 
 
-class _NativePolicy(NamedTuple):
-    model: str
-    effort: str
-
-
-_ROLE_POLICY: dict[AgentRole, _NativePolicy] = {
-    AgentRole.PLANNER_REVIEWER: _NativePolicy("gpt-6.1-sol", "high"),
-    AgentRole.PLAN_REVIEWER: _NativePolicy("gpt-6.1-sol", "high"),
-    AgentRole.IMPLEMENTER: _NativePolicy("gpt-6.1-sol", "high"),
+_ROLE_DEFAULTS: dict[AgentRole, RoleSetting] = {
+    AgentRole.PLANNER_REVIEWER: RoleSetting("gpt-6.1-sol", "high"),
+    AgentRole.PLAN_REVIEWER: RoleSetting("gpt-6.1-sol", "high"),
+    AgentRole.IMPLEMENTER: RoleSetting("gpt-6.1-sol", "high"),
 }
 
 
@@ -89,12 +86,12 @@ def _toml_basic_string(text: str) -> str:
     return "".join(parts)
 
 
-def _fresh_argv(bin_path: str, policy: _NativePolicy, cwd: str, instructions: str) -> list[str]:
+def _fresh_argv(bin_path: str, settings: RoleSetting, cwd: str, instructions: str) -> list[str]:
     """Argument vector creating a new thread with the instructions in the developer layer."""
     return [
         bin_path, "exec", "--json", "--color", "never",
-        "-m", policy.model,
-        "-c", f'model_reasoning_effort="{policy.effort}"',
+        "-m", settings.model,
+        "-c", "model_reasoning_effort=" + _toml_basic_string(settings.effort),
         "-c", 'approval_policy="never"',
         "-s", "danger-full-access",
         "-C", cwd,
@@ -103,7 +100,7 @@ def _fresh_argv(bin_path: str, policy: _NativePolicy, cwd: str, instructions: st
     ]
 
 
-def _resume_argv(bin_path: str, policy: _NativePolicy, cwd: str, thread_id: str) -> list[str]:
+def _resume_argv(bin_path: str, settings: RoleSetting, cwd: str, thread_id: str) -> list[str]:
     """Argument vector continuing a persisted thread; the initial developer policy is retained natively."""
     return [
         bin_path, "exec",
@@ -111,8 +108,8 @@ def _resume_argv(bin_path: str, policy: _NativePolicy, cwd: str, thread_id: str)
         "-s", "danger-full-access",
         "-c", 'approval_policy="never"',
         "resume", "--json",
-        "-m", policy.model,
-        "-c", f'model_reasoning_effort="{policy.effort}"',
+        "-m", settings.model,
+        "-c", "model_reasoning_effort=" + _toml_basic_string(settings.effort),
         thread_id,
         "-",
     ]
@@ -516,14 +513,20 @@ def _evidence(primary: str | None, run: _Completed) -> str:
 class CodexAgentBackend:
     """Codex implementation of the agent-runtime port.
 
-    Chooses model and effort from the role alone and delivers the instructions
+    Resolves model and effort at construction and delivers the instructions
     in the developer layer only when it creates a thread; a continuation keeps
     the initial policy natively. Construction resolves the executable without
     invoking a model.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, agents: Mapping[str, Mapping[str, str]] | None = None) -> None:
         self._bin = _resolve_codex()
+        self._role_settings = MappingProxyType(resolve_role_settings(agents, _ROLE_DEFAULTS))
+
+    @property
+    def role_settings(self) -> Mapping[AgentRole, RoleSetting]:
+        """The immutable snapshot of resolved settings for every role."""
+        return self._role_settings
 
     def run(
         self,
@@ -547,7 +550,7 @@ class CodexAgentBackend:
         built or any child is started; a canonical value is passed to native
         continuation unchanged.
         """
-        policy = _ROLE_POLICY[role]
+        settings = self.role_settings[role]
         if session_id is not None and not _is_canonical_uuid(session_id):
             raise ValueError(
                 "Codex continuation identity is not a canonical UUID\n"
@@ -560,10 +563,10 @@ class CodexAgentBackend:
             start = time.monotonic()
             if target is not None:
                 resumed_id: str | None = target
-                argv = _resume_argv(self._bin, policy, cwd, target)
+                argv = _resume_argv(self._bin, settings, cwd, target)
             else:
                 resumed_id = None
-                argv = _fresh_argv(self._bin, policy, cwd, instructions)
+                argv = _fresh_argv(self._bin, settings, cwd, instructions)
 
             run_ = _communicate_once(argv, cwd, prompt)
 

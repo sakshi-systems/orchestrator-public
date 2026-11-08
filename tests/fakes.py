@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchestrator.ports import AgentRole
+from orchestrator.ports import AgentRole, RoleSetting
 
 
 @dataclass
@@ -31,6 +31,9 @@ class FakeAgentBackend:
         self.sid = sid
         self.calls: list[BackendCall] = []
         self.returned: list[str] = []
+        self.role_settings = {
+            role: RoleSetting(f"fake-{role.value}", "fake-effort") for role in AgentRole
+        }
 
     def run(
         self,

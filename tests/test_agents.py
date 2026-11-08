@@ -28,7 +28,7 @@ from orchestrator.protocol import (
     _write_session,
     _write_sessions,
 )
-from orchestrator.ports import AgentRole
+from orchestrator.ports import AgentRole, RoleSetting
 from tests.fakes import FakeAgentBackend, silent_backend, target_path, writing_backend
 
 
@@ -1175,7 +1175,7 @@ _EXPECTED_POLICY = {
 
 @pytest.mark.parametrize("role", list(AgentRole))
 def test_claude_backend_policy_and_instruction_delivery(monkeypatch, role):
-    """Policy follows the role alone; instructions become the system prompt only on a fresh session."""
+    """Default settings and tools follow the role; only fresh sessions receive instructions."""
     seen: list[dict] = []
 
     def _recorder(**kwargs):
@@ -1194,6 +1194,90 @@ def test_claude_backend_policy_and_instruction_delivery(monkeypatch, role):
                          allowed_tools=tools, model=model, effort=effort)
     assert resumed == dict(prompt="p", cwd="c", system_prompt=None, session_id="s1",
                            allowed_tools=tools, model=model, effort=effort)
+
+
+@pytest.mark.parametrize("role", list(AgentRole))
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"model": " custom-model "},
+        {"effort": " custom-effort "},
+        {"model": " custom-model ", "effort": " custom-effort "},
+    ],
+)
+def test_claude_backend_overrides_preserve_tools_and_instruction_delivery(monkeypatch, role, override):
+    seen: list[dict] = []
+
+    def _recorder(**kwargs):
+        seen.append(kwargs)
+        return ("out", "sid-x")
+
+    monkeypatch.setattr(claude_cli, "_CLAUDE_BIN", "/usr/local/bin/claude")
+    monkeypatch.setattr(claude_cli, "_run_claude", _recorder)
+    backend = ClaudeAgentBackend({role.value: override})
+    model, effort, tools = _EXPECTED_POLICY[role]
+    model = override.get("model", model)
+    effort = override.get("effort", effort)
+    expected = {
+        key: RoleSetting(default_model, default_effort)
+        for key, (default_model, default_effort, _) in _EXPECTED_POLICY.items()
+    }
+    expected[role] = RoleSetting(model, effort)
+    assert backend.role_settings == expected
+    assert list(backend.role_settings) == list(AgentRole)
+
+    assert backend.run(role=role, prompt="p", cwd="c", instructions="FULL") == ("out", "sid-x")
+    assert backend.run(role=role, prompt="p", cwd="c", instructions="FULL", session_id="sid-x") == ("out", "sid-x")
+
+    fresh, resumed = seen
+    assert fresh == dict(prompt="p", cwd="c", system_prompt="FULL", session_id=None,
+                         allowed_tools=tools, model=model, effort=effort)
+    assert resumed == dict(prompt="p", cwd="c", system_prompt=None, session_id="sid-x",
+                           allowed_tools=tools, model=model, effort=effort)
+    assert fresh["allowed_tools"] is not resumed["allowed_tools"]
+
+
+@pytest.mark.parametrize("agents", [None, {}])
+def test_claude_backend_exposes_original_defaults(monkeypatch, agents):
+    monkeypatch.setattr(claude_cli, "_CLAUDE_BIN", "/usr/local/bin/claude")
+    expected = {
+        role: RoleSetting(model, effort)
+        for role, (model, effort, _) in _EXPECTED_POLICY.items()
+    }
+
+    assert ClaudeAgentBackend().role_settings == expected
+    assert ClaudeAgentBackend(agents).role_settings == expected
+
+
+def test_claude_backend_settings_are_read_only_and_detached_from_input(monkeypatch):
+    seen: list[dict] = []
+    monkeypatch.setattr(claude_cli, "_CLAUDE_BIN", "/usr/local/bin/claude")
+    monkeypatch.setattr(claude_cli, "_run_claude", lambda **kw: seen.append(kw) or ("out", "sid"))
+    agents = {"implementer": {"model": "custom", "effort": "custom-effort"}}
+    backend = ClaudeAgentBackend(agents)
+    expected = {
+        role: RoleSetting(model, effort)
+        for role, (model, effort, _) in _EXPECTED_POLICY.items()
+    }
+    expected[AgentRole.IMPLEMENTER] = RoleSetting("custom", "custom-effort")
+
+    with pytest.raises(TypeError):
+        backend.role_settings[AgentRole.IMPLEMENTER] = RoleSetting("other", "other")
+    with pytest.raises(AttributeError):
+        backend.role_settings = {}
+    with pytest.raises(AttributeError):
+        backend.role_settings[AgentRole.IMPLEMENTER].model = "other"
+
+    agents["implementer"]["model"] = "later"
+    agents["implementer"]["effort"] = "later-effort"
+    agents["planner_reviewer"] = {"model": "later-planner"}
+    assert backend.role_settings == expected
+    for role in AgentRole:
+        backend.run(role=role, prompt="p", cwd="c", instructions="FULL")
+
+    for role, call in zip(AgentRole, seen):
+        assert (call["model"], call["effort"]) == expected[role]
+        assert call["allowed_tools"] == _EXPECTED_POLICY[role][2]
 
 
 def test_claude_backend_policy_does_not_depend_on_instruction_text(monkeypatch):
