@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Callable, NamedTuple, Protocol
@@ -13,6 +14,30 @@ class AgentRole(Enum):
     PLANNER_REVIEWER = "planner_reviewer"
     PLAN_REVIEWER = "plan_reviewer"
     IMPLEMENTER = "implementer"
+
+
+class RoleSetting(NamedTuple):
+    """The model and effort resolved for one semantic role."""
+
+    model: str
+    effort: str
+
+
+def resolve_role_settings(
+    agents: Mapping[str, Mapping[str, str]] | None,
+    defaults: Mapping[AgentRole, RoleSetting],
+) -> dict[AgentRole, RoleSetting]:
+    """Resolve an already validated block field by field, in role order."""
+    block = agents if agents is not None else {}
+    resolved = {}
+    for role in AgentRole:
+        settings = block.get(role.value, {})
+        default = defaults[role]
+        resolved[role] = RoleSetting(
+            model=settings.get("model", default.model),
+            effort=settings.get("effort", default.effort),
+        )
+    return resolved
 
 
 class AgentBackendProtocol(Protocol):

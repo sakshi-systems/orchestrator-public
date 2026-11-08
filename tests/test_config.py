@@ -1,10 +1,11 @@
-"""Unit tests for OrchestratorConfig loading: the roadmap_path guard, the strict runtime selector, and the project overlay."""
+"""Configuration loading, validation and project overlay semantics."""
 
 import json
 
 import pytest
 
-from orchestrator.config import load_config
+from orchestrator.config import OrchestratorConfig, load_config
+from orchestrator.ports import AgentRole
 
 REQUIRED_FIELDS = {
     "max_iterations": 3,
@@ -224,3 +225,164 @@ def test_load_config_runtime_invalid_overlay_over_valid_base_raises_system_exit(
     with pytest.raises(SystemExit) as exc:
         load_config(project_dir=project_dir)
     assert "runtime" in str(exc.value)
+
+
+@pytest.fixture(params=["claude_agents", "codex_agents"])
+def agent_key(request):
+    return request.param
+
+
+@pytest.fixture(params=[role.value for role in AgentRole])
+def agent_role(request):
+    return request.param
+
+
+@pytest.fixture(params=["base", "missing_overlay", "inherited_base", "overlay"])
+def agent_source(request):
+    return request.param
+
+
+def test_load_config_absent_agent_blocks_are_empty(tmp_path, monkeypatch):
+    _write_config(tmp_path, monkeypatch)
+    project_dir = tmp_path / "project"
+    for config in (load_config(), load_config(project_dir)):
+        assert config.claude_agents == {}
+        assert config.codex_agents == {}
+
+    _write_override(project_dir, {"max_iterations": 4})
+    config = load_config(project_dir)
+    assert config.claude_agents == {}
+    assert config.codex_agents == {}
+
+
+def test_agent_block_dataclass_defaults_are_independent():
+    first = OrchestratorConfig(**REQUIRED_FIELDS)
+    second = OrchestratorConfig(**REQUIRED_FIELDS)
+    role = AgentRole.IMPLEMENTER.value
+    first.claude_agents[role] = {"model": "custom-claude"}
+    assert first.codex_agents == {}
+    first.codex_agents[role] = {"model": "custom-codex"}
+    assert second.claude_agents == {}
+    assert second.codex_agents == {}
+
+
+@pytest.mark.parametrize("settings", [
+    {},
+    {"model": " custom-model "},
+    {"effort": "custom-effort"},
+    {"model": "future-model", "effort": "future-effort"},
+    {"model": " ", "effort": "\t"},
+])
+def test_load_config_agent_settings_pass_through(tmp_path, monkeypatch, agent_key, agent_role, settings):
+    block = {agent_role: settings}
+    _write_config(tmp_path, monkeypatch, {agent_key: block})
+    assert getattr(load_config(), agent_key) == block
+
+
+def test_load_config_preserves_both_agent_blocks(tmp_path, monkeypatch):
+    claude = {role.value: {"model": f"claude-{role.value}"} for role in AgentRole}
+    codex = {role.value: {"effort": f"codex-{role.value}"} for role in AgentRole}
+    _write_config(tmp_path, monkeypatch, {"claude_agents": claude, "codex_agents": codex})
+    config = load_config()
+    assert config.claude_agents == claude
+    assert config.codex_agents == codex
+
+
+def _assert_invalid_agent_block(tmp_path, monkeypatch, agent_key, source, block, value, role=None, field=None):
+    # Select the other runtime to ensure unused blocks are still validated.
+    runtime = "codex" if agent_key == "claude_agents" else "claude"
+    base_path = _write_config(tmp_path, monkeypatch, {
+        "runtime": runtime,
+        agent_key: {} if source == "overlay" else block,
+    })
+    project_dir = None if source == "base" else tmp_path / "project"
+    supplying_path = base_path
+    if source == "overlay":
+        supplying_path = _write_override(project_dir, {agent_key: block})
+    elif source == "inherited_base":
+        _write_override(project_dir, {"max_iterations": 4})
+
+    with pytest.raises(SystemExit) as exc:
+        load_config(project_dir)
+    message = str(exc.value)
+    assert agent_key in message
+    assert repr(value) in message
+    assert str(supplying_path) in message
+    if source == "overlay":
+        assert str(base_path) not in message
+    else:
+        assert str(tmp_path / "project" / ".ai-factory" / "orchestrator.json") not in message
+    if role is not None:
+        assert repr(role) in message
+    if field is not None:
+        assert repr(field) in message
+
+
+@pytest.mark.parametrize("value", [None, [], ["model"], "", "scalar", 0, 1.5, True, False])
+def test_load_config_rejects_non_object_agent_blocks(tmp_path, monkeypatch, agent_key, agent_source, value):
+    _assert_invalid_agent_block(tmp_path, monkeypatch, agent_key, agent_source, value, value)
+
+
+@pytest.mark.parametrize("value", [None, [], ["model"], "", "scalar", 0, 1.5, True, False])
+def test_load_config_rejects_non_object_roles(tmp_path, monkeypatch, agent_key, agent_role, agent_source, value):
+    _assert_invalid_agent_block(
+        tmp_path, monkeypatch, agent_key, agent_source, {agent_role: value}, value, role=agent_role,
+    )
+
+
+def test_load_config_rejects_unknown_roles(tmp_path, monkeypatch, agent_key, agent_source):
+    role = "unknown_role"
+    settings = {"model": "custom"}
+    _assert_invalid_agent_block(
+        tmp_path, monkeypatch, agent_key, agent_source, {role: settings}, settings, role=role,
+    )
+
+
+def test_load_config_rejects_unknown_role_fields(tmp_path, monkeypatch, agent_key, agent_role, agent_source):
+    settings = {"model": "custom", "effort": "high", "modle": "typo"}
+    _assert_invalid_agent_block(
+        tmp_path, monkeypatch, agent_key, agent_source, {agent_role: settings}, "typo",
+        role=agent_role, field="modle",
+    )
+
+
+@pytest.mark.parametrize("field", ["model", "effort"])
+@pytest.mark.parametrize("value", ["", None, [], ["high"], {}, {"name": "high"}, 0, 1.5, True, False])
+def test_load_config_rejects_empty_or_non_string_agent_fields(
+    tmp_path, monkeypatch, agent_key, agent_role, agent_source, field, value,
+):
+    _assert_invalid_agent_block(
+        tmp_path, monkeypatch, agent_key, agent_source, {agent_role: {field: value}}, value,
+        role=agent_role, field=field,
+    )
+
+
+@pytest.mark.parametrize("replacement", [{}, {AgentRole.IMPLEMENTER.value: {"effort": "overlay-effort"}}])
+def test_load_config_agent_overlay_replaces_whole_block(tmp_path, monkeypatch, agent_key, replacement):
+    base = {role.value: {"model": "base-model", "effort": "base-effort"} for role in AgentRole}
+    _write_config(tmp_path, monkeypatch, {agent_key: base})
+    project_dir = tmp_path / "project"
+    _write_override(project_dir, {agent_key: replacement})
+
+    assert getattr(load_config(project_dir), agent_key) == replacement
+
+
+def test_load_config_absent_overlay_agent_key_inherits_block(tmp_path, monkeypatch, agent_key):
+    base = {role.value: {"model": "base-model", "effort": "base-effort"} for role in AgentRole}
+    _write_config(tmp_path, monkeypatch, {agent_key: base})
+    project_dir = tmp_path / "project"
+    _write_override(project_dir, {"max_iterations": 4})
+
+    assert getattr(load_config(project_dir), agent_key) == base
+
+
+@pytest.mark.parametrize("invalid_base", [None, [], {"unknown_role": {}}, {AgentRole.IMPLEMENTER.value: {"model": ""}}])
+@pytest.mark.parametrize("replacement", [{}, {AgentRole.IMPLEMENTER.value: {"model": "overlay-model"}}])
+def test_load_config_valid_overlay_supersedes_invalid_base_agents(
+    tmp_path, monkeypatch, agent_key, invalid_base, replacement,
+):
+    _write_config(tmp_path, monkeypatch, {agent_key: invalid_base})
+    project_dir = tmp_path / "project"
+    _write_override(project_dir, {agent_key: replacement})
+
+    assert getattr(load_config(project_dir), agent_key) == replacement

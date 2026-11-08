@@ -37,7 +37,7 @@ import pytest
 from orchestrator import codex_cli, process_control, state
 from orchestrator.codex_cli import CodexAgentBackend
 from orchestrator.errors import NetworkError, RateLimitError
-from orchestrator.ports import AgentRole
+from orchestrator.ports import AgentRole, RoleSetting
 
 CREATED_UUID = "11111111-1111-4111-8111-111111111111"
 SUPPLIED_UUID = "22222222-2222-4222-8222-222222222222"
@@ -471,28 +471,160 @@ def _ok_child(child_env, thread=CREATED_UUID):
 
 
 class TestCodexInvocation:
-    def test_construction_without_executable_raises_and_spawns_nothing(self, child_env, monkeypatch):
+    @pytest.mark.parametrize("args", [(), (None,), ({},), ({"implementer": {"model": "custom"}},)])
+    def test_construction_without_executable_raises_and_spawns_nothing(self, child_env, monkeypatch, args):
         """A missing executable is an invocation fault at construction, before any process exists."""
         monkeypatch.setattr(codex_cli.shutil, "which", lambda name, *a, **k: None)
 
         with pytest.raises(FileNotFoundError):
-            CodexAgentBackend()
+            CodexAgentBackend(*args)
 
         assert child_env.spawn.argvs == []
 
-    def test_construction_with_executable_spawns_nothing(self, child_env):
+    @pytest.mark.parametrize("args", [(), (None,), ({},), ({"implementer": {"model": "custom"}},)])
+    def test_construction_with_executable_spawns_nothing(self, child_env, args):
         """Resolving the executable never launches a process."""
-        CodexAgentBackend()
+        CodexAgentBackend(*args)
 
         assert child_env.spawn.argvs == []
+
+    @pytest.mark.parametrize("args", [(), (None,), ({},)])
+    def test_absent_settings_expose_complete_defaults_in_role_order(self, child_env, args):
+        backend = CodexAgentBackend(*args)
+
+        assert backend.role_settings == {
+            role: RoleSetting(model, "high") for role, model in _ROLE_MODELS
+        }
+        assert list(backend.role_settings) == list(AgentRole)
+
+    @pytest.mark.parametrize("role", list(AgentRole))
+    @pytest.mark.parametrize("override", [
+        {"model": "custom-model"},
+        {"effort": "custom-effort"},
+        {"model": "custom-model", "effort": "custom-effort"},
+    ])
+    def test_role_overrides_reach_fresh_and_continuing_turns(self, child_env, tmp_path, role, override):
+        backend = CodexAgentBackend({role.value: override})
+        expected = {key: RoleSetting(model, "high") for key, model in _ROLE_MODELS}
+        expected[role] = RoleSetting(
+            override.get("model", expected[role].model),
+            override.get("effort", expected[role].effort),
+        )
+        assert backend.role_settings == expected
+        assert list(backend.role_settings) == list(AgentRole)
+
+        for session_id in (None, SUPPLIED_UUID):
+            thread = session_id or CREATED_UUID
+            child = _ok_child(child_env, thread)
+            observed = _invoke(backend, **_run_kwargs(tmp_path, role=role, session_id=session_id))
+
+            assert observed.exc is None
+            assert observed.result == ("done", thread)
+            argv = child.args
+            assert argv[argv.index("-m") + 1] == expected[role].model
+            assert [a for a in argv if a.startswith("model_reasoning_effort=")] == [
+                f'model_reasoning_effort="{expected[role].effort}"'
+            ]
+            assert [a for a in argv if a.startswith("developer_instructions=")] == (
+                [] if session_id else ['developer_instructions="role policy"']
+            )
+            assert ("resume" in argv) is (session_id is not None)
+            if session_id:
+                assert argv[-2] == session_id
+            assert child.inputs == ["assignment"]
+
+    def test_settings_mapping_and_values_are_immutable(self, child_env):
+        backend = CodexAgentBackend()
+
+        with pytest.raises(TypeError):
+            backend.role_settings[AgentRole.IMPLEMENTER] = RoleSetting("other", "low")
+        with pytest.raises(AttributeError):
+            backend.role_settings[AgentRole.IMPLEMENTER].model = "other"
+        with pytest.raises(AttributeError):
+            backend.role_settings = {}
+
+    def test_caller_mutation_does_not_change_snapshot_or_default_backend(self, child_env, tmp_path):
+        agents = {"implementer": {"model": "custom-model", "effort": "custom-effort"}}
+        backend = CodexAgentBackend(agents)
+        agents["implementer"]["model"] = "later-model"
+        agents["implementer"]["effort"] = "later-effort"
+        agents["plan_reviewer"] = {"model": "later-review-model"}
+        default_backend = CodexAgentBackend()
+        defaults = {role: RoleSetting(model, "high") for role, model in _ROLE_MODELS}
+        expected = {**defaults, AgentRole.IMPLEMENTER: RoleSetting("custom-model", "custom-effort")}
+
+        assert backend.role_settings == expected
+        assert default_backend.role_settings == defaults
+        for current, settings in ((backend, expected), (default_backend, defaults)):
+            for session_id in (None, SUPPLIED_UUID):
+                thread = session_id or CREATED_UUID
+                child = _ok_child(child_env, thread)
+                observed = _invoke(current, **_run_kwargs(tmp_path, session_id=session_id))
+
+                assert observed.exc is None
+                assert observed.result == ("done", thread)
+                argv = child.args
+                assert argv[argv.index("-m") + 1] == settings[AgentRole.IMPLEMENTER].model
+                element = next(a for a in argv if a.startswith("model_reasoning_effort="))
+                assert tomllib.loads(element) == {"model_reasoning_effort": settings[AgentRole.IMPLEMENTER].effort}
+
+    @pytest.mark.parametrize("session_id", [None, SUPPLIED_UUID])
+    @pytest.mark.parametrize("effort", [
+        'quote " and backslash \\',
+        'high"\napproval_policy="always',
+        'line\nbreak\ttab \U0001F600 del\x7f ctl\x01 end',
+    ])
+    def test_effort_round_trips_as_one_toml_value(self, child_env, tmp_path, session_id, effort):
+        backend = CodexAgentBackend({"implementer": {"effort": effort}})
+        thread = session_id or CREATED_UUID
+        child = _ok_child(child_env, thread)
+
+        observed = _invoke(backend, **_run_kwargs(tmp_path, session_id=session_id))
+
+        assert observed.exc is None
+        assert observed.result == ("done", thread)
+        elements = [a for a in child.args if a.startswith("model_reasoning_effort=")]
+        assert len(elements) == 1
+        assert tomllib.loads(elements[0]) == {"model_reasoning_effort": effort}
+        argv = child.args
+        assert argv[argv.index(elements[0]) - 1] == "-c"
+        assert len(argv) == (16 if session_id else 18)
+        assert argv.count("-c") == (2 if session_id else 3)
+        assert argv[argv.index('approval_policy="never"') - 1] == "-c"
+        assert argv[argv.index("-m") + 1] == "gpt-6.1-sol"
+        assert argv[argv.index("-s") + 1] == "danger-full-access"
+        assert argv[argv.index("-C") + 1] == str(tmp_path)
+        assert ("resume" in argv) is (session_id is not None)
+        assert argv[-1] == "-"
+        assert child.inputs == ["assignment"]
+
+    def test_retry_keeps_resolved_settings_when_continuing_created_thread(self, child_env, tmp_path):
+        backend = CodexAgentBackend({"implementer": {"model": "custom-model", "effort": "low"}})
+        first = child_env.child(
+            [_thread_started(CREATED_UUID), _turn_failed("request timed out")], returncode=1,
+        )
+        second = _ok_child(child_env)
+
+        observed = _invoke(backend, **_run_kwargs(tmp_path))
+
+        assert observed.exc is None
+        assert observed.result == ("done", CREATED_UUID)
+        assert _argv_shapes(child_env.spawn.argvs) == [(FAKE_BIN, False, "-"), (FAKE_BIN, True, "-")]
+        assert _continuation_targets(child_env.spawn.argvs) == [CREATED_UUID]
+        for child in (first, second):
+            assert child.args[child.args.index("-m") + 1] == "custom-model"
+            assert 'model_reasoning_effort="low"' in child.args
+            assert child.inputs == ["assignment"]
 
     @pytest.mark.parametrize("role,model", _ROLE_MODELS)
     def test_fresh_form_matches_template_and_keeps_instructions_off_stdin(self, child_env, tmp_path, role, model):
         """A fresh turn passes the instructions as the developer element and only the assignment on stdin."""
         child = _ok_child(child_env)
 
-        _invoke(CodexAgentBackend(), **_run_kwargs(tmp_path, role=role, instructions="role policy"))
+        observed = _invoke(CodexAgentBackend(), **_run_kwargs(tmp_path, role=role, instructions="role policy"))
 
+        assert observed.exc is None
+        assert observed.result == ("done", CREATED_UUID)
         assert child_env.spawn.argvs == [[
             FAKE_BIN, "exec", "--json", "--color", "never",
             "-m", model,
@@ -509,8 +641,10 @@ class TestCodexInvocation:
         """A continuation carries no developer instructions and still delivers only the assignment."""
         child = _ok_child(child_env, SUPPLIED_UUID)
 
-        _invoke(CodexAgentBackend(), **_run_kwargs(tmp_path, session_id=SUPPLIED_UUID))
+        observed = _invoke(CodexAgentBackend(), **_run_kwargs(tmp_path, session_id=SUPPLIED_UUID))
 
+        assert observed.exc is None
+        assert observed.result == ("done", SUPPLIED_UUID)
         argv = child_env.spawn.argvs[0]
         assert argv == [
             FAKE_BIN, "exec",

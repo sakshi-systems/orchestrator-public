@@ -37,7 +37,7 @@ ORCHESTRATOR_CONFIG=/path/to/my-config.json uv run orchestrator implement /path/
 | `codex_agents` | per role, below | Model and effort of each role when the runtime is `codex`: an object keyed by role. See [Agent defaults](#agent-defaults). |
 | `snapshot_boundary` | `0.8` | Context-watch setting: the fraction of a session's window at which the watch warns a head or a hand, one boundary for both. A number above 0 and at most 1. See [The warning](context-watch.md#the-warning). |
 
-`runtime` is validated after the existing base/overlay merge. Only an absent key uses its default; an empty string, `null`, a non-string or any other value is a configuration error. The visible startup label is `Agent runtime:`.
+`runtime` is validated after the existing base/overlay merge. Only an absent key uses its default; an empty string, `null`, a non-string or any other value is a configuration error. The visible startup label is `Agent runtime:`. Under it the run prints one line per role, in the order `planner_reviewer`, `plan_reviewer`, `implementer`, of the form `<role key>: <model> (<effort>)` with two leading spaces, giving the values the run uses.
 
 The machine-wide settings, `architect_roots`, `context_windows` and `snapshot_boundary`, belong to the machine rather than to a project, so they are read from the global file only, and a project overlay's value for them is not consulted. Each is validated when the context watch starts: `architect_roots` is a list of paths, `context_windows` an object of positive integers and `snapshot_boundary` a number above 0 and at most 1. A bad setting is a [logged](context-watch.md#the-log) fault, and the command still ends with exit status 0.
 
@@ -52,7 +52,7 @@ A role's model and effort are settings, one block per runtime: `claude_agents` a
 }
 ```
 
-The blocks merge shallowly like every key: a project's block replaces the global block wholesale, and a role it leaves out takes its default. A role may hold only `model` or only `effort`, the missing field taking its default. Both blocks are validated after the merge, like `runtime`: an unknown role name, or a `model` or `effort` that is not a non-empty string, is a configuration error naming the file that supplies it.
+The blocks merge shallowly like every key: a project's block replaces the global block wholesale, and a role it leaves out takes its default. A role may hold only `model` or only `effort`, the missing field taking its default. Both blocks are validated after the merge, like `runtime`: an unknown role name, a block that is not an object, a role whose value is not an object, a field inside a role other than `model` and `effort`, or a `model` or `effort` that is not a non-empty string, is a configuration error naming the file that supplies it.
 
 Claude defaults:
 

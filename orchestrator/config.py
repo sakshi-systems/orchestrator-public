@@ -7,6 +7,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .ports import AgentRole
+
 
 @dataclass
 class OrchestratorConfig:
@@ -19,9 +21,34 @@ class OrchestratorConfig:
     telegram_alerts: list[str] = field(default_factory=list)
     roadmap_path: str | None = None
     runtime: str = "claude"
+    claude_agents: dict[str, dict[str, str]] = field(default_factory=dict)
+    codex_agents: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 AGENT_RUNTIMES = ("claude", "codex")
+
+
+def _validate_agent_block(key: str, block: object, path: Path) -> dict[str, dict[str, str]]:
+    """Validate an effective runtime block without adding defaults or changing values."""
+    if not isinstance(block, dict):
+        raise SystemExit(f"Invalid '{key}' in {path}: {block!r} (must be an object)")
+
+    roles = {role.value for role in AgentRole}
+    for role, settings in block.items():
+        if role not in roles:
+            raise SystemExit(f"Invalid '{key}' role {role!r} in {path}: {settings!r} (unknown role)")
+        if not isinstance(settings, dict):
+            raise SystemExit(f"Invalid '{key}' role {role!r} in {path}: {settings!r} (must be an object)")
+        for name, value in settings.items():
+            if name not in ("model", "effort"):
+                raise SystemExit(
+                    f"Invalid '{key}' role {role!r} field {name!r} in {path}: {value!r} (unknown field)"
+                )
+            if not isinstance(value, str) or not value:
+                raise SystemExit(
+                    f"Invalid '{key}' role {role!r} field {name!r} in {path}: {value!r} (must be a non-empty string)"
+                )
+    return block
 
 
 def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
@@ -51,6 +78,8 @@ def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
         if key not in data:
             raise SystemExit(f"Missing required key '{key}' in {path}")
 
+    override = {}
+    override_path = path
     if project_dir is not None:
         override_path = project_dir / ".ai-factory" / "orchestrator.json"
         if override_path.exists():
@@ -70,6 +99,11 @@ def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
     if not isinstance(runtime, str) or runtime not in AGENT_RUNTIMES:
         raise SystemExit(f"Invalid 'runtime' in {path}: {runtime!r} (must be 'claude' or 'codex')")
 
+    agent_blocks = {}
+    for key in ("claude_agents", "codex_agents"):
+        supplying_path = override_path if key in override else path
+        agent_blocks[key] = _validate_agent_block(key, data.get(key, {}), supplying_path)
+
     return OrchestratorConfig(
         max_iterations=int(data["max_iterations"]),
         usage_threshold_5h=float(data["usage_threshold_5h"]),
@@ -80,4 +114,6 @@ def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
         telegram_alerts=data.get("telegram_alerts") or [],
         roadmap_path=roadmap_path,
         runtime=runtime,
+        claude_agents=agent_blocks["claude_agents"],
+        codex_agents=agent_blocks["codex_agents"],
     )
