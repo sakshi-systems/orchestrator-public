@@ -4,6 +4,7 @@
   "usage_threshold_weekly": 95,
   "enable_phase_sessions": false,
   "runtime": "claude",
+  "task_reviewer": "run",
   "claude_agents": {},
   "codex_agents": {},
   "roadmap_path": "",

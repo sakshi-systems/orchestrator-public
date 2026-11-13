@@ -16,7 +16,7 @@ from orchestrator import layout as layout_module
 from orchestrator import main as main_module
 from orchestrator import pipeline as pipeline_module
 from orchestrator import usage as usage_module
-from orchestrator.agents import REVIEW_VERIFY, TEST_RUN_VERIFY
+from orchestrator.agents import HEAD_VERIFY, REVIEW_VERIFY, TEST_RUN_VERIFY
 from orchestrator.errors import EscalationError, HaltError, PipelineStopError, RateLimitError
 from orchestrator.config import OrchestratorConfig, load_config
 from orchestrator.layout import _artifact_subdir, _resolve_roadmap_relpath, _tests_sibling
@@ -38,6 +38,7 @@ from orchestrator.agents import _load_prompt
 from orchestrator.ports import AgentRole, RoleSetting
 from orchestrator.roadmap import mark_done
 from tests.fakes import FakeAgentBackend, target_path
+from tests.test_config import _write_config, _write_override
 
 # ---------------------------------------------------------------------------
 # Helpers / constants shared across _validate_sidecar_step tests
@@ -796,7 +797,7 @@ def _run_cli_with(monkeypatch, exc):
     """Patch load_config/run_implement/report/argv; return the list report() calls get recorded into."""
     recorded = []
 
-    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None: _cli_config())
+    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None, *, task_reviewers=None: _cli_config())
 
     def _raise_run_implement(project_dir, config):
         raise exc
@@ -1679,7 +1680,145 @@ def test_loops_apply_and_print_resolved_settings(tmp_path, monkeypatch, capsys, 
         if overrides:
             role_lines[0] = "  planner_reviewer: operator-model (high)"
             role_lines[2] = "  implementer: gpt-6.1-sol (operator-effort)"
-    assert capsys.readouterr().out == "\n".join([f"Agent runtime: {selected}", *role_lines]) + "\n"
+    reviewer_line = "test run" if loop_name == "_test_loop" else "run"
+    assert capsys.readouterr().out == "\n".join(
+        [f"Agent runtime: {selected}", *role_lines, f"Task reviewer: {reviewer_line}", "Plan review iterations: 3"]
+    ) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# The reviewer choice at the composition root and the run's printed choices
+# ---------------------------------------------------------------------------
+
+
+def _capture_loop_mode(monkeypatch, project_dir):
+    captured = {}
+    monkeypatch.setattr(main_module, "_make_runtime", lambda c, p: (FakeAgentBackend(), lambda: None))
+    monkeypatch.setattr(
+        main_module, "_run_dynamic_loop",
+        lambda project_dir, roadmap_path, config, process_fn, *, mode, usage_check: captured.update(mode=mode),
+    )
+    _write_loop_roadmaps(project_dir)
+    return captured
+
+
+@pytest.mark.parametrize("reviewer,kind", [("run", REVIEW_VERIFY), ("head", HEAD_VERIFY)])
+def test_implement_loop_mode_carries_the_kind_the_setting_names(tmp_path, monkeypatch, reviewer, kind):
+    captured = _capture_loop_mode(monkeypatch, tmp_path)
+    config = dataclasses.replace(_flow_config(), task_reviewer=reviewer)
+
+    main_module._implement_loop(tmp_path, config)
+
+    assert captured["mode"].verify is kind
+
+
+def test_implement_loop_reads_task_reviewer_from_the_overlay(tmp_path, monkeypatch):
+    """The setting reaches the kind through the merge: an overlay 'head' selects the head's kind."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    captured = _capture_loop_mode(monkeypatch, project_dir)
+    _write_config(tmp_path, monkeypatch)
+    _write_override(project_dir, {"task_reviewer": "head"})
+    config = load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
+
+    main_module._implement_loop(project_dir, config)
+
+    assert config.task_reviewer == "head"
+    assert captured["mode"].verify is HEAD_VERIFY
+
+
+def test_test_loop_mode_carries_the_test_run_when_the_setting_says_head(tmp_path, monkeypatch):
+    captured = _capture_loop_mode(monkeypatch, tmp_path)
+    config = dataclasses.replace(_flow_config(), task_reviewer="head")
+
+    main_module._test_loop(tmp_path, config)
+
+    assert captured["mode"].verify is TEST_RUN_VERIFY
+
+
+@pytest.mark.parametrize("loop_name,setting,reviewer_line", [
+    ("_implement_loop", None, "run"),
+    ("_implement_loop", "head", "head"),
+    ("_test_loop", "head", "test run"),
+])
+@pytest.mark.parametrize("plan_review_iterations,expected_budget", [(None, 3), (0, 0), (5, 5)])
+def test_loops_print_reviewer_and_budget_after_the_agent_lines(
+    tmp_path, monkeypatch, capsys, loop_name, setting, reviewer_line, plan_review_iterations, expected_budget,
+):
+    _capture_loop_mode(monkeypatch, tmp_path)
+    config = _flow_config()
+    config.plan_review_iterations = plan_review_iterations
+    if setting is not None:
+        config.task_reviewer = setting
+
+    getattr(main_module, loop_name)(tmp_path, config)
+
+    assert capsys.readouterr().out == (
+        f"Task reviewer: {reviewer_line}\nPlan review iterations: {expected_budget}\n"
+    )
+
+
+@pytest.mark.parametrize("value", ["universe", None, "", "RUN", "Head"])
+def test_task_reviewer_outside_the_names_exits_naming_the_supplying_file(tmp_path, monkeypatch, value):
+    base_path = _write_config(tmp_path, monkeypatch)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    overlay_path = _write_override(project_dir, {"task_reviewer": value})
+
+    with pytest.raises(SystemExit) as exc:
+        load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
+
+    message = str(exc.value)
+    assert "task_reviewer" in message
+    assert repr(value) in message
+    assert str(overlay_path) in message
+    assert str(base_path) not in message
+
+
+def test_task_reviewer_outside_names_in_base_exits_naming_base(tmp_path, monkeypatch):
+    base_path = _write_config(tmp_path, monkeypatch, {"task_reviewer": "universe"})
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    overlay_path = _write_override(project_dir, {"max_iterations": 4})
+
+    with pytest.raises(SystemExit) as exc:
+        load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
+
+    message = str(exc.value)
+    assert "task_reviewer" in message
+    assert "universe" in message
+    assert str(base_path) in message
+    assert str(overlay_path) not in message
+
+
+def test_absent_task_reviewer_in_base_and_overlay_reads_run(tmp_path, monkeypatch):
+    """A project that sets nothing runs with the run's reviewer: the absent default is 'run'."""
+    _write_config(tmp_path, monkeypatch)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_override(project_dir, {"max_iterations": 4})
+
+    config = load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
+
+    assert config.task_reviewer == "run"
+
+
+@pytest.mark.parametrize("value", [["run"], {"reviewer": "run"}])
+def test_non_string_task_reviewer_exits_with_the_diagnostic(tmp_path, monkeypatch, value):
+    """A list or object value is a diagnostic like any other bad value, not a traceback."""
+    base_path = _write_config(tmp_path, monkeypatch)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    overlay_path = _write_override(project_dir, {"task_reviewer": value})
+
+    with pytest.raises(SystemExit) as exc:
+        load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
+
+    message = str(exc.value)
+    assert "task_reviewer" in message
+    assert repr(value) in message
+    assert str(overlay_path) in message
+    assert str(base_path) not in message
 
 
 @pytest.mark.parametrize("selected", ["claude", "codex"])
@@ -1744,7 +1883,7 @@ def test_mode_assembly_binds_merged_config(tmp_path, monkeypatch, loop_name, sel
         "runtime": selected, "usage_threshold_5h": 61, "usage_threshold_weekly": 72,
     }))
     monkeypatch.setenv("ORCHESTRATOR_CONFIG", str(base_path))
-    config = load_config(tmp_path)
+    config = load_config(tmp_path, task_reviewers=main_module.TASK_REVIEWERS)
     config.roadmap_path = None
     calls = []
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", (lambda agents=None: FakeAgentBackend()) if selected == "claude" else _unexpected_runtime)
@@ -1958,6 +2097,153 @@ def test_process_task_live_test_run_exhaustion_is_a_work_failure(tmp_path, monke
 
     plan_path = _artifact_dir(tmp_path, TEST_MODE, "plans") / f"{DMS_SEQ}-{DMS_SLUG}.md"
     assert _read_sessions(plan_path)["step"] == "test_run_failed:3"
+
+
+# ---------------------------------------------------------------------------
+# The plan-review budget bounds the flow and resume
+# ---------------------------------------------------------------------------
+
+
+def test_process_task_budget_zero_goes_from_planner_to_implementer_without_plan_review(tmp_path, monkeypatch):
+    """At a budget of 0 the planner's plan goes straight to the implementer: no review call, no plan-review file."""
+    _neutralize_side_effects(monkeypatch)
+    prd, rv, plan_path = _dms_dirs(tmp_path)
+    backend = _passing_backend()
+    config = _flow_config()
+    config.plan_review_iterations = 0
+
+    process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+
+    assert [c.role for c in backend.calls] == [
+        AgentRole.PLANNER_REVIEWER, AgentRole.IMPLEMENTER, AgentRole.PLANNER_REVIEWER,
+    ]
+    assert list(prd.glob(f"{DMS_SEQ}-{DMS_SLUG}-plan-review-*.md")) == []
+    assert _read_sessions(plan_path)["step"] == "done"
+
+
+def test_process_task_planned_1_at_budget_zero_resumes_into_implementer_without_halt(tmp_path, monkeypatch):
+    """A record at planned:1 passes its check at a budget of 0 and meets the empty plan-review loop."""
+    _neutralize_side_effects(monkeypatch)
+    prd, rv, plan_path = _dms_dirs(tmp_path)
+    plan_path.write_text("# Plan content")
+    plan_path.with_suffix(".json").write_text(json.dumps({"step": "planned:1"}))
+    backend = _passing_backend()
+    config = _flow_config()
+    config.plan_review_iterations = 0
+
+    process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+
+    assert backend.calls[0].role is AgentRole.IMPLEMENTER
+    assert AgentRole.PLAN_REVIEWER not in [c.role for c in backend.calls]
+    assert list(prd.glob(f"{DMS_SEQ}-{DMS_SLUG}-plan-review-*.md")) == []
+    assert _read_sessions(plan_path)["step"] == "done"
+
+
+def test_process_task_budget_above_max_iterations_runs_that_many_reviews_before_the_stop(tmp_path, monkeypatch):
+    """A budget above the iteration limit is not cut by a check: every review runs, then the plan stop fires."""
+    _neutralize_side_effects(monkeypatch)
+    backend = _passing_backend(plan_review_passes=False)
+    config = _flow_config()
+    config.plan_review_iterations = 5
+
+    with pytest.raises(PipelineStopError):
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+
+    reviews = [c for c in backend.calls if c.role is AgentRole.PLAN_REVIEWER]
+    assert len(reviews) == 5
+    assert f"{DMS_SEQ}-{DMS_SLUG}-plan-review-5.md" in reviews[-1].prompt
+
+
+@pytest.mark.parametrize("raw,setting,label,attempt,named_setting,value", [
+    ("planning:2", 0, "planning:2", 2, "plan_review_iterations", 0),
+    ("plan_review_failed:1", 0, "plan", 2, "plan_review_iterations", 0),
+    ("planned:2", 1, "planned:2", 2, "plan_review_iterations", 1),
+    ("plan_review_failed:1", 1, "plan", 2, "plan_review_iterations", 1),
+    ("plan_review_failed:2", 2, "plan", 3, "plan_review_iterations", 2),
+    ("implemented:5", 2, "implemented:5", 5, "max_iterations", 3),
+    ("planning:4", None, "planning:4", 4, "max_iterations", 3),
+    ("planned:4", None, "planned:4", 4, "max_iterations", 3),
+    ("plan_review_failed:3", None, "plan", 4, "max_iterations", 3),
+    ("implemented:5", None, "implemented:5", 5, "max_iterations", 3),
+])
+def test_detect_halt_names_the_setting_that_gives_the_bound(tmp_path, raw, setting, label, attempt, named_setting, value):
+    """The halt names the plan-review setting for the plan family and the iteration limit for the rest."""
+    prd, rv, plan_path = _dms_dirs(tmp_path)
+    _seed_sidecar(plan_path, raw)
+
+    with pytest.raises(HaltError) as exc:
+        _detect_step(
+            DMS_SEQ, DMS_SLUG, plan_path, prd, rv,
+            REVIEW_VERIFY, max_iterations=3, runtime="claude",
+            plan_review_iterations=setting,
+        )
+
+    assert str(exc.value) == (
+        f"Resume exceeds the attempt budget\n"
+        f"{label} attempt {attempt} exceeds {named_setting} ({value})\n"
+        f"Raise {named_setting} in orchestrator.json to continue."
+    )
+
+
+def test_process_task_resume_plan_review_failed_above_max_iterations_revises_within_budget(tmp_path, monkeypatch):
+    """A failed review past the iteration limit but within the plan-review budget resumes its revision."""
+    _neutralize_side_effects(monkeypatch)
+    prd, rv, plan_path = _dms_dirs(tmp_path)
+    plan_path.write_text("# Plan content")
+    plan_path.with_suffix(".json").write_text(json.dumps({"step": "plan_review_failed:4"}))
+    _failing_plan_reviews(prd, (4,))
+    backend = _passing_backend()
+    config = _flow_config()
+    config.max_iterations = 3
+    config.plan_review_iterations = 6
+
+    process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+
+    revision, review = backend.calls[0], backend.calls[1]
+    assert revision.role is AgentRole.PLANNER_REVIEWER
+    assert f"{DMS_SEQ}-{DMS_SLUG}-plan-review-4.md" in revision.prompt
+    assert review.role is AgentRole.PLAN_REVIEWER
+    assert f"{DMS_SEQ}-{DMS_SLUG}-plan-review-5.md" in review.prompt
+    assert _read_sessions(plan_path)["step"] == "done"
+
+
+def test_process_task_resume_plan_review_failed_past_budget_halts_naming_the_budget_setting(tmp_path, monkeypatch):
+    """A failed review past the plan-review budget but within the iteration limit halts naming the setting."""
+    _neutralize_side_effects(monkeypatch)
+    prd, rv, plan_path = _dms_dirs(tmp_path)
+    plan_path.write_text("# Plan content")
+    plan_path.with_suffix(".json").write_text(json.dumps({"step": "plan_review_failed:4"}))
+    _failing_plan_reviews(prd, (4,))
+    backend = FakeAgentBackend()
+    config = _flow_config()
+    config.max_iterations = 5
+    config.plan_review_iterations = 2
+
+    with pytest.raises(HaltError) as exc:
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+
+    assert str(exc.value) == (
+        "Resume exceeds the attempt budget\n"
+        "plan_review_failed:4 attempt 4 exceeds plan_review_iterations (2)\n"
+        "Raise plan_review_iterations in orchestrator.json to continue."
+    )
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize("plan_review_iterations", [1, 2])
+def test_process_task_failing_reviews_keep_the_implement_cycle_at_max_iterations(
+    tmp_path, monkeypatch, plan_review_iterations,
+):
+    """A non-zero plan-review budget never cuts the implement and verify cycle."""
+    _neutralize_side_effects(monkeypatch)
+    backend = _passing_backend(code_review_passes=False)
+    config = _flow_config()
+    config.plan_review_iterations = plan_review_iterations
+
+    with pytest.raises(PipelineStopError):
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+
+    assert [c.role for c in backend.calls].count(AgentRole.IMPLEMENTER) == config.max_iterations
 
 
 @pytest.mark.parametrize("suffix", [".md", ".json"])
@@ -2321,7 +2607,7 @@ def completion_env(tmp_path, monkeypatch):
         mark_done(project_dir / ".ai-factory" / mode.roadmap_relpath, task)
 
     monkeypatch.setattr(main_module, "_with_caffeinate", without_sleep_prevention)
-    monkeypatch.setattr(main_module, "load_config", lambda project_dir: env.config)
+    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None, *, task_reviewers=None: env.config)
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", constructor)
     monkeypatch.setattr(main_module, "CodexAgentBackend", constructor)
     monkeypatch.setattr(main_module, "_check_usage_limits", lambda *a: events.append("quota"))
@@ -2454,7 +2740,7 @@ def test_cli_resets_exhaustion_before_startup_failure(completion_env, monkeypatc
     if failure == "config":
         error = SystemExit(9)
 
-        def fail_config(project_dir):
+        def fail_config(project_dir=None, *, task_reviewers=None):
             assert main_module.state.queue_exhausted is False
             raise error
 

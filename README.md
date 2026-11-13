@@ -26,41 +26,6 @@ cp orchestrator.json.example orchestrator.json
 
 `orchestrator.json` is the local configuration, one per developer, and it can hold Telegram credentials, so it stays out of version control. The `runtime` key selects Claude or Codex, `roadmap_path` selects which roadmap to run (empty means the default `ROADMAP.md`), and the thresholds bound the usage a run may spend. Any key can be overridden per project in `<project>/.ai-factory/orchestrator.json`. Every key and its default are in the [configuration reference](docs/reference/configuration.md).
 
-## Context-watch hooks
-
-The [context watch](docs/features/context-watch.md) runs from the harnesses' own end-of-turn hooks, in the background; no process stays alive for it. Set `architect_roots` and `context_windows` in `orchestrator.json` (see the [configuration reference](docs/reference/configuration.md)), then add the hooks to each harness's user configuration. For Claude Code, in `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "Stop": [
-      { "hooks": [ { "type": "command", "command": "/path/to/orchestrator/.venv/bin/orchestrator-watch --runtime claude", "async": true } ] }
-    ],
-    "SubagentStop": [
-      { "hooks": [ { "type": "command", "command": "/path/to/orchestrator/.venv/bin/orchestrator-watch --runtime claude", "async": true } ] }
-    ]
-  }
-}
-```
-
-and for Codex, in `~/.codex/config.toml`:
-
-```toml
-[[hooks.Stop]]
-[[hooks.Stop.hooks]]
-type = "command"
-command = "/path/to/orchestrator/.venv/bin/orchestrator-watch --runtime codex"
-async = true
-
-[[hooks.SubagentStop]]
-[[hooks.SubagentStop.hooks]]
-type = "command"
-command = "/path/to/orchestrator/.venv/bin/orchestrator-watch --runtime codex"
-async = true
-```
-
-`/path/to/orchestrator` is this checkout, and an installed console script is addressed as `/path/to/orchestrator/.venv/bin/<script>`.
-
 ## Modes
 
 | Command | What it does |
@@ -83,10 +48,6 @@ Start with [Workflow](docs/workflow.md), the working pattern from filling a road
 | [Usage limits](docs/features/usage-limits.md) | Session and weekly usage thresholds |
 | [Resume](docs/features/resume.md) | Continuing after an interruption |
 | [Escalation](docs/features/escalation.md) | When an agent stops the run for a decision outside its authority |
-| [Completion waiter](docs/features/completion-launcher.md) | A detached run's completion delivered to the agent that started it, with external logs and one run per project |
-| [Courier](docs/features/courier.md) | The one peer send: finding an agent's address and dispatching by its runtime |
-| [Context watch](docs/features/context-watch.md) | Watching agents' context fill and warning when a snapshot is due |
-| [Blocker notification](docs/features/head-notification.md) | An agent that stops on a blocker in its own tasks tells the person through the operator notifications |
 | [Outcomes](docs/concepts/outcomes.md) | Success, failure, halt and escalation |
 | [Fault handling](docs/concepts/fault-handling.md) | Telling a verdict from a fault, and the known faults |
 | [Non-convergence](docs/concepts/non-convergence.md) | Reading a stalled review loop |

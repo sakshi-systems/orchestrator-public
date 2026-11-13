@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
-from .errors import EscalationError, MissingArtifactError
+from .errors import EscalationError, MissingArtifactError, PipelineStopError
 from .ports import AgentBackendProtocol, AgentRole, VerifierProtocol, VerifyKind
-from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _write_session
+from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_sessions, _write_session
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -57,6 +59,75 @@ TEST_RUN_VERIFY = VerifyKind(
     fail_line_label="Tests failed",
     max_iterations_message="Test failed\n\nLast run: {path}\n\n{content}",
     make_verifier=_test_run_verifier,
+)
+
+
+class HeadVerifier:
+    """The head's stand-in verdict: the implementer's turn must leave the project changed outside .ai-factory/.
+
+    The check is a content identity of the work tree, taken when the turn begins and compared when
+    the turn ends; a turn that leaves it equal fails the implement step by raising, so the record
+    stands at the boundary before the implementer and a later run calls the implementer again.
+    """
+
+    def __init__(self, project_dir: Path) -> None:
+        self.project_dir = project_dir
+        self._recorded_tree: str | None = None
+        self._recorded_step: str | None = None
+
+    def begin_turn(self, plan_path: Path) -> None:
+        """Record the work tree's identity outside .ai-factory/ and the sidecar step as it stands."""
+        self._recorded_tree = self._tree_identity()
+        self._recorded_step = _read_sessions(plan_path).get("step")
+
+    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None) -> bool:
+        """Pass when the turn changed the tree; on no change restore the boundary and fail the implement step."""
+        if self._recorded_tree is None or self._tree_identity() != self._recorded_tree:
+            return True
+        if self._recorded_step is not None:
+            _write_session(plan_path, "step", self._recorded_step)
+        raise PipelineStopError(
+            "Implement failed\n\n"
+            "The implementer's turn left the project unchanged outside .ai-factory/\n\n"
+            f"Plan: {plan_path}"
+        )
+
+    def _tree_identity(self) -> str:
+        """Return a tree id over a temporary index holding the work tree outside .ai-factory/.
+
+        The index file lives in a temporary directory outside the work tree and is removed with it,
+        so it can never land in a commit, and the repository's real index is left as it was.
+        Ignored files and .ai-factory/ are invisible to the identity by design.
+        """
+        with tempfile.TemporaryDirectory(prefix="head-verify-index-") as tmp:
+            env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+            subprocess.run(
+                ["git", "add", "-A", "--", ".", ":(exclude).ai-factory"],
+                cwd=str(self.project_dir), env=env, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            tree = subprocess.run(
+                ["git", "write-tree"], cwd=str(self.project_dir), env=env, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+            return tree.stdout.strip()
+
+
+def _head_verifier(planner_reviewer: VerifierProtocol, project_dir: Path) -> VerifierProtocol:
+    return HeadVerifier(project_dir)
+
+
+HEAD_VERIFY = VerifyKind(
+    step="head",
+    fail_tag="head_failed:",
+    output_dirname="reviews",
+    output_suffix="-review-{n}.md",
+    pass_signal=None,
+    running_header="CHECKING THE PROJECT",
+    pass_line_label="PROJECT CHANGED",
+    fail_line_label="The implementer changed nothing",
+    max_iterations_message="Implement failed\n\nThe implementer's turn left the project unchanged outside .ai-factory/",
+    make_verifier=_head_verifier,
 )
 
 
@@ -164,6 +235,9 @@ class PlannerReviewer:
 
         return _has_signal(review_text, REVIEW_VERIFY.pass_signal)
 
+    def begin_turn(self, plan_path: Path) -> None:
+        """No-op: the reviewer's verdict needs no state from before the turn."""
+
     def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None) -> bool:
         return self.review(plan_path, out_path, prev_review_path=prev_out_path)
 
@@ -229,8 +303,8 @@ class Implementer:
         self.session_id: str | None = None
 
     def implement(self, plan_path: Path, feedback_path: Path | None = None, roadmap_path: Path | None = None, line_number: int | None = None) -> None:
-        if self.session_id:
-            # Continuing — apply the review feedback
+        if self.session_id and feedback_path is not None:
+            # Continuing with feedback — apply the fixes
             prompt = (
                 f"Review feedback has been written to {feedback_path}. "
                 f"Read it and apply the fixes."
@@ -268,6 +342,9 @@ class TestRunner:
 
     def __init__(self, project_dir: Path) -> None:
         self.project_dir = project_dir
+
+    def begin_turn(self, plan_path: Path) -> None:
+        """No-op: the test run reads only the plan and the tree at its own moment."""
 
     def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None) -> bool:
         """Extract test command from plan, run it, write output. Returns True if exit code 0."""

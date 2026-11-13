@@ -45,10 +45,10 @@ The `:N` suffix is an ASCII decimal integer greater than zero. Leading zeroes ma
 | `step` value | Meaning | What resume does |
 |---|---|---|
 | `planning:N` | Planner invocation for round N is pending | Repeats planning round N, regardless of existing artifacts |
-| `planned:N` | Round N's plan is ready; no verdict yet | Reviews the plan at attempt N |
+| `planned:N` | Round N's plan is ready; no verdict yet | Reviews the plan at attempt N; with plan review off, starts implementation at iteration 1 |
 | `plan_review_failed:N` | Round N's plan review failed | Plans round N + 1 |
 | `plan_reviewed` | The plan passed review | Starts implementation at iteration 1 |
-| `implemented:N` | Round N's code is ready; no verdict yet | Runs verification at iteration N |
+| `implemented:N` | Round N's code is ready; no verdict yet | Runs the verification of the run's kind at iteration N; where the head reviews, closes the task as [Closing a record](#closing-a-record) says |
 | `review_failed:N` | Round N's code review failed | Implements iteration N + 1 |
 | `test_run_failed:N` | Round N's test run failed in test mode | Implements iteration N + 1 |
 | `escalated` | An unresolved decision stops the task | Stops immediately without restoring session identities |
@@ -56,7 +56,7 @@ The `:N` suffix is an ASCII decimal integer greater than zero. Leading zeroes ma
 
 ### Attempt limits
 
-Explicit state and the resolved next call are validated against `max_iterations` before role invocation or progress rewrite. This covers initial and revised planning, plan review, implementation and verification. An over-budget indexed state cannot evade the check through artifact fallback; malformed indexed counters halt rather than falling back.
+Explicit state and the resolved next call are validated against their budget before role invocation or progress rewrite. This covers initial and revised planning, plan review, implementation and verification. The budget is `max_iterations`, except for the plan family, planning rounds and plan review, where `plan_review_iterations` is set: it bounds them, planning always allowed its first round, so that a record at `planned:1` meets the empty plan-review loop at `0`; a halt names the setting whose budget was passed and that setting's own value. An over-budget indexed state cannot evade the check through artifact fallback; malformed indexed counters halt rather than falling back.
 
 A resume past the configured attempt budget is the existing [halt](../concepts/fault-handling.md#the-known-faults). A live review cycle that spends its budget without a pass remains a work failure under [Outcomes](../concepts/outcomes.md). Terminal escalation and done retain their meanings.
 
@@ -81,14 +81,14 @@ Invalid record shape or a malformed owner does not constitute a valid terminal r
 
 ## Legacy adoption and artifact fallback
 
-Valid legacy Markdown may infer its dispatch only under Claude. An absent sidecar, absent step or unknown string step permits inference from plan reviews on disk. With no plan review, the plan is reviewed at attempt 1. When the latest plan review does not pass, planning continues at the next attempt. When it passes, implementation starts at iteration 1. [Completion signals](../pipeline.md#completion-signals) govern those verdicts.
+Valid legacy Markdown may infer its dispatch only under Claude. An absent sidecar, absent step or unknown string step permits inference from plan reviews on disk. With no plan review, the plan is reviewed at attempt 1, or, with plan review off, implementation starts at iteration 1. When the latest plan review does not pass, planning continues at the next attempt. When it passes, implementation starts at iteration 1. [Completion signals](../pipeline.md#completion-signals) govern those verdicts.
 
-Compatibility, known identity values, explicit counters and the resolved dispatch are checked first. The orchestrator then atomically records ownership with the inferred explicit boundary before invocation: `planned:N` for plan review, `plan_reviewed` for implementation, or `planning:N` for planning. No intermediate owner-only record is written.
+Compatibility, known identity values, explicit counters and the resolved dispatch are checked first. The orchestrator then atomically records ownership with the inferred explicit boundary before invocation: `planned:N` for plan review, `plan_reviewed` for implementation (`planned:1` with plan review off, since no review passed), or `planning:N` for planning. No intermediate owner-only record is written.
 
 A tagged record with a missing or unknown step halts. A non-string step or malformed counter on a recognized indexed step also halts. A recognized completed boundary whose referenced review is missing may retain artifact inference when the plan exists, including after deliberate review removal. Pending planning never uses this fallback. Completed nonterminal progress without its plan cannot be inferred into a fresh task.
 
 ## Closing a record
 
-Normal successful verification marks the roadmap task done, records `done`, then commits through the existing pipeline.
+Normal successful verification marks the roadmap task done, records `done`, then commits through the existing pipeline. Where the head reviews, a finished implementation takes that place: once the project is found changed outside `.ai-factory/` against its tree as it stood when the implementer's turn began, the task closes the same way; otherwise the implement step fails and the run stops on the task, with its record left at the boundary before the implementer, so a later run calls the implementer again, continuing its session with the plan. A resume at `implemented:N` runs in a new process with no such tree to compare against, so it closes the task unchecked.
 
 Only a successful planner return with no plan takes the no-plan skip path. It records `done` before marking the roadmap task skipped, so a later task with the same title cannot adopt that JSON-only record. A crash between those writes can leave the task unchecked; the next run retries that task with a fresh record. Skip retains its existing commit behavior and introduces no separate terminal token.
