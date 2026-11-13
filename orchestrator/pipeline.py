@@ -12,8 +12,8 @@ from .config import OrchestratorConfig
 from .errors import EscalationError, PipelineStopError
 from .notify import Outcome, report
 from .ports import AgentBackendProtocol, VerifyKind
-from .protocol import PLAN_REVIEW_PASS, _has_signal, _read_sessions, _write_session, _write_sessions
-from .resume import _check_attempt, _detect_step, _interpret_step, _validate_sidecar_step
+from .protocol import _read_sessions, _write_session, _write_sessions
+from .resume import _attempt_budget, _check_attempt, _detect_step, _interpret_step, _validate_sidecar_step, plan_review_budget
 from .roadmap import mark_done, mark_skipped, parse_roadmap
 from .runtime import _run_summary
 from . import state
@@ -113,6 +113,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     step, counter, plan_path = _detect_step(
         seq, task.slug, plan_path, plan_reviews_dir, output_dir, mode.verify,
         max_iterations=max_iterations, runtime=config.runtime,
+        plan_review_iterations=config.plan_review_iterations,
     )
     seq = plan_path.stem.split("-", 1)[0]
 
@@ -126,7 +127,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     if step == "escalated":
         raise EscalationError(sessions.get("escalation", "(no escalation detail recorded)"))
 
-    _check_attempt(step, counter, max_iterations)
+    _check_attempt(step, counter, *_attempt_budget(step, max_iterations, config.plan_review_iterations))
 
     raw_boundary = sessions.get("step", "")
     valid_boundary = _interpret_step(raw_boundary, mode.verify) is not None and _validate_sidecar_step(
@@ -172,7 +173,8 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
 
     # Step 1.5: Iterative plan review
     if step in ("plan", "plan_review"):
-        for attempt in range(counter, max_iterations + 1):
+        budget = plan_review_budget(max_iterations, config.plan_review_iterations)
+        for attempt in range(counter, budget + 1):
             print(f"\n>>> REVIEWING PLAN (attempt {attempt})...")
             plan_reviewer = PlanReviewer(project_dir, backend)
             plan_review_path = plan_reviews_dir / f"{seq}-{task.slug}-plan-review-{attempt}.md"
@@ -184,13 +186,13 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
                 _write_session(plan_path, "step", "plan_reviewed")
                 break
 
-            if attempt == max_iterations:
+            if attempt == budget:
                 raise PipelineStopError(
                     f"Plan failed\n\n"
                     f"Last review: {plan_review_path}\n\n{plan_review_path.read_text()}"
                 )
 
-            _check_attempt("plan", attempt + 1, max_iterations)
+            _check_attempt("plan", attempt + 1, *_attempt_budget("plan", max_iterations, config.plan_review_iterations))
             print(">>> Plan has issues — revising plan...")
             _write_session(plan_path, "step", f"plan_review_failed:{attempt}")
             _record_planning(plan_path, config.runtime, attempt + 1, planner_reviewer.session_id)
@@ -206,13 +208,6 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
                 return planner_reviewer.session_id
             _write_session(plan_path, "step", f"planned:{attempt + 1}")
 
-    # Safety guard: ensure a passing plan review exists before implementing
-    _plan_review_files = sorted(plan_reviews_dir.glob(f"{seq}-{task.slug}-plan-review-*.md"))
-    if not _plan_review_files or not _has_signal(_plan_review_files[-1].read_text(), PLAN_REVIEW_PASS):
-        raise PipelineStopError(
-            f"No passing plan review found for task {seq}-{task.slug}. Cannot proceed to implementation."
-        )
-
     # Step 2-3: Implement → Verify loop
     impl_start = counter if step in ("implement", mode.verify.step) else 1
     for iteration in range(impl_start, max_iterations + 1):
@@ -222,6 +217,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         else:
             print(f"\n>>> IMPLEMENTING (iteration {iteration})...")
             feedback_path = output_dir / f"{seq}-{task.slug}{mode.verify.output_suffix.format(n=iteration - 1)}" if iteration > 1 else None
+            verifier.begin_turn(plan_path)
             implementer.implement(plan_path, feedback_path=feedback_path, roadmap_path=roadmap_path, line_number=task.line_number)
             _write_session(plan_path, "step", f"implemented:{iteration}")
             _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))

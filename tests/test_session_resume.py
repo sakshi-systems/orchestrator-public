@@ -1065,3 +1065,18 @@ def test_real_selected_markdown_with_directory_sidecar_still_halts_and_preserves
         _run(f, backend)
     assert backend.calls == []
     assert _snapshot(f) == before
+
+
+def test_plan_review_budget_zero_flows_planner_to_implementer_without_review(flow):
+    """With the plan-review budget at 0 the flow implements the plan with no review round and no plan-review file."""
+    f = flow(prefix="01")
+    f.config.plan_review_iterations = 0
+    backend = _backend(f)
+
+    _run(f, backend)
+
+    assert [call.role for call in backend.calls] == [
+        AgentRole.PLANNER_REVIEWER, AgentRole.IMPLEMENTER, AgentRole.PLANNER_REVIEWER,
+    ]
+    assert list(f.prd.glob("*-plan-review-*.md")) == []
+    assert _read_sessions(f.plan)["step"] == "done"

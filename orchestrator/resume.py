@@ -21,13 +21,38 @@ def _parse_counter(step_value: str, prefix: str) -> int:
     return int(suffix)
 
 
-def _check_attempt(label: str, attempt: int, max_iterations: int) -> None:
-    """Halt when `attempt` lies past the attempt budget."""
-    if attempt > max_iterations:
+def plan_review_budget(max_iterations: int, plan_review_iterations: int | None) -> int:
+    """Return the number of plan reviews a plan gets: the setting when set, the iteration limit otherwise."""
+    return max_iterations if plan_review_iterations is None else plan_review_iterations
+
+
+_PLAN_FAMILY_STEPS = ("plan", "plan_review")
+_PLAN_FAMILY_PREFIXES = ("planning:", "planned:", "plan_review_failed:")
+
+
+def _attempt_budget(label: str, max_iterations: int, plan_review_iterations: int | None) -> tuple[int, str, int]:
+    """Return the attempt bound for `label`, the setting that gives it and that setting's own value.
+
+    The plan family — the dispatch steps `plan` and `plan_review` and the recorded values that
+    start `planning:`, `planned:` and `plan_review_failed:` — takes the plan-review budget floored
+    at 1, so the `planned:1` record written right after planning passes its check and meets the
+    plan-review loop even at a budget of 0; for any budget of at least 1 the bound is the budget.
+    Every other label keeps the iteration limit.
+    """
+    if label in _PLAN_FAMILY_STEPS or label.startswith(_PLAN_FAMILY_PREFIXES):
+        if plan_review_iterations is not None:
+            return (max(plan_review_budget(max_iterations, plan_review_iterations), 1), "plan_review_iterations", plan_review_iterations)
+        return (max(max_iterations, 1), "max_iterations", max_iterations)
+    return (max_iterations, "max_iterations", max_iterations)
+
+
+def _check_attempt(label: str, attempt: int, bound: int, setting: str, value: int) -> None:
+    """Halt when `attempt` lies past the attempt budget that `setting` names."""
+    if attempt > bound:
         raise HaltError(
             f"Resume exceeds the attempt budget\n"
-            f"{label} attempt {attempt} exceeds max_iterations ({max_iterations})\n"
-            f"Raise max_iterations in orchestrator.json to continue."
+            f"{label} attempt {attempt} exceeds {setting} ({value})\n"
+            f"Raise {setting} in orchestrator.json to continue."
         )
 
 
@@ -116,13 +141,13 @@ def _validate_sidecar_step(
 def _detect_step(
     seq: str, slug: str,
     plan_path: Path, plan_reviews_dir: Path, output_dir: Path,
-    verify: VerifyKind, *, max_iterations: int, runtime: str,
+    verify: VerifyKind, *, max_iterations: int, runtime: str, plan_review_iterations: int | None = None,
 ) -> tuple[str, int, Path]:
     """Detect where a previous run stopped and return (step, counter, plan_path) to resume from.
 
     Steps: "plan", "plan_review", "implement", <verify.step>, "escalated".
     Counter is the attempt/iteration number to use next.
-    A recognized explicit step is checked against `max_iterations` (both its own counter and the
+    A recognized explicit step is checked against its attempt budget (both its own counter and the
     next attempt) before artifact validation can discard it, so a stale marker cannot erase an
     exhausted budget; an over-budget one halts. Counters inferred from artifacts are checked by the caller.
     The returned plan_path is the canonical path discovered from the lowest-seq file matching
@@ -171,8 +196,8 @@ def _detect_step(
     if interpreted is not None:
         dispatch_step, next_attempt, explicit_counter = interpreted
         if explicit_counter is not None:
-            _check_attempt(raw, explicit_counter, max_iterations)
-        _check_attempt(dispatch_step, next_attempt, max_iterations)
+            _check_attempt(raw, explicit_counter, *_attempt_budget(raw, max_iterations, plan_review_iterations))
+        _check_attempt(dispatch_step, next_attempt, *_attempt_budget(dispatch_step, max_iterations, plan_review_iterations))
         if raw.startswith("planning:"):
             return (dispatch_step, next_attempt, plan_path)
     if not plan_path.exists():

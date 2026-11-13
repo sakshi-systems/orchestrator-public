@@ -25,21 +25,20 @@ ORCHESTRATOR_CONFIG=/path/to/my-config.json uv run orchestrator implement /path/
 
 | Key | Default | Meaning |
 |---|---|---|
-| `max_iterations` | `3` | The iteration limit for every cycle — plan review, code review, and test run. See [pipeline.md](../pipeline.md). |
+| `max_iterations` | `3` | The iteration limit for code review and the test run, and for plan review unless `plan_review_iterations` is set — a positive integer, checked at startup with a diagnostic that names the file that supplies it. See [pipeline.md](../pipeline.md). |
+| `plan_review_iterations` | absent | The number of plan reviews a plan gets, a non-negative integer. Absent, plan review takes `max_iterations`; `0` turns plan review off. See [The plan-review budget](../pipeline.md#the-plan-review-budget). |
+| `task_reviewer` | `"run"` | Who reviews a task in implement mode: `"run"`, the run's reviewer, or `"head"`, the head that ordered the task, so a task ends with the implementer's turn. Test mode's real test run is unaffected. See [Who reviews a task](../pipeline.md#who-reviews-a-task). |
 | `usage_threshold_5h` | `90` | Threshold for a reported five-hour window of the selected runtime. See [usage-limits.md](../features/usage-limits.md). |
 | `usage_threshold_weekly` | `95` | Threshold for a reported weekly window of the selected runtime. See [usage-limits.md](../features/usage-limits.md). |
 | `enable_phase_sessions` | `false` | Whether the `PlannerReviewer` session carries over between tasks within a phase. See [phase-sessions.md](../features/phase-sessions.md). |
 | `roadmap_path` | absent | Which roadmap the orchestrator reads. See [named-roadmaps.md](../features/named-roadmaps.md). |
 | `runtime` | `claude` | Optional runtime selector: exactly `claude` or `codex`. See [Runtime selection](../features/agent-runtime.md#runtime-selection). |
-| `architect_roots` | `[]` | Setting of the context watch: the list of repository paths whose architect folders it reads, under [Finding the head](../features/context-watch.md#finding-the-head). An empty list names no head. |
-| `context_windows` | `{}` | Context-watch setting: an object mapping a model name to its context window in tokens, for sessions whose runtime record states none. See [Context watch](../features/context-watch.md#reading-the-fill). |
 | `claude_agents` | per role, below | Model and effort of each role when the runtime is `claude`: an object keyed by role. See [Agent defaults](#agent-defaults). |
 | `codex_agents` | per role, below | Model and effort of each role when the runtime is `codex`: an object keyed by role. See [Agent defaults](#agent-defaults). |
-| `snapshot_boundary` | `0.8` | Context-watch setting: the fraction of a session's window at which the watch warns a head or a hand, one boundary for both. A number above 0 and at most 1. See [The warning](context-watch.md#the-warning). |
+
+`plan_review_iterations` and `task_reviewer` are validated after the merge too. Only an absent key takes its default; for `plan_review_iterations` a negative number, a boolean, a non-integer, a string or `null` is a configuration error, and for `task_reviewer` anything but `"run"` or `"head"` is, each naming the file that supplies the value. At its start the run prints, after the agent lines, `Task reviewer: <run | head | test run>` and `Plan review iterations: <the effective number>`, the setting when `plan_review_iterations` is set and `max_iterations` otherwise; a run on the defaults prints them too.
 
 `runtime` is validated after the existing base/overlay merge. Only an absent key uses its default; an empty string, `null`, a non-string or any other value is a configuration error. The visible startup label is `Agent runtime:`. Under it the run prints one line per role, in the order `planner_reviewer`, `plan_reviewer`, `implementer`, of the form `<role key>: <model> (<effort>)` with two leading spaces, giving the values the run uses.
-
-The machine-wide settings, `architect_roots`, `context_windows` and `snapshot_boundary`, belong to the machine rather than to a project, so they are read from the global file only, and a project overlay's value for them is not consulted. Each is validated when the context watch starts: `architect_roots` is a list of paths, `context_windows` an object of positive integers and `snapshot_boundary` a number above 0 and at most 1. A bad setting is a [logged](context-watch.md#the-log) fault, and the command still ends with exit status 0.
 
 ## Agent defaults
 

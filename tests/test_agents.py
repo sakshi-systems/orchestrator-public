@@ -1141,6 +1141,42 @@ def test_implementer_fixes_continue_session_with_complete_instructions(tmp_path)
     assert "Review feedback" in second.prompt
 
 
+def test_implementer_continuing_session_without_feedback_sends_plan_prompt(tmp_path):
+    backend = FakeAgentBackend()
+    impl = Implementer(tmp_path, backend)
+    plan_path = tmp_path / "01-slug.md"
+    roadmap_path = tmp_path / "roadmap.md"
+
+    impl.implement(plan_path, roadmap_path=roadmap_path, line_number=4)
+    impl.implement(plan_path, feedback_path=None, roadmap_path=roadmap_path, line_number=4)
+
+    first, second = backend.calls
+    assert second.session_id == backend.returned[0]
+    assert second.prompt == (
+        f"Roadmap: {roadmap_path} (line 5)\n"
+        f"Implement the plan at: {plan_path}"
+    )
+    assert "Review feedback" not in second.prompt
+
+
+def test_implementer_fresh_session_with_feedback_path_sends_plan_prompt(tmp_path):
+    backend = FakeAgentBackend()
+    impl = Implementer(tmp_path, backend)
+    plan_path = tmp_path / "01-slug.md"
+    roadmap_path = tmp_path / "roadmap.md"
+    feedback = tmp_path / "01-slug-review-1.md"
+
+    impl.implement(plan_path, feedback_path=feedback, roadmap_path=roadmap_path, line_number=4)
+
+    call = backend.calls[0]
+    assert call.session_id is None
+    assert call.prompt == (
+        f"Roadmap: {roadmap_path} (line 5)\n"
+        f"Implement the plan at: {plan_path}"
+    )
+    assert "Review feedback" not in call.prompt
+
+
 def test_plan_review_attempts_inherit_no_session(tmp_path):
     backend = _artifact_writing_backend()
     plan_path = tmp_path / "01-slug.md"

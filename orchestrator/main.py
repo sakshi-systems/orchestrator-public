@@ -15,15 +15,26 @@ from typing import Callable
 
 from .claude_cli import ClaudeAgentBackend
 from .codex_cli import CodexAgentBackend
+from .agents import HEAD_VERIFY, REVIEW_VERIFY
 from .config import OrchestratorConfig, load_config
 from .errors import EscalationError, HaltError, PipelineStopError
 from .layout import _artifact_subdir, _external_evidence_path, _resolve_roadmap_relpath, _tests_sibling
 from .notify import Outcome, report
 from .pipeline import IMPLEMENT_MODE, TEST_MODE, _run_dynamic_loop, process_task
 from .ports import AgentBackendProtocol
+from .resume import plan_review_budget
 from .runtime import _handle_sigint, _run_summary, _with_caffeinate
 from .usage import _check_codex_usage_limits, _check_usage_limits
 from . import state
+
+
+TASK_REVIEWERS = {"run": REVIEW_VERIFY, "head": HEAD_VERIFY}
+
+
+def _print_run_choices(config: OrchestratorConfig, reviewer: str) -> None:
+    """Print who reviews a task and the plan-review budget as lines of their own, after the agent lines."""
+    print(f"Task reviewer: {reviewer}")
+    print(f"Plan review iterations: {plan_review_budget(config.max_iterations, config.plan_review_iterations)}")
 
 
 def _make_runtime(config: OrchestratorConfig, project_dir: Path) -> tuple[AgentBackendProtocol, Callable[[], None]]:
@@ -50,6 +61,7 @@ def _test_loop(project_dir: Path, config: OrchestratorConfig) -> None:
         sys.exit(1)
     mode = TEST_MODE._replace(roadmap_relpath=relpath, artifact_subdir=_artifact_subdir(relpath))
     backend, usage_check = _make_runtime(config, project_dir)
+    _print_run_choices(config, "test run")
     _run_dynamic_loop(
         project_dir, roadmap_path, config,
         lambda m, i, sid: process_task(project_dir, m, i, config, mode, phase_session_id=sid, backend=backend),
@@ -65,8 +77,12 @@ def _implement_loop(project_dir: Path, config: OrchestratorConfig, planner_promp
     if not roadmap_path.exists():
         print(f"ERROR: No roadmap found at {roadmap_path}")
         sys.exit(1)
-    mode = IMPLEMENT_MODE._replace(planner_prompt_name=planner_prompt_name, roadmap_relpath=relpath, artifact_subdir=_artifact_subdir(relpath))
+    mode = IMPLEMENT_MODE._replace(
+        planner_prompt_name=planner_prompt_name, roadmap_relpath=relpath, artifact_subdir=_artifact_subdir(relpath),
+        verify=TASK_REVIEWERS[config.task_reviewer],
+    )
     backend, usage_check = _make_runtime(config, project_dir)
+    _print_run_choices(config, config.task_reviewer)
     _run_dynamic_loop(
         project_dir, roadmap_path, config,
         lambda m, i, sid: process_task(project_dir, m, i, config, mode, phase_session_id=sid, backend=backend),
@@ -148,7 +164,7 @@ def cli() -> None:
 
     completed_normally = False
     try:
-        config = load_config(project_dir=project_dir)
+        config = load_config(project_dir=project_dir, task_reviewers=TASK_REVIEWERS)
 
         try:
             if args.command == "test":

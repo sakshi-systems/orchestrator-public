@@ -42,10 +42,6 @@ Explicit Codex selection runs the shared CLI pipeline. The selected runtime's pr
 
 Disposable full-pipeline validation under [Execution validation](#execution-validation) precedes real Codex project queues. Execution through fallback subagent role loops does not establish native CLI acceptance.
 
-## Initiator completion
-
-Detached command completion for the head that started the run, of either runtime, follows the [completion waiter](completion-launcher.md#initiator-interface). That page owns its caller scope and the distinction from the child run's runtime selection.
-
 ## Native execution
 
 Claude executes the shared roles through its CLI adapter. The adapter owns native tool policy and its flags; a role's model and effort come from the selected runtime's block of the [agent settings](../reference/configuration.md#agent-defaults). It supplies the role instructions as the native system prompt on the initial call and uses the explicit session identity for continuation. Session creation and reuse follow [Pipeline — Agent sessions](../pipeline.md#agent-sessions).

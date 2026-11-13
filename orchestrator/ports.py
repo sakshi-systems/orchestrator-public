@@ -62,6 +62,10 @@ class AgentBackendProtocol(Protocol):
 class VerifierProtocol(Protocol):
     """Given the plan and output path, write the verify artifact and report pass or fail by its completion signal."""
 
+    def begin_turn(self, plan_path: Path) -> None:
+        """Record whatever the verifier needs about the project before an implementer's turn."""
+        ...
+
     def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None) -> bool: ...
 
 
@@ -71,7 +75,7 @@ class VerifyKind(NamedTuple):
     fail_tag: str
     output_dirname: str
     output_suffix: str  # artifact tail with an {n} placeholder, e.g. "-review-{n}.md"
-    pass_signal: str
+    pass_signal: str | None  # None: the run waits for no signal and never reads it
     running_header: str
     pass_line_label: str
     fail_line_label: str

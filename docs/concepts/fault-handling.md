@@ -92,10 +92,6 @@ Three of the four speak about the work — red, blue, and green — and one, yel
 
 **One shape, composed in one place.** What a notification looks like is a property of the outcome it reports, never of the site that raised it. Every operator notification the orchestrator sends is composed in one place — the ones that report success no less than the ones that report a fault — so a new outcome cannot introduce a new shape by accident.
 
-### Initiator completion
-
-The [completion launcher](../features/completion-launcher.md#initiator-interface) has a separate peer-completion interface. Its queued content and delivery evidence follow that feature and its [reference](../reference/completion-launcher.md), rather than the operator text/colour format above. Delivery remains attempted, and failure to deliver does not change the underlying outcome.
-
 ## Invariants
 
 1. **A transport failure is never a verdict.** However much output preceded it, a fault in the transport is evidence about the fault, not a judgment about the work.

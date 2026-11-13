@@ -30,6 +30,12 @@ The countermeasure is at the prompt level, not the loop level: starting with the
 
 The iteration limit is the price of not distinguishing the two patterns, not a criterion for telling them apart. It bounds the loss in pattern 2, without breaking anything in pattern 1. For the part of pattern 2 an agent does not recognize, as for pattern 1, there is no need to formalize an in-loop stop indicator — the classifier lives in the artifacts and is applied after the fact. The part of pattern 2 that an agent names outright does not wait for that classifier: it exits the loop live, through escalation (see [escalation.md](../features/escalation.md) for the mechanism, [outcomes.md](outcomes.md) for the outcome).
 
+## The reviewers' strictness is intended
+
+A plan review and a code review pass only when they have no findings at all, and that strictness is intended: it is not a defect of the loop, and no layer routes around it. A stop is repaired at its layer: the spec, the plan, a rollback of the sidecar and the artifacts to the repaired state, and a nit that recurs made a standing line of the spec. A stop is never repaired by loosening a pass condition, or by carrying a review's remarks to the implementer beside the plan.
+
+The reason is where each thing lies. What the implementer must do is in the task and its spec, and what a plan review or a code review holds is for whoever reviews and repairs the task, so a remark that must reach the implementer reaches it through the spec.
+
 ## What to read after a stop
 
 - **The severity trend across rounds** — dropping (pattern 1) or climbing (pattern 2).

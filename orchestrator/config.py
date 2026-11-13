@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,6 +24,8 @@ class OrchestratorConfig:
     runtime: str = "claude"
     claude_agents: dict[str, dict[str, str]] = field(default_factory=dict)
     codex_agents: dict[str, dict[str, str]] = field(default_factory=dict)
+    plan_review_iterations: int | None = None
+    task_reviewer: str = "run"
 
 
 AGENT_RUNTIMES = ("claude", "codex")
@@ -51,12 +54,13 @@ def _validate_agent_block(key: str, block: object, path: Path) -> dict[str, dict
     return block
 
 
-def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
+def load_config(project_dir: Path | None = None, *, task_reviewers: Mapping[str, object]) -> OrchestratorConfig:
     """Load and validate config from orchestrator.json in the project root (or ORCHESTRATOR_CONFIG override).
 
     When `project_dir` is given and `<project_dir>/.ai-factory/orchestrator.json` exists, its keys are
     shallow-merged onto the base config (project keys win, absent keys inherit the base value). Absence of
-    the override leaves the result byte-identical to calling this with no argument.
+    the override leaves the result byte-identical to calling this with no argument. `task_reviewers` names
+    the accepted task-reviewer spellings; the names are handed in by the caller that owns the kinds.
     """
     default = Path(__file__).parent.parent / "orchestrator.json"
     path = Path(os.environ.get("ORCHESTRATOR_CONFIG", str(default)))
@@ -91,21 +95,48 @@ def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
                 raise SystemExit(f"Config file is not valid JSON: {override_path}\nExpected a JSON object, got {type(override).__name__}")
             data.update(override)
 
+    def _supplying(key: str) -> Path:
+        """Return the path of the file that supplies `key` after the merge."""
+        return override_path if key in override else path
+
     roadmap_path = data.get("roadmap_path") or None
     if roadmap_path is not None and (Path(roadmap_path).is_absolute() or ".." in Path(roadmap_path).parts):
-        raise SystemExit(f"Invalid 'roadmap_path' in {path}: {roadmap_path!r} (must be a relative path with no '..' segments)")
+        raise SystemExit(f"Invalid 'roadmap_path' in {_supplying('roadmap_path')}: {roadmap_path!r} (must be a relative path with no '..' segments)")
 
     runtime = data["runtime"] if "runtime" in data else "claude"
     if not isinstance(runtime, str) or runtime not in AGENT_RUNTIMES:
-        raise SystemExit(f"Invalid 'runtime' in {path}: {runtime!r} (must be 'claude' or 'codex')")
+        raise SystemExit(f"Invalid 'runtime' in {_supplying('runtime')}: {runtime!r} (must be 'claude' or 'codex')")
+
+    plan_review_iterations = None
+    if "plan_review_iterations" in data:
+        value = data["plan_review_iterations"]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SystemExit(
+                f"Invalid 'plan_review_iterations' in {_supplying('plan_review_iterations')}: "
+                f"{value!r} (must be a non-negative integer)"
+            )
+        plan_review_iterations = value
+
+    task_reviewer = data.get("task_reviewer", "run")
+    if not isinstance(task_reviewer, str) or task_reviewer not in task_reviewers:
+        raise SystemExit(
+            f"Invalid 'task_reviewer' in {_supplying('task_reviewer')}: "
+            f"{task_reviewer!r} (must be {' or '.join(repr(name) for name in task_reviewers)})"
+        )
 
     agent_blocks = {}
     for key in ("claude_agents", "codex_agents"):
-        supplying_path = override_path if key in override else path
-        agent_blocks[key] = _validate_agent_block(key, data.get(key, {}), supplying_path)
+        agent_blocks[key] = _validate_agent_block(key, data.get(key, {}), _supplying(key))
+
+    max_iterations = int(data["max_iterations"])
+    if max_iterations < 1:
+        raise SystemExit(
+            f"Invalid 'max_iterations' in {_supplying('max_iterations')}: "
+            f"{max_iterations!r} (must be a positive integer)"
+        )
 
     return OrchestratorConfig(
-        max_iterations=int(data["max_iterations"]),
+        max_iterations=max_iterations,
         usage_threshold_5h=float(data["usage_threshold_5h"]),
         usage_threshold_weekly=float(data["usage_threshold_weekly"]),
         enable_phase_sessions=bool(data["enable_phase_sessions"]),
@@ -116,4 +147,6 @@ def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
         runtime=runtime,
         claude_agents=agent_blocks["claude_agents"],
         codex_agents=agent_blocks["codex_agents"],
+        plan_review_iterations=plan_review_iterations,
+        task_reviewer=task_reviewer,
     )
