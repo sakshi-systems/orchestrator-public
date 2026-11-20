@@ -6,7 +6,10 @@ import pytest
 
 from orchestrator import notify as notify_module
 from orchestrator.config import OrchestratorConfig
-from orchestrator.notify import Outcome, compose, notify, report, _WORDS, _ALERT_TYPES
+from orchestrator.notify import (Outcome, compose, notify, report,
+                                 report_review_failure, _WORDS,
+                                 _ALERT_TYPES)
+from orchestrator.reviews import ReviewFailureReason, ReviewRequest
 
 
 def _config(telegram_alerts, bot_token="t", chat_id="c") -> OrchestratorConfig:
@@ -184,3 +187,51 @@ def test_report_passes_the_pinned_alert_type_to_notify_for_every_outcome(monkeyp
         report(config, outcome, "myproject", None, "Ran for 1m 0s · 2 tasks done")
 
     assert recorded == [_ALERT_TYPES[outcome] for outcome in Outcome]
+
+
+# ---------------------------------------------------------------------------
+# A failed review's report: fixed lines, one send, gated like any stop
+# ---------------------------------------------------------------------------
+
+REVIEW_FAILURES = [
+    (ReviewFailureReason.NO_ROLE_REPORTED, "no role reported"),
+    (ReviewFailureReason.MUSAFIR_GAVE_NO_OUTPUT,
+     "the musafir gave no output"),
+    (ReviewFailureReason.STOP_CUT_THE_REVIEW, "a stop cut the review"),
+    (ReviewFailureReason.WORKSPACE_NOT_LAID,
+     "the workspace could not be laid"),
+    (ReviewFailureReason.STORAGE_FAILED,
+     "Sakshi could not write the review's files"),
+]
+
+
+def _review_request() -> ReviewRequest:
+    return ReviewRequest(repository="owner/name", number=1,
+                         head_commit="a" * 40,
+                         head_repository="owner/name")
+
+
+@pytest.mark.parametrize(("reason", "clause"), REVIEW_FAILURES)
+def test_a_failed_review_is_reported_once_with_fixed_lines(
+        sent, reason, clause):
+    report_review_failure(_config(["stop"]), _review_request(), reason)
+    assert sent == [f"\U0001f7e1 Review failed: owner/name#1\n"
+                    f"Reason: {clause}\n"
+                    f"Head commit: {'a' * 40}"]
+
+
+@pytest.mark.parametrize(("reason", "clause"), REVIEW_FAILURES)
+def test_a_failed_review_without_stop_listed_is_not_sent(
+        sent, reason, clause):
+    report_review_failure(_config(["task"]), _review_request(), reason)
+    assert sent == []
+
+
+@pytest.mark.parametrize("absent", ["token", "chat"])
+@pytest.mark.parametrize(("reason", "clause"), REVIEW_FAILURES)
+def test_a_failed_review_without_both_credentials_is_not_sent(
+        sent, reason, clause, absent):
+    config = (_config(["stop"], bot_token=None) if absent == "token"
+              else _config(["stop"], chat_id=None))
+    report_review_failure(config, _review_request(), reason)
+    assert sent == []

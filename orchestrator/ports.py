@@ -77,7 +77,7 @@ class VerifyKind(NamedTuple):
     output_suffix: str  # artifact tail with an {n} placeholder, e.g. "-review-{n}.md"
     pass_signal: str | None  # None: the run waits for no signal and never reads it
     running_header: str
-    pass_line_label: str
-    fail_line_label: str
+    pass_line: str  # template with a {path} placeholder; a line with no placeholder names no artifact
+    fail_line: str  # template with a {path} placeholder; a line with no placeholder names no artifact
     max_iterations_message: str  # template with {n}, {path}, {content} placeholders
     make_verifier: Callable[[VerifierProtocol, Path], VerifierProtocol]  # (reviewer, project_dir) -> verifier

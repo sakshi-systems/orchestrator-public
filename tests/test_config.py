@@ -472,6 +472,82 @@ def test_load_config_valid_max_iterations_overlay_supersedes_invalid_base(tmp_pa
 
 
 # ---------------------------------------------------------------------------
+# the required keys are validated on the merged value, never converted
+# ---------------------------------------------------------------------------
+
+
+def _assert_required_key_rejected(tmp_path, monkeypatch, key, value, requirement, source):
+    """The diagnostic carries the key, the value's repr, the requirement and only the supplying file."""
+    base_path = _write_config(tmp_path, monkeypatch, {} if source == "overlay" else {key: value})
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    overlay_path = _write_override(project_dir, {"telegram_chat_id": "1"} if source == "base" else {key: value})
+    supplying_path = overlay_path if source == "overlay" else base_path
+
+    with pytest.raises(SystemExit) as exc:
+        load_config(task_reviewers=TASK_REVIEWERS, project_dir=project_dir)
+
+    assert str(exc.value) == f"Invalid '{key}' in {supplying_path}: {value!r} ({requirement})"
+
+
+@pytest.mark.parametrize("source", ["base", "overlay"])
+@pytest.mark.parametrize("value", [True, False, 2.9, 3.0, None, "invalid", "3"])
+def test_load_config_max_iterations_type_violations_raise_system_exit(tmp_path, monkeypatch, value, source):
+    """Should reject a boolean, a float whole or not, a string, a quoted number or null."""
+    _assert_required_key_rejected(tmp_path, monkeypatch, "max_iterations", value, "must be a positive integer", source)
+
+
+@pytest.mark.parametrize("source", ["base", "overlay"])
+@pytest.mark.parametrize("key", ["usage_threshold_5h", "usage_threshold_weekly"])
+@pytest.mark.parametrize("value", [True, False, None, "90", "invalid", float("nan"), float("inf"), float("-inf")])
+def test_load_config_threshold_type_violations_raise_system_exit(tmp_path, monkeypatch, key, value, source):
+    """Should reject a boolean, null, a string, a quoted number and the NaN/Infinity literals."""
+    _assert_required_key_rejected(tmp_path, monkeypatch, key, value, "must be a finite number", source)
+
+
+@pytest.mark.parametrize("source", ["base", "overlay"])
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None, []])
+def test_load_config_enable_phase_sessions_type_violations_raise_system_exit(tmp_path, monkeypatch, value, source):
+    """Should reject a string, a number, null and a list — 'false' must not read as True."""
+    _assert_required_key_rejected(tmp_path, monkeypatch, "enable_phase_sessions", value, "must be a boolean", source)
+
+
+@pytest.mark.parametrize("key", ["usage_threshold_5h", "usage_threshold_weekly"])
+@pytest.mark.parametrize("value", [90, 92.5])
+def test_load_config_threshold_int_and_fractional_load_as_float(tmp_path, monkeypatch, key, value):
+    """Should load an integer threshold stored as a float, and a fractional one as it is."""
+    _write_config(tmp_path, monkeypatch, {key: value})
+    threshold = getattr(load_config(task_reviewers=TASK_REVIEWERS), key)
+    assert threshold == value
+    assert isinstance(threshold, float)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_load_config_enable_phase_sessions_bools_load_as_read(tmp_path, monkeypatch, value):
+    """Should keep a JSON boolean phase-session value exactly as it is read."""
+    _write_config(tmp_path, monkeypatch, {"enable_phase_sessions": value})
+    assert load_config(task_reviewers=TASK_REVIEWERS).enable_phase_sessions is value
+
+
+@pytest.mark.parametrize("key, invalid_base, valid_overlay", [
+    ("max_iterations", 0, 5),
+    ("usage_threshold_5h", "90", 91),
+    ("usage_threshold_weekly", True, 96),
+    ("enable_phase_sessions", "false", True),
+])
+def test_load_config_valid_overlay_supersedes_invalid_base_required_key(
+    tmp_path, monkeypatch, key, invalid_base, valid_overlay,
+):
+    """Should accept a valid overlay value over an invalid base value for every required key."""
+    _write_config(tmp_path, monkeypatch, {key: invalid_base})
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_override(project_dir, {key: valid_overlay})
+
+    assert getattr(load_config(task_reviewers=TASK_REVIEWERS, project_dir=project_dir), key) == valid_overlay
+
+
+# ---------------------------------------------------------------------------
 # plan_review_iterations: non-negative int or absent
 # ---------------------------------------------------------------------------
 

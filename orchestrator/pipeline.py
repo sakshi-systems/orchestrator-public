@@ -234,10 +234,10 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
 
         if passed:
-            print(f">>> {mode.verify.pass_line_label} — see {out_path}")
+            print(f">>> {mode.verify.pass_line.format(path=out_path)}")
             break
         else:
-            print(f">>> {mode.verify.fail_line_label} — see {out_path}")
+            print(f">>> {mode.verify.fail_line.format(path=out_path)}")
             _write_session(plan_path, "step", f"{mode.verify.fail_tag}{iteration}")
             if iteration == max_iterations:
                 raise PipelineStopError(

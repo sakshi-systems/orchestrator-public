@@ -1,0 +1,494 @@
+"""Tests for orchestrator.git_runner: the real git in a hermetic clone.
+
+The process tests ask a pid that the alias itself writes to a file and
+poll ``os.kill(pid, 0)``, never pgrep: on macOS ``pgrep -a`` prints
+process ids only, so a name-based ask would answer that nothing runs
+whatever is running.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import stat
+import time
+from pathlib import Path
+
+import pytest
+
+import signal
+
+from orchestrator import git_runner
+from orchestrator.git_runner import GitError, run_git
+
+from tests.conftest import GitStand, git_in
+
+
+def _gone(pid: int) -> bool:
+    """True when the pid names no live process; PermissionError counts
+    as gone, being what a group of only zombies answers on macOS."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return True
+    return False
+
+
+async def _poll(predicate, limit: float = 8.0) -> bool:
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(0.1)
+    return predicate()
+
+
+async def _member_pid(pid_file: Path) -> int:
+    """The pid the alias wrote once its member is running.
+
+    A file the writer has not finished — empty, without its
+    terminating newline, or not all decimal digits — is read again
+    after the sleep, until the deadline; a complete line returns its
+    pid at once.
+    """
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if pid_file.exists():
+            text = pid_file.read_text(encoding="utf-8")
+            pid = text.strip()
+            if text.endswith("\n") and pid.isdecimal():
+                return int(pid)
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"no pid was written to {pid_file}")
+
+
+def test_git_returns_its_output_with_standard_error_merged(
+        git_stand: GitStand) -> None:
+    async def scenario() -> tuple[str, str]:
+        resolved = await run_git(
+            ["rev-parse", "--verify", f"{git_stand.head_commit}^{{commit}}"],
+            cwd=git_stand.checkout, timeout=30.0)
+        refetched = await run_git(
+            ["fetch", "origin", "refs/pull/1/head"],
+            cwd=git_stand.checkout, timeout=30.0)
+        return resolved, refetched
+
+    resolved, refetched = asyncio.run(scenario())
+    assert resolved.strip() == git_stand.head_commit
+    assert "From" in refetched
+
+
+def test_a_failing_call_raises_with_git_text_cut(git_stand: GitStand) -> None:
+    async def scenario() -> tuple[GitError, GitError]:
+        with pytest.raises(GitError) as raised:
+            await run_git(["worktree", "add", "--detach",
+                           str(git_stand.seed), git_stand.head_commit],
+                          cwd=git_stand.seed, timeout=30.0)
+        with pytest.raises(GitError) as cut:
+            await run_git(["for-each-ref", "--sort=" + "x" * 600],
+                          cwd=git_stand.seed, timeout=30.0)
+        return raised.value, cut.value
+
+    failure, cut = asyncio.run(scenario())
+    assert failure.returncode != 0
+    assert str(failure).startswith("git exited ")
+    assert len(cut.text) == 500
+
+
+def test_a_git_ended_by_a_signal_raises_with_its_negative_status(
+        git_stand: GitStand) -> None:
+    async def scenario() -> GitError:
+        with pytest.raises(GitError) as raised:
+            await run_git(["-c", "alias.suicide=!kill -9 $PPID",
+                           "suicide"],
+                          cwd=git_stand.checkout, timeout=30.0)
+        return raised.value
+
+    raised = asyncio.run(scenario())
+    assert raised.returncode < 0
+
+
+def test_git_lays_files_readable_by_others_whatever_the_umask(
+        git_stand: GitStand, tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+
+    async def scenario() -> None:
+        await run_git(["worktree", "add", "--detach", str(tree),
+                       git_stand.head_commit],
+                      cwd=git_stand.checkout, timeout=30.0)
+
+    old = os.umask(0o077)
+    try:
+        asyncio.run(scenario())
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(tree.stat().st_mode) == 0o755
+    assert stat.S_IMODE((tree / "file.txt").stat().st_mode) == 0o644
+    assert stat.S_IMODE((tree / "run.sh").stat().st_mode) == 0o755
+    assert stat.S_IMODE((tree / "sub").stat().st_mode) == 0o755
+
+
+def test_git_is_told_never_to_prompt(git_stand: GitStand,
+                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> str:
+        return await run_git(
+            ["-c", 'alias.ask=!printf %s "$GIT_TERMINAL_PROMPT"', "ask"],
+            cwd=git_stand.checkout, timeout=30.0)
+
+    monkeypatch.delenv("GIT_TERMINAL_PROMPT", raising=False)
+    assert asyncio.run(scenario()) == "0"
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+    assert asyncio.run(scenario()) == "0"
+
+
+def test_git_runs_in_the_repository_it_is_aimed_at(
+        git_stand: GitStand, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    decoy = tmp_path / "decoy"
+    git_in(tmp_path, "clone", str(git_stand.origin), str(decoy))
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+
+    async def scenario() -> str:
+        return await run_git(["rev-parse", "--show-toplevel"],
+                             cwd=git_stand.checkout, timeout=30.0)
+
+    toplevel = asyncio.run(scenario())
+    assert Path(toplevel.strip()).resolve() == git_stand.checkout.resolve()
+
+
+def test_the_child_environment_holds_no_repository_location_name(
+        git_stand: GitStand,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: dict[str, str] = {}
+    real_exec = asyncio.create_subprocess_exec
+
+    async def recorder(program: str, *arguments: str, **kwargs):
+        recorded.update(kwargs["env"])
+        return await real_exec(program, *arguments, **kwargs)
+
+    monkeypatch.setattr(git_runner.asyncio, "create_subprocess_exec",
+                        recorder)
+    for name in git_runner.REPOSITORY_LOCATION_VARIABLES:
+        monkeypatch.setenv(name, "/a/decoy")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
+
+    async def scenario() -> None:
+        await run_git(["rev-parse", "--git-dir"],
+                      cwd=git_stand.checkout, timeout=30.0)
+
+    asyncio.run(scenario())
+    assert not (set(git_runner.REPOSITORY_LOCATION_VARIABLES)
+                & set(recorded))
+    assert recorded["GIT_CONFIG_COUNT"] == "0"
+    assert recorded["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_a_configuration_channel_reaches_git(
+        git_stand: GitStand, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "alias.zz")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "!echo carried")
+
+    async def scenario() -> str:
+        return await run_git(["zz"], cwd=git_stand.checkout, timeout=30.0)
+
+    assert asyncio.run(scenario()).strip() == "carried"
+
+
+def test_a_call_past_its_timeout_raises_and_leaves_no_member(
+        git_stand: GitStand, tmp_path: Path) -> None:
+    pid_file = tmp_path / "member.pid"
+    alias = f"alias.hang=!sh -c 'echo $$ > {pid_file}; sleep 300'"
+
+    async def scenario() -> GitError:
+        with pytest.raises(GitError) as raised:
+            await run_git(["-c", alias, "hang"],
+                          cwd=git_stand.checkout, timeout=1.0)
+        pid = await _member_pid(pid_file)
+        assert await _poll(lambda: _gone(pid))
+        return raised.value
+
+    raised = asyncio.run(scenario())
+    assert raised.returncode == 124
+    assert "timed out" in str(raised)
+
+
+def test_a_member_ignoring_term_is_killed(git_stand: GitStand,
+                                          tmp_path: Path) -> None:
+    pid_file = tmp_path / "member.pid"
+    alias = (f"alias.hang=!sh -c 'echo $$ > {pid_file}; "
+             "trap \"\" 15; sleep 300'")
+
+    async def scenario() -> None:
+        with pytest.raises(GitError):
+            await run_git(["-c", alias, "hang"],
+                          cwd=git_stand.checkout, timeout=1.0)
+        pid = await _member_pid(pid_file)
+        assert await _poll(lambda: _gone(pid))
+
+    asyncio.run(scenario())
+
+
+def test_the_ending_reaches_a_grandchild(git_stand: GitStand,
+                                         tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    alias = (f"alias.hang=!sh -c 'sleep 300 & echo $! > {pid_file}; "
+             "wait'")
+
+    async def scenario() -> None:
+        with pytest.raises(GitError):
+            await run_git(["-c", alias, "hang"],
+                          cwd=git_stand.checkout, timeout=1.0)
+        pid = await _member_pid(pid_file)
+        assert await _poll(lambda: _gone(pid))
+
+    asyncio.run(scenario())
+
+
+def test_a_git_that_exited_with_the_pipe_held_times_out_and_ends_the_member(
+        git_stand: GitStand, tmp_path: Path) -> None:
+    pid_file = tmp_path / "member.pid"
+    alias = f"alias.hang=!sh -c 'sleep 300 & echo $! > {pid_file}'"
+
+    async def scenario() -> GitError:
+        with pytest.raises(GitError) as raised:
+            await run_git(["-c", alias, "hang"],
+                          cwd=git_stand.checkout, timeout=1.0)
+        pid = await _member_pid(pid_file)
+        assert await _poll(lambda: _gone(pid))
+        return raised.value
+
+    raised = asyncio.run(scenario())
+    assert raised.returncode == 124
+
+
+def _fake_git_on_path(tmp_path: Path,
+                      monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A ``git`` earlier on PATH that writes its pid to a file named by
+    an environment variable, closes its output and keeps running: the
+    parent's read sees the end of the output while git lives on."""
+    pid_file = tmp_path / "member.pid"
+    directory = tmp_path / "bin"
+    directory.mkdir()
+    script = directory / "git"
+    script.write_text(
+        "#!/bin/sh\n"
+        'echo $$ > "$FAKE_GIT_PID_FILE"\n'
+        "exec >/dev/null 2>&1\n"
+        "sleep 300\n",
+        encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("FAKE_GIT_PID_FILE", str(pid_file))
+    monkeypatch.setenv("PATH",
+                       str(directory) + os.pathsep + os.environ["PATH"])
+    return pid_file
+
+
+def test_a_git_that_closes_its_output_and_keeps_running_ends_at_its_deadline(
+        git_stand: GitStand, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    pid_file = _fake_git_on_path(tmp_path, monkeypatch)
+
+    async def scenario() -> tuple[GitError, float]:
+        started = time.monotonic()
+        with pytest.raises(GitError) as raised:
+            await asyncio.wait_for(
+                run_git(["status"], cwd=git_stand.checkout,
+                        timeout=1.0), 12.0)
+        return raised.value, time.monotonic() - started
+
+    raised, elapsed = asyncio.run(scenario())
+
+    async def after() -> bool:
+        pid = await _member_pid(pid_file)
+        return await _poll(lambda: _gone(pid))
+
+    assert asyncio.run(after())
+    assert raised.returncode == 124
+    assert "timed out" in str(raised)
+    assert elapsed < 10.0
+
+
+def test_a_cancel_of_a_git_that_closed_its_output_leaves_no_member(
+        git_stand: GitStand, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    pid_file = _fake_git_on_path(tmp_path, monkeypatch)
+    entered = asyncio.Event()
+    real_wait = asyncio.subprocess.Process.wait
+
+    async def waiting(self) -> int:
+        entered.set()
+        return await real_wait(self)
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "wait", waiting)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_git(["status"], cwd=git_stand.checkout, timeout=60.0))
+        pid = await _member_pid(pid_file)
+        await asyncio.wait_for(entered.wait(), 12.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 12.0)
+        assert await _poll(lambda: _gone(pid))
+
+    asyncio.run(scenario())
+
+
+def test_a_cancelled_call_leaves_no_member(git_stand: GitStand,
+                                           tmp_path: Path) -> None:
+    pid_file = tmp_path / "member.pid"
+    alias = f"alias.hang=!sh -c 'echo $$ > {pid_file}; sleep 300'"
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_git(["-c", alias, "hang"],
+                    cwd=git_stand.checkout, timeout=60.0))
+        await _member_pid(pid_file)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        assert await _poll(lambda: _gone(pid))
+
+    asyncio.run(scenario())
+
+
+def test_a_second_cancel_during_the_grace_still_ends_the_member(
+        git_stand: GitStand, tmp_path: Path) -> None:
+    """Git is stopped, so it answers no signal until it is continued:
+    the ending's grace stays open for its five seconds, and a second
+    cancel in that window must not leave the ending before its
+    SIGKILL."""
+    pid_file = tmp_path / "member.pid"
+    alias = (f"alias.hang=!sh -c 'kill -STOP $PPID; "
+             f"echo $$ > {pid_file}; trap \"\" 15; sleep 300'")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_git(["-c", alias, "hang"],
+                    cwd=git_stand.checkout, timeout=60.0))
+        await _member_pid(pid_file)
+        task.cancel()
+        await asyncio.sleep(0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        assert await _poll(lambda: _gone(pid), limit=12.0)
+
+    asyncio.run(scenario())
+
+
+def test_the_probe_treats_permission_denied_as_a_dead_group(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """On macOS a group whose only members are zombies answers EPERM to
+    the probe; such a group has no live member and gets no SIGKILL."""
+
+    class StoppedProc:
+        pid = 12345
+
+        async def wait(self) -> int:
+            return 0
+
+    signals: list = []
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        signals.append(sig)
+        if sig == 0:
+            raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(git_runner.os, "killpg", fake_killpg)
+    asyncio.run(git_runner._end_group(StoppedProc()))
+    assert signals == [signal.SIGTERM, 0]
+
+
+def test_a_group_answering_permission_denied_never_stops_the_ending(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A group whose only member is a zombie answers PermissionError to
+    every signal on macOS; the ending still runs to its end."""
+
+    class ZombieProc:
+        pid = 54321
+
+        async def wait(self) -> int:
+            return 0
+
+    signals: list = []
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        signals.append(sig)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(git_runner.os, "killpg", fake_killpg)
+    asyncio.run(git_runner._end_group(ZombieProc()))
+    assert signals == [signal.SIGTERM, 0]
+
+
+def test_a_cancel_during_a_timeouts_ending_cancels_the_call(
+        git_stand: GitStand, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Git is stopped, so the timeout's ending holds its grace open; a
+    cancel in that window surfaces as a cancellation, not as the
+    timeout's error, once the ending has finished."""
+    monkeypatch.setattr(git_runner, "_KILL_GRACE", 1.5)
+    pid_file = tmp_path / "member.pid"
+    alias = (f"alias.hang=!sh -c 'kill -STOP $PPID; "
+             f"echo $$ > {pid_file}; trap "" 15; sleep 300'")
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            run_git(["-c", alias, "hang"],
+                    cwd=git_stand.checkout, timeout=0.5))
+        await asyncio.sleep(1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        assert await _poll(lambda: _gone(pid), limit=8.0)
+
+    asyncio.run(scenario())
+
+
+def test_a_missing_directory_is_a_failed_call(tmp_path: Path) -> None:
+    async def scenario() -> GitError:
+        with pytest.raises(GitError) as raised:
+            await run_git(["status"], cwd=tmp_path / "absent",
+                          timeout=30.0)
+        return raised.value
+
+    raised = asyncio.run(scenario())
+    assert raised.returncode == 127
+    assert str(tmp_path / "absent") in str(raised)
+
+
+def test_member_pid_waits_for_a_complete_line(tmp_path: Path) -> None:
+    pid_file = tmp_path / "member.pid"
+    pid_file.write_text("", encoding="utf-8")
+
+    async def scenario() -> int:
+        async def write_later() -> None:
+            await asyncio.sleep(0.2)
+            pid_file.write_text("123\n", encoding="utf-8")
+
+        writer = asyncio.create_task(write_later())
+        pid = await _member_pid(pid_file)
+        await writer
+        return pid
+
+    assert asyncio.run(scenario()) == 123
+
+
+def test_member_pid_raises_when_nothing_is_written(
+        tmp_path: Path) -> None:
+    pid_file = tmp_path / "member.pid"
+
+    async def scenario() -> int:
+        return await _member_pid(pid_file)
+
+    with pytest.raises(AssertionError) as raised:
+        asyncio.run(scenario())
+    assert str(raised.value) == f"no pid was written to {pid_file}"

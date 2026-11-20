@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
@@ -20,6 +21,11 @@ from .process_control import kill_active_child
 
 MAX_RETRIES = 3
 RETRY_DELAY = 30  # seconds
+
+# Shared with the head runtime: a turn is the process's whole life, so the
+# flags that end background work with the turn are the same everywhere.
+TURN_DISALLOWED_TOOLS = "Monitor,ScheduleWakeup,CronCreate"
+TURN_ENVIRONMENT = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 
 
 def _is_overloaded(result_text: str) -> bool:
@@ -135,6 +141,60 @@ def _resolve_claude() -> str:
 _CLAUDE_BIN: str | None = None
 
 
+def claude_config_dir() -> Path:
+    """Return Claude's configuration directory, read from the environment at
+    call time: `CLAUDE_CONFIG_DIR` when set to a non-empty value, else
+    `~/.claude`."""
+    value = os.environ.get("CLAUDE_CONFIG_DIR")
+    if value:
+        return Path(value)
+    return Path.home() / ".claude"
+
+
+def is_session_id(value: str) -> bool:
+    """True only when value is a canonical lowercase hyphenated UUID string."""
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return value == str(parsed)
+
+
+def session_start_directory(session_id: str) -> Path | None:
+    """Return the directory the Claude session was saved for, or None.
+
+    The session's transcript is `<config dir>/projects/<project key>/<id>.jsonl`;
+    the project key cannot be rebuilt from the directory (non-ASCII and long
+    paths mangle it), so every project directory is searched and the session
+    id must match exactly one transcript. The first transcript entry whose
+    `cwd` is a non-empty string names the directory the session was saved for;
+    lines that are not JSON objects are skipped. None is returned for an id
+    that is not a session id (before anything touches the filesystem), for no
+    match, more than one match, an unreadable or undecodable transcript and a
+    transcript carrying no `cwd`.
+    """
+    if not is_session_id(session_id):
+        return None
+    matches = list(claude_config_dir().glob(f"projects/*/{session_id}.jsonl"))
+    if len(matches) != 1:
+        return None
+    try:
+        with matches[0].open("r", encoding="utf-8") as transcript:
+            for line in transcript:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                cwd = entry.get("cwd")
+                if isinstance(cwd, str) and cwd:
+                    return Path(cwd)
+    except (OSError, UnicodeDecodeError):
+        return None
+    return None
+
+
 def _run_claude(
     prompt: str,
     cwd: str,
@@ -159,7 +219,7 @@ def _run_claude(
         "--verbose",
         "--dangerously-skip-permissions",
         "--allowedTools", ",".join(allowed_tools),
-        "--disallowedTools", "Monitor,ScheduleWakeup,CronCreate",
+        "--disallowedTools", TURN_DISALLOWED_TOOLS,
     ]
 
     if model:
@@ -172,7 +232,7 @@ def _run_claude(
     elif system_prompt:
         cmd.extend(["--system-prompt", system_prompt])
 
-    env = {**os.environ, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+    env = {**os.environ, **TURN_ENVIRONMENT}
 
     for attempt in range(1, MAX_RETRIES + 1):
         print(f"\n--- Claude agent ({cwd}) ---")

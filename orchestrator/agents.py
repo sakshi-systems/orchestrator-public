@@ -42,8 +42,8 @@ REVIEW_VERIFY = VerifyKind(
     output_suffix="-review-{n}.md",
     pass_signal="REVIEW_PASS",
     running_header="REVIEWING",
-    pass_line_label="REVIEW PASSED",
-    fail_line_label="Review found issues",
+    pass_line="REVIEW PASSED — see {path}",
+    fail_line="Review found issues — see {path}",
     max_iterations_message="Implement failed\n\nLast review: {path}\n\n{content}",
     make_verifier=_review_verifier,
 )
@@ -55,8 +55,8 @@ TEST_RUN_VERIFY = VerifyKind(
     output_suffix="-test-{n}.txt",
     pass_signal="TEST_PASS",
     running_header="RUNNING TESTS",
-    pass_line_label="TESTS PASSED",
-    fail_line_label="Tests failed",
+    pass_line="TESTS PASSED — see {path}",
+    fail_line="Tests failed — see {path}",
     max_iterations_message="Test failed\n\nLast run: {path}\n\n{content}",
     make_verifier=_test_run_verifier,
 )
@@ -97,12 +97,36 @@ class HeadVerifier:
 
         The index file lives in a temporary directory outside the work tree and is removed with it,
         so it can never land in a commit, and the repository's real index is left as it was.
-        Ignored files and .ai-factory/ are invisible to the identity by design.
+        The temporary index starts as a copy of the real one outside .ai-factory/ — the real index
+        is only read, never written — so a file that git tracks and .gitignore matches is part of
+        the identity; an untracked file that .gitignore matches stays out, and .ai-factory/ is
+        invisible to the identity by design.
+        The add then stages the whole work tree onto that copy with no exclusion pathspec, and
+        .ai-factory is removed from the copy afterwards. An exclusion pathspec would make git
+        refuse the add when .ai-factory is ignored, as a symlink listed in .git/info/exclude is,
+        so the removal is what keeps .ai-factory out, whether it is ignored, a tracked or
+        untracked folder, or a symlink.
         """
         with tempfile.TemporaryDirectory(prefix="head-verify-index-") as tmp:
             env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+            listing = subprocess.run(
+                ["git", "ls-files", "-s", "-z", "--full-name", "--", ".", ":(exclude).ai-factory"],
+                cwd=str(self.project_dir), check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
             subprocess.run(
-                ["git", "add", "-A", "--", ".", ":(exclude).ai-factory"],
+                ["git", "update-index", "-z", "--index-info"],
+                cwd=str(self.project_dir), env=env, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                input=listing.stdout,
+            )
+            subprocess.run(
+                ["git", "add", "-A", "--", "."],
+                cwd=str(self.project_dir), env=env, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                ["git", "rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ".ai-factory"],
                 cwd=str(self.project_dir), env=env, check=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
@@ -124,8 +148,8 @@ HEAD_VERIFY = VerifyKind(
     output_suffix="-review-{n}.md",
     pass_signal=None,
     running_header="CHECKING THE PROJECT",
-    pass_line_label="PROJECT CHANGED",
-    fail_line_label="The implementer changed nothing",
+    pass_line="PROJECT CHANGED",
+    fail_line="The implementer changed nothing",
     max_iterations_message="Implement failed\n\nThe implementer's turn left the project unchanged outside .ai-factory/",
     make_verifier=_head_verifier,
 )

@@ -25,16 +25,18 @@ ORCHESTRATOR_CONFIG=/path/to/my-config.json uv run orchestrator implement /path/
 
 | Key | Default | Meaning |
 |---|---|---|
-| `max_iterations` | `3` | The iteration limit for code review and the test run, and for plan review unless `plan_review_iterations` is set — a positive integer, checked at startup with a diagnostic that names the file that supplies it. See [pipeline.md](../pipeline.md). |
+| `max_iterations` | `3` | The iteration limit for code review and the test run, and for plan review unless `plan_review_iterations` is set — an integer of at least 1, checked at startup with a diagnostic that names the file that supplies it. See [pipeline.md](../pipeline.md). |
 | `plan_review_iterations` | absent | The number of plan reviews a plan gets, a non-negative integer. Absent, plan review takes `max_iterations`; `0` turns plan review off. See [The plan-review budget](../pipeline.md#the-plan-review-budget). |
 | `task_reviewer` | `"run"` | Who reviews a task in implement mode: `"run"`, the run's reviewer, or `"head"`, the head that ordered the task, so a task ends with the implementer's turn. Test mode's real test run is unaffected. See [Who reviews a task](../pipeline.md#who-reviews-a-task). |
-| `usage_threshold_5h` | `90` | Threshold for a reported five-hour window of the selected runtime. See [usage-limits.md](../features/usage-limits.md). |
-| `usage_threshold_weekly` | `95` | Threshold for a reported weekly window of the selected runtime. See [usage-limits.md](../features/usage-limits.md). |
-| `enable_phase_sessions` | `false` | Whether the `PlannerReviewer` session carries over between tasks within a phase. See [phase-sessions.md](../features/phase-sessions.md). |
+| `usage_threshold_5h` | `90` | Threshold, a finite number, for a reported five-hour window of the selected runtime. See [usage-limits.md](../features/usage-limits.md). |
+| `usage_threshold_weekly` | `95` | Threshold, a finite number, for a reported weekly window of the selected runtime. See [usage-limits.md](../features/usage-limits.md). |
+| `enable_phase_sessions` | `false` | Whether the `PlannerReviewer` session carries over between tasks within a phase, a JSON boolean. See [phase-sessions.md](../features/phase-sessions.md). |
 | `roadmap_path` | absent | Which roadmap the orchestrator reads. See [named-roadmaps.md](../features/named-roadmaps.md). |
 | `runtime` | `claude` | Optional runtime selector: exactly `claude` or `codex`. See [Runtime selection](../features/agent-runtime.md#runtime-selection). |
 | `claude_agents` | per role, below | Model and effort of each role when the runtime is `claude`: an object keyed by role. See [Agent defaults](#agent-defaults). |
 | `codex_agents` | per role, below | Model and effort of each role when the runtime is `codex`: an object keyed by role. See [Agent defaults](#agent-defaults). |
+
+The required keys of the base are validated after the merge and never converted: `max_iterations` is an integer, not a boolean, of at least 1; `usage_threshold_5h` and `usage_threshold_weekly` are finite numbers, integer or fractional, not booleans, `null` or strings, so `NaN` and `Infinity` are errors, and no range is required of them; `enable_phase_sessions` is a JSON boolean and nothing else, so `"false"`, `0` and `1` are errors. A quoted number is a string and is rejected. A violation exits naming the key, the value, the requirement and the file that supplies it, the base or the overlay.
 
 `plan_review_iterations` and `task_reviewer` are validated after the merge too. Only an absent key takes its default; for `plan_review_iterations` a negative number, a boolean, a non-integer, a string or `null` is a configuration error, and for `task_reviewer` anything but `"run"` or `"head"` is, each naming the file that supplies the value. At its start the run prints, after the agent lines, `Task reviewer: <run | head | test run>` and `Plan review iterations: <the effective number>`, the setting when `plan_review_iterations` is set and `max_iterations` otherwise; a run on the defaults prints them too.
 

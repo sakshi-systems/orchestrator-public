@@ -55,6 +55,7 @@ Start with [Workflow](docs/workflow.md), the working pattern from filling a road
 | [Target project requirements](docs/reference/target-project.md) | What a target project must provide |
 | [Configuration](docs/reference/configuration.md) | Settings, overlay precedence and agent models |
 | [Codex runtime](docs/reference/codex-runtime.md) | Native invocation, faults and retry limits |
+| [Sakshi reference](docs/reference/sakshi.md) | Sakshi's settings file, the review request and its refusals, a review's files and its failure, and the exit statuses of `sakshi review` |
 
 ## License
 

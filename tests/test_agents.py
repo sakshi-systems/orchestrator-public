@@ -877,6 +877,68 @@ def test_run_claude_launch_denies_work_outliving_the_turn(monkeypatch, tmp_path,
     assert cmd[cmd.index("--disallowedTools") + 1] == "Monitor,ScheduleWakeup,CronCreate"
 
 
+def test_run_claude_argv_fresh_call(monkeypatch, tmp_path, clean_active_proc):
+    """A fresh call's full argv: the binary, -p with the prompt, the output,
+    verbose and permission flags, the role's allowed tools, the shared
+    disallowed tools, then the system prompt; the environment is the
+    process's own plus the shared turn variable."""
+    monkeypatch.setattr(claude_cli, "_CLAUDE_BIN", "/usr/local/bin/claude")
+    fake = _FakeOkProc()
+    recorded: dict = {}
+
+    def _fake_popen(*args, **kwargs):
+        recorded["cmd"] = args[0]
+        recorded["env"] = kwargs.get("env")
+        return fake
+
+    monkeypatch.setattr(claude_cli.subprocess, "Popen", _fake_popen)
+
+    claude_cli._run_claude("do it", cwd=str(tmp_path), system_prompt="instructions")
+
+    assert recorded["cmd"] == [
+        "/usr/local/bin/claude",
+        "-p", "do it",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
+        "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep",
+        "--disallowedTools", "Monitor,ScheduleWakeup,CronCreate",
+        "--system-prompt", "instructions",
+    ]
+    assert recorded["env"] == {
+        **os.environ, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+
+
+def test_run_claude_argv_resumed_call(monkeypatch, tmp_path, clean_active_proc):
+    """A resumed call's full argv is the fresh call's with --resume <id> in
+    place of the system prompt, and the environment still carries the shared
+    turn variable."""
+    monkeypatch.setattr(claude_cli, "_CLAUDE_BIN", "/usr/local/bin/claude")
+    fake = _FakeOkProc()
+    recorded: dict = {}
+
+    def _fake_popen(*args, **kwargs):
+        recorded["cmd"] = args[0]
+        recorded["env"] = kwargs.get("env")
+        return fake
+
+    monkeypatch.setattr(claude_cli.subprocess, "Popen", _fake_popen)
+
+    claude_cli._run_claude("do it", cwd=str(tmp_path), session_id="s1")
+
+    assert recorded["cmd"] == [
+        "/usr/local/bin/claude",
+        "-p", "do it",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
+        "--allowedTools", "Read,Write,Edit,Bash,Glob,Grep",
+        "--disallowedTools", "Monitor,ScheduleWakeup,CronCreate",
+        "--resume", "s1",
+    ]
+    assert recorded["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+
+
 # ---------------------------------------------------------------------------
 # --- EscalationError / _has_escalation / _escalation_excerpt ---
 # ---------------------------------------------------------------------------

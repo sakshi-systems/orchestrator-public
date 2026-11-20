@@ -6,10 +6,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import Protocol
 
-if TYPE_CHECKING:
-    from .config import OrchestratorConfig
+from .reviews import ReviewFailureReason, ReviewRequest
 
 
 # Alert types that report a task failure rather than a success.
@@ -57,6 +56,28 @@ _ALERT_TYPES: dict[Outcome, str] = {
 }
 
 
+class NotificationSettingsProtocol(Protocol):
+    """The notification settings, read-only: what may be sent and
+    where. The run's configuration and Sakshi's own settings both
+    satisfy it."""
+
+    telegram_bot_token: str | None
+    telegram_chat_id: str | None
+    telegram_alerts: list[str]
+
+
+# The clause of each reason a review fails, fixed: no free text, no
+# path and nothing an agent wrote reaches the person.
+_REVIEW_FAILURE_CLAUSES: dict[ReviewFailureReason, str] = {
+    ReviewFailureReason.NO_ROLE_REPORTED: "no role reported",
+    ReviewFailureReason.MUSAFIR_GAVE_NO_OUTPUT: "the musafir gave no output",
+    ReviewFailureReason.STOP_CUT_THE_REVIEW: "a stop cut the review",
+    ReviewFailureReason.WORKSPACE_NOT_LAID: "the workspace could not be laid",
+    ReviewFailureReason.STORAGE_FAILED:
+        "Sakshi could not write the review's files",
+}
+
+
 def compose(outcome: Outcome, project: str, detail: str | None, run_summary: str) -> str:
     """Build the notification text: word, then project, then detail (if any), then run summary."""
     lines = [f"{_WORDS[outcome]}: {project}"]
@@ -66,12 +87,26 @@ def compose(outcome: Outcome, project: str, detail: str | None, run_summary: str
     return "\n".join(lines)
 
 
-def report(config: "OrchestratorConfig", outcome: Outcome, project: str, detail: str | None, run_summary: str) -> None:
+def report(settings: NotificationSettingsProtocol, outcome: Outcome, project: str, detail: str | None, run_summary: str) -> None:
     """Compose and send a notification for a run/task outcome."""
-    notify(config, compose(outcome, project, detail, run_summary), _ALERT_TYPES[outcome])
+    notify(settings, compose(outcome, project, detail, run_summary), _ALERT_TYPES[outcome])
 
 
-def notify(config: "OrchestratorConfig", text: str, alert_type: str) -> None:
+def report_review_failure(settings: NotificationSettingsProtocol,
+                          request: ReviewRequest,
+                          reason: ReviewFailureReason) -> None:
+    """Compose and send the fixed three lines of a failed review, one
+    send, as a stop: the machine got in the way and no verdict is given
+    on the pull request. The text carries nothing an agent wrote."""
+    text = "\n".join([
+        f"Review failed: {request.repository}#{request.number}",
+        f"Reason: {_REVIEW_FAILURE_CLAUSES[reason]}",
+        f"Head commit: {request.head_commit}",
+    ])
+    notify(settings, text, "stop")
+
+
+def notify(config: NotificationSettingsProtocol, text: str, alert_type: str) -> None:
     """Send a Telegram notification if alert_type is listed in config.telegram_alerts."""
     if alert_type not in config.telegram_alerts:
         return

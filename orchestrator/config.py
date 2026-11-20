@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -128,18 +129,33 @@ def load_config(project_dir: Path | None = None, *, task_reviewers: Mapping[str,
     for key in ("claude_agents", "codex_agents"):
         agent_blocks[key] = _validate_agent_block(key, data.get(key, {}), _supplying(key))
 
-    max_iterations = int(data["max_iterations"])
-    if max_iterations < 1:
+    max_iterations = data["max_iterations"]
+    if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) or max_iterations < 1:
         raise SystemExit(
             f"Invalid 'max_iterations' in {_supplying('max_iterations')}: "
             f"{max_iterations!r} (must be a positive integer)"
+        )
+
+    for key in ("usage_threshold_5h", "usage_threshold_weekly"):
+        threshold = data[key]
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not math.isfinite(threshold):
+            raise SystemExit(
+                f"Invalid '{key}' in {_supplying(key)}: "
+                f"{threshold!r} (must be a finite number)"
+            )
+
+    enable_phase_sessions = data["enable_phase_sessions"]
+    if not isinstance(enable_phase_sessions, bool):
+        raise SystemExit(
+            f"Invalid 'enable_phase_sessions' in {_supplying('enable_phase_sessions')}: "
+            f"{enable_phase_sessions!r} (must be a boolean)"
         )
 
     return OrchestratorConfig(
         max_iterations=max_iterations,
         usage_threshold_5h=float(data["usage_threshold_5h"]),
         usage_threshold_weekly=float(data["usage_threshold_weekly"]),
-        enable_phase_sessions=bool(data["enable_phase_sessions"]),
+        enable_phase_sessions=enable_phase_sessions,
         telegram_bot_token=data.get("telegram_bot_token") or None,
         telegram_chat_id=data.get("telegram_chat_id") or None,
         telegram_alerts=data.get("telegram_alerts") or [],
