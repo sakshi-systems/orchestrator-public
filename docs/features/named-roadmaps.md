@@ -18,6 +18,8 @@ The test roadmap is always derived from the main one: `ROADMAP_TESTS.md` for the
 
 Artifact directories stay flat, byte-for-byte, for the default `ROADMAP.md`/`ROADMAP_TESTS.md` pair (`plans/`, `plan-reviews/`, `reviews/`, `test-runs/`). For any other (named) roadmap, artifacts move into a subdirectory keyed by the roadmap file's stem — for example, `roadmaps/john-doe.md` → `plans/john-doe/`, `reviews/john-doe/`. The named pair's test sibling shares that same subdirectory: `roadmaps/john-doe-tests.md` keys off the same stem, `john-doe`, as `roadmaps/john-doe.md` — both the implement- and test-mode artifacts of a named pair share one numbering axis, `plans/john-doe/`, exactly as the default pair shares its flat directories. This keeps each developer's `{NN}` numbering on its own axis, so merging branches never collides.
 
+The implementer's answer of each iteration is a file of the run's beside the reviews, `reviews/<seq>-<slug>-implementer-N.md`, which follows the same routing.
+
 ## Migrating an existing project
 
 1. **Override config.** Create `<project>/.ai-factory/orchestrator.json` — git-ignored and per-developer, never committed:

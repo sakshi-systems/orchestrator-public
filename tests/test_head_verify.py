@@ -13,7 +13,7 @@ from orchestrator.errors import PipelineStopError
 from orchestrator.pipeline import IMPLEMENT_MODE, TEST_MODE, process_task
 from orchestrator.ports import AgentRole
 from orchestrator.protocol import _read_sessions
-from tests.fakes import FakeAgentBackend, target_path
+from tests.fakes import FakeAgentBackend
 
 HEAD_MODE = IMPLEMENT_MODE._replace(verify=HEAD_VERIFY)
 SLUG = "slug"
@@ -80,16 +80,14 @@ def _config(plan_review_iterations=None) -> OrchestratorConfig:
 
 
 def _flow_backend() -> FakeAgentBackend:
-    """Write the plan and a passing plan review; the implementer's turn changes nothing."""
+    """Write the plan and answer the plan review; the implementer's turn changes nothing."""
 
     def _write(call):
         if call.role is AgentRole.IMPLEMENTER:
-            return
-        path = target_path(call.prompt)
+            return None
         if call.role is AgentRole.PLAN_REVIEWER:
-            path.write_text("PLAN_REVIEW_PASS")
-        elif path.parent.name == "plans":
-            path.write_text("# Plan\n\n## Test Command\n`true`\n")
+            return "PLAN_REVIEW_PASS"
+        return "# Plan\n\n## Test Command\n`true`\n"
 
     return FakeAgentBackend(on_call=_write)
 
@@ -108,7 +106,7 @@ def _begin(project: Path, plan: Path) -> HeadVerifier:
 def _assert_stops(verifier: HeadVerifier, project: Path, plan: Path) -> None:
     plan.with_suffix(".json").write_text(json.dumps({"runtime": "claude", "step": "implemented:1"}))
     with pytest.raises(PipelineStopError) as exc:
-        verifier.verify(plan, project / "nowhere.md", None)
+        verifier.verify(plan, project / "nowhere.md", None, None)
     assert str(exc.value) == (
         "Implement failed\n\n"
         "The implementer's turn left the project unchanged outside .ai-factory/\n\n"
@@ -125,7 +123,7 @@ def test_new_untracked_file_in_new_directory_passes(tmp_path):
     (project / "new-dir").mkdir()
     (project / "new-dir" / "file.txt").write_text("content")
 
-    assert verifier.verify(plan, project / "nowhere.md", None) is True
+    assert verifier.verify(plan, project / "nowhere.md", None, None) is True
 
 
 def test_edit_to_tracked_file_passes(tmp_path):
@@ -135,7 +133,7 @@ def test_edit_to_tracked_file_passes(tmp_path):
 
     (project / "tracked.txt").write_text("one\ntwo\n")
 
-    assert verifier.verify(plan, project / "nowhere.md", None) is True
+    assert verifier.verify(plan, project / "nowhere.md", None, None) is True
 
 
 def test_further_edit_to_already_modified_file_passes(tmp_path):
@@ -147,7 +145,7 @@ def test_further_edit_to_already_modified_file_passes(tmp_path):
 
     (project / "tracked.txt").write_text("one\ntwo\nthree\n")
 
-    assert verifier.verify(plan, project / "nowhere.md", None) is True
+    assert verifier.verify(plan, project / "nowhere.md", None, None) is True
 
 
 def test_unchanged_tree_stops(tmp_path):
@@ -206,7 +204,7 @@ def test_real_index_is_identical_before_and_after(tmp_path):
     verifier = _begin(project, plan)
 
     (project / "new.txt").write_text("x")
-    assert verifier.verify(plan, project / "nowhere.md", None) is True
+    assert verifier.verify(plan, project / "nowhere.md", None, None) is True
 
     assert index.read_bytes() == before
 
@@ -251,7 +249,7 @@ def test_change_to_a_tracked_file_gitignore_matches_passes(tmp_path):
 
     (project / "tracked.log").write_text("one\ntwo\n")
 
-    assert verifier.verify(plan, project / "nowhere.md", None) is True
+    assert verifier.verify(plan, project / "nowhere.md", None, None) is True
 
 
 def test_tracked_file_gitignore_matches_left_unchanged_stops(tmp_path):
@@ -279,7 +277,7 @@ def test_change_to_a_tracked_ignored_file_passes_in_a_subdirectory_project(tmp_p
 
     (project / "tracked.log").write_text("one\ntwo\n")
 
-    assert verifier.verify(plan, project / "nowhere.md", None) is True
+    assert verifier.verify(plan, project / "nowhere.md", None, None) is True
 
 
 def test_tracked_ignored_file_left_unchanged_stops_in_a_subdirectory_project(tmp_path):
@@ -344,7 +342,7 @@ def test_real_index_is_identical_before_and_after_with_ai_factory_tracked(tmp_pa
     verifier = _begin(project, plan)
 
     (project / "new.txt").write_text("x")
-    assert verifier.verify(plan, project / "nowhere.md", None) is True
+    assert verifier.verify(plan, project / "nowhere.md", None, None) is True
 
     assert index.read_bytes() == before
 
@@ -396,8 +394,10 @@ def test_head_rerun_reuses_the_implementer_session_and_closes_once_changed(tmp_p
 
     assert len(calls) == 1
     assert calls[0].session_id == saved
-    assert calls[0].prompt.endswith(f"Implement the plan at: {plan}")
-    assert "feedback" not in calls[0].prompt
+    assert "Implement the plan below." in calls[0].prompt
+    assert "## Plan\n\n# Plan" in calls[0].prompt
+    assert calls[0].prompt.rstrip().endswith("where the file disagreed with the plan.")
+    assert "Apply the fixes" not in calls[0].prompt
     assert _read_sessions(plan)["step"] == "done"
     assert "- [x]" in (outside / "ROADMAP.md").read_text()
 
@@ -457,7 +457,7 @@ def test_change_outside_an_ignored_symlinked_ai_factory_passes(tmp_path):
 
     (project / "tracked.txt").write_text("one\ntwo\n")
 
-    assert verifier.verify(plan, project / "nowhere.md", None) is True
+    assert verifier.verify(plan, project / "nowhere.md", None, None) is True
 
 
 def test_change_only_through_an_ignored_symlinked_ai_factory_stops(tmp_path):
@@ -478,7 +478,7 @@ def test_real_index_is_identical_before_and_after_with_ai_factory_ignored(tmp_pa
     verifier = _begin(project, plan)
 
     (project / "new.txt").write_text("x")
-    assert verifier.verify(plan, project / "nowhere.md", None) is True
+    assert verifier.verify(plan, project / "nowhere.md", None, None) is True
 
     assert index.read_bytes() == before
 
@@ -510,20 +510,18 @@ def test_head_turn_that_changes_nothing_stops_with_ai_factory_ignored(tmp_path, 
 
 
 def _run_backend(*, review_text: str = "REVIEW_PASS", test_command: str = "true", implement: Path | None = None) -> FakeAgentBackend:
-    """Write the plan and a passing plan review; the reviewer writes `review_text`; the
+    """Write the plan and answer the plan review; the reviewer writes `review_text`; the
     implementer writes `implement` when given, so its turn changes the project."""
     def _write(call):
         if call.role is AgentRole.IMPLEMENTER:
             if implement is not None:
                 implement.write_text("work done")
-            return
-        path = target_path(call.prompt)
+            return None
         if call.role is AgentRole.PLAN_REVIEWER:
-            path.write_text("PLAN_REVIEW_PASS")
-        elif path.parent.name == "plans":
-            path.write_text(f"# Plan\n\n## Test Command\n`{test_command}`\n")
-        else:
-            path.write_text(review_text)
+            return "PLAN_REVIEW_PASS"
+        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+            return review_text
+        return f"# Plan\n\n## Test Command\n`{test_command}`\n"
 
     return FakeAgentBackend(on_call=_write)
 

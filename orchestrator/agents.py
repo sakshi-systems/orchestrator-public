@@ -8,9 +8,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from .errors import EscalationError, MissingArtifactError, PipelineStopError
+from .errors import EscalationError, PipelineStopError
 from .ports import AgentBackendProtocol, AgentRole, VerifierProtocol, VerifyKind
-from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_sessions, _write_session
+from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_sessions, _write_artifact, _write_session
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -80,8 +80,11 @@ class HeadVerifier:
         self._recorded_tree = self._tree_identity()
         self._recorded_step = _read_sessions(plan_path).get("step")
 
-    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None) -> bool:
-        """Pass when the turn changed the tree; on no change restore the boundary and fail the implement step."""
+    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None) -> bool:
+        """Pass when the turn changed the tree; on no change restore the boundary and fail the implement step.
+
+        Reads nothing from prev_out_path or implementer_answer_path — the head's
+        check is the tree alone."""
         if self._recorded_tree is None or self._tree_identity() != self._recorded_tree:
             return True
         if self._recorded_step is not None:
@@ -173,6 +176,16 @@ class PlannerReviewer:
         self.session_id: str | None = None
 
     def plan(self, task_title: str, task_description: str, plan_path: Path, plan_review_path: Path | None = None, roadmap_path: Path | None = None, line_number: int | None = None) -> None:
+        """Plan a task. The run writes the planner's answer to plan_path.
+
+        The message carries the task and, on a revision, the current plan's and
+        the review's text under their headings; it names no path of the run's
+        tree other than the roadmap line. The planner's session id is written to
+        the sidecar under ``planner`` as soon as the agent returns, before the
+        answer is written. An empty answer halts with EmptyAnswerError, leaves
+        the plan file as it was and leaves ``step`` at ``planning:<N>``, so a
+        resumed run repeats the round.
+        """
         roadmap_line = ""
         if roadmap_path is not None:
             location = f" (line {line_number + 1})" if line_number is not None else ""
@@ -182,16 +195,20 @@ class PlannerReviewer:
             f"{roadmap_line}"
             f"**{task_title}**\n"
             f"{task_description}\n\n"
-            f"Write the plan to: {plan_path}\n"
+            f"Return the plan as your answer.\n"
         )
         if plan_review_path is not None and plan_review_path.exists():
             prompt += (
-                f"\nYour plan at {plan_path} was reviewed and has issues.\n\n"
-                f"Read the review at: {plan_review_path}\n\n"
-                f"Update the plan to address the issues in that review.\n"
+                "\nYour plan was reviewed and has issues.\n\n"
+                "Address the issues of the review below and return the revised plan as your answer.\n"
             )
+            sections = []
+            if plan_path.exists():
+                sections += ["## Plan", "", plan_path.read_text()]
+            sections += ["## Plan review", "", plan_review_path.read_text()]
+            prompt += "\n" + "\n".join(sections)
 
-        _, self.session_id = self.backend.run(
+        answer, self.session_id = self.backend.run(
             role=AgentRole.PLANNER_REVIEWER,
             prompt=prompt,
             cwd=str(self.project_dir),
@@ -199,43 +216,70 @@ class PlannerReviewer:
             session_id=self.session_id,
         )
         _write_session(plan_path, "planner", self.session_id)
+        _write_artifact(plan_path, answer)
 
-        if plan_path.exists() and _has_escalation(plan_path.read_text()):
-            excerpt = _escalation_excerpt(plan_path.read_text())
+        if _has_escalation(answer):
+            excerpt = _escalation_excerpt(answer)
             _write_session(plan_path, "escalation", f"planner: {excerpt} ({plan_path})")
             _write_session(plan_path, "step", "escalated")
             raise EscalationError(f"{plan_path}: {excerpt}")
 
-    def review(self, plan_path: Path, review_path: Path, prev_review_path: Path | None = None) -> bool:
-        """Review code changes. Uses same session as planner for deep context."""
+    def review(self, plan_path: Path, review_path: Path, prev_review_path: Path | None = None, implementer_answer_path: Path | None = None) -> bool:
+        """Review code changes. Uses same session as planner for deep context.
+
+        The message carries the plan, the implementer's answer and, on a
+        re-review, the previous review, each under its heading; the reviewer sees
+        the changes itself in the tree it works in, and the message names no path
+        of the run's tree. The run writes the reviewer's answer to review_path;
+        an empty answer halts with EmptyAnswerError and leaves ``step`` at
+        ``implemented:<N>``, so a resumed run repeats the review.
+        """
+        sections = [
+            "## Plan",
+            "",
+            plan_path.read_text(),
+        ]
+        if implementer_answer_path is not None:
+            sections += ["", "## The implementer's answer", "", implementer_answer_path.read_text()]
+        if prev_review_path:
+            sections += ["", "## The previous review", "", prev_review_path.read_text()]
+        body = "\n".join(sections)
+
+        naming_lines = (
+            "Run `git diff HEAD` and `git status` to see ALL changes.\n"
+            "The plan for context is under `## Plan`.\n"
+        )
+        if implementer_answer_path is not None:
+            naming_lines += "The implementer's answer is under `## The implementer's answer`.\n"
+
         if prev_review_path:
             prompt = (
-                f"This is a RE-REVIEW after fixes were applied to address the previous review at: {prev_review_path}\n"
-                f"Do NOT trust your session memory about file contents — the code has changed since your last pass.\n"
-                f"For each finding in the previous review, open the cited file as it is now and read it in full, "
-                f"quote the CURRENT content relevant to that finding, and give a verdict: Fixed or Not fixed, "
-                f"with the quote as evidence.\n\n"
-                f"Then run the normal full review for new issues:\n"
-                f"The plan for context is at: {plan_path}\n"
-                f"Review the CODE CHANGES for bugs, security issues, and correctness problems.\n"
-                f"Run `git diff HEAD` and `git status` to see ALL changes.\n"
-                f"Read each changed/new file IN FULL — understand the surrounding code, not just the diff.\n"
-                f"Think about what will break at runtime: missing migrations, type mismatches, race conditions, etc.\n"
-                f"Write your full review (per-finding verdicts plus any new issues) to: {review_path}\n"
-                f"If you have no findings at all, end the review file with {REVIEW_VERIFY.pass_signal} on its own line.\n"
+                "This is a RE-REVIEW after fixes were applied to address the previous review under `## The previous review`.\n"
+                "Do NOT trust your session memory about file contents — the code has changed since your last pass.\n"
+                "For each finding in the previous review, open the cited file as it is now and read it in full, "
+                "quote the CURRENT content relevant to that finding, and give a verdict: Fixed or Not fixed, "
+                "with the quote as evidence.\n\n"
+                "Then run the normal full review for new issues:\n"
+                "Review the CODE CHANGES for bugs, security issues, and correctness problems.\n"
+                f"{naming_lines}"
+                "Read each changed/new file IN FULL — understand the surrounding code, not just the diff.\n"
+                "Think about what will break at runtime: missing migrations, type mismatches, race conditions, etc.\n"
+                "Return your full review (per-finding verdicts plus any new issues) as your answer.\n"
+                f"If you have no findings at all, end your answer with {REVIEW_VERIFY.pass_signal} on its own line.\n"
+                f"\n{body}"
             )
         else:
             prompt = (
-                f"The plan for context is at: {plan_path}\n"
-                f"Review the CODE CHANGES for bugs, security issues, and correctness problems.\n"
-                f"Run `git diff HEAD` and `git status` to see ALL changes.\n"
-                f"Read each changed/new file IN FULL — understand the surrounding code, not just the diff.\n"
-                f"Think about what will break at runtime: missing migrations, type mismatches, race conditions, etc.\n"
-                f"Write your full review to: {review_path}\n"
-                f"If you have no findings at all, end the review file with {REVIEW_VERIFY.pass_signal} on its own line.\n"
+                "Review the CODE CHANGES for bugs, security issues, and correctness problems.\n"
+                f"{naming_lines}"
+                "Read each changed/new file IN FULL — understand the surrounding code, not just the diff.\n"
+                "Think about what will break at runtime: missing migrations, type mismatches, race conditions, etc.\n"
+                "Return your full review as your answer.\n"
+                f"If you have no findings at all, end your answer with {REVIEW_VERIFY.pass_signal} on its own line.\n"
+                f"\n{body}"
             )
 
-        output, self.session_id = self.backend.run(
+        answer, self.session_id = self.backend.run(
             role=AgentRole.PLANNER_REVIEWER,
             prompt=prompt,
             cwd=str(self.project_dir),
@@ -243,27 +287,21 @@ class PlannerReviewer:
             session_id=self.session_id,
         )
         _write_session(plan_path, "planner", self.session_id)
-
-        if not review_path.exists():
-            raise MissingArtifactError(
-                f"Agent ended without writing its review\n{review_path}"
-            )
-
-        # Check the review file, not the chat output — look for the review kind's pass signal on its own line
-        review_text = review_path.read_text()
-        if _has_escalation(review_text):
-            excerpt = _escalation_excerpt(review_text)
+        _write_artifact(review_path, answer)
+        # Look for the review kind's pass signal on its own line in the answer
+        if _has_escalation(answer):
+            excerpt = _escalation_excerpt(answer)
             _write_session(plan_path, "escalation", f"reviewer: {excerpt} ({review_path})")
             _write_session(plan_path, "step", "escalated")
             raise EscalationError(f"{review_path}: {excerpt}")
 
-        return _has_signal(review_text, REVIEW_VERIFY.pass_signal)
+        return _has_signal(answer, REVIEW_VERIFY.pass_signal)
 
     def begin_turn(self, plan_path: Path) -> None:
         """No-op: the reviewer's verdict needs no state from before the turn."""
 
-    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None) -> bool:
-        return self.review(plan_path, out_path, prev_review_path=prev_out_path)
+    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None) -> bool:
+        return self.review(plan_path, out_path, prev_review_path=prev_out_path, implementer_answer_path=implementer_answer_path)
 
 
 class PlanReviewer:
@@ -275,27 +313,32 @@ class PlanReviewer:
         self.system_prompt = _compose_instructions(_load_prompt("reviewer"), _load_prompt("escalation"))
 
     def review_plan(self, plan_path: Path, review_path: Path, attempt: int) -> bool:
-        """Review a plan file. Writes review to review_path. Returns True if passed.
+        """Review a plan. The run writes the reviewer's answer to review_path.
 
-        The reviewer's session id is written to the plan's sidecar under
+        The plan's text travels in the message under a ``## Plan`` heading; the
+        reviewer's session id is written to the plan's sidecar under
         ``plan-reviewer-<attempt>`` as soon as the agent returns, before the
-        review file is checked, so a reviewer that wrote no review or escalated
+        answer is written, so a reviewer that answered nothing or escalated
         still leaves its id.
 
-        Raises MissingArtifactError if the agent ends its turn without writing
-        the review file — a halt, not a failed review.
+        Raises EmptyAnswerError when the agent's answer is empty — a halt, not
+        a failed review; no review file is written.
         """
         prompt = (
-            f"Review the PLAN at: {plan_path}\n"
-            f"Read the plan file and the codebase it targets.\n"
-            f"Check for: missing steps, wrong assumptions about the codebase, "
-            f"architectural mistakes, missing migrations, security issues, "
-            f"incorrect file paths or API usage.\n"
-            f"Write your full review to: {review_path}\n"
-            f"If the plan is solid, end the review file with {PLAN_REVIEW_PASS} on its own line.\n"
+            "Review the PLAN below.\n"
+            "Read the codebase it targets.\n"
+            "Check for: missing steps, wrong assumptions about the codebase, "
+            "architectural mistakes, missing migrations, security issues, "
+            "incorrect file paths or API usage.\n"
+            "Return your full review as your answer.\n"
+            f"If the plan is solid, end your answer with {PLAN_REVIEW_PASS} on its own line.\n"
+            "\n"
+            "## Plan\n"
+            "\n"
+            f"{plan_path.read_text()}"
         )
 
-        _, sid = self.backend.run(
+        answer, sid = self.backend.run(
             role=AgentRole.PLAN_REVIEWER,
             prompt=prompt,
             cwd=str(self.project_dir),
@@ -303,18 +346,13 @@ class PlanReviewer:
             session_id=None,
         )
         _write_session(plan_path, f"plan-reviewer-{attempt}", sid)
-        if not review_path.exists():
-            raise MissingArtifactError(
-                f"Agent ended without writing its review\n{review_path}"
-            )
-
-        review_text = review_path.read_text()
-        if _has_escalation(review_text):
-            excerpt = _escalation_excerpt(review_text)
+        _write_artifact(review_path, answer)
+        if _has_escalation(answer):
+            excerpt = _escalation_excerpt(answer)
             _write_session(plan_path, "escalation", f"plan-reviewer: {excerpt} ({review_path})")
             _write_session(plan_path, "step", "escalated")
             raise EscalationError(f"{review_path}: {excerpt}")
-        return _has_signal(review_text, PLAN_REVIEW_PASS)
+        return _has_signal(answer, PLAN_REVIEW_PASS)
 
 
 class Implementer:
@@ -326,12 +364,37 @@ class Implementer:
         self.system_prompt = _compose_instructions(_load_prompt("implementer"), _load_prompt("escalation"))
         self.session_id: str | None = None
 
-    def implement(self, plan_path: Path, feedback_path: Path | None = None, roadmap_path: Path | None = None, line_number: int | None = None) -> None:
+    def implement(self, plan_path: Path, answer_path: Path, feedback_path: Path | None = None, roadmap_path: Path | None = None, line_number: int | None = None) -> None:
+        """Implement the plan. The run writes the implementer's answer to answer_path.
+
+        The first message carries the roadmap line and the plan's text under a
+        ``## Plan`` heading; a fix message, sent when the role holds a session and
+        a feedback path, carries the review's text under ``## Review``. Both end
+        with the grammar of the answer: what was done, and one ``DEVIATION`` line
+        per point where the file disagreed with the plan. No message names a path
+        of the run's tree other than the roadmap line.
+
+        The implementer's session id is written to the plan's sidecar under
+        ``implementer`` as soon as the agent returns, before the answer is
+        written. An empty answer halts with EmptyAnswerError and leaves ``step``
+        at its value before the turn, so a resumed run calls the implementer
+        again.
+        """
+        answer_grammar = (
+            "Your answer states what was done, and carries one "
+            "`DEVIATION: <plan said / file showed / done>` line for each point "
+            "where the file disagreed with the plan."
+        )
         if self.session_id and feedback_path is not None:
             # Continuing with feedback — apply the fixes
             prompt = (
-                f"Review feedback has been written to {feedback_path}. "
-                f"Read it and apply the fixes."
+                "Apply the fixes of the review below.\n"
+                "\n"
+                "## Review\n"
+                "\n"
+                f"{feedback_path.read_text()}\n"
+                "\n"
+                f"{answer_grammar}"
             )
         else:
             roadmap_line = ""
@@ -340,10 +403,16 @@ class Implementer:
 
             prompt = (
                 f"{roadmap_line}"
-                f"Implement the plan at: {plan_path}"
+                "Implement the plan below.\n"
+                "\n"
+                "## Plan\n"
+                "\n"
+                f"{plan_path.read_text()}\n"
+                "\n"
+                f"{answer_grammar}"
             )
 
-        _, self.session_id = self.backend.run(
+        answer, self.session_id = self.backend.run(
             role=AgentRole.IMPLEMENTER,
             prompt=prompt,
             cwd=str(self.project_dir),
@@ -351,12 +420,13 @@ class Implementer:
             session_id=self.session_id,
         )
         _write_session(plan_path, "implementer", self.session_id)
+        _write_artifact(answer_path, answer)
 
-        if plan_path.exists() and _has_escalation(plan_path.read_text()):
-            excerpt = _escalation_excerpt(plan_path.read_text())
-            _write_session(plan_path, "escalation", f"implementer: {excerpt} ({plan_path})")
+        if _has_escalation(answer):
+            excerpt = _escalation_excerpt(answer)
+            _write_session(plan_path, "escalation", f"implementer: {excerpt} ({answer_path})")
             _write_session(plan_path, "step", "escalated")
-            raise EscalationError(f"{plan_path}: {excerpt}")
+            raise EscalationError(f"{answer_path}: {excerpt}")
 
 
 class TestRunner:
@@ -370,8 +440,11 @@ class TestRunner:
     def begin_turn(self, plan_path: Path) -> None:
         """No-op: the test run reads only the plan and the tree at its own moment."""
 
-    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None) -> bool:
-        """Extract test command from plan, run it, write output. Returns True if exit code 0."""
+    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None) -> bool:
+        """Extract test command from plan, run it, write output. Returns True if exit code 0.
+
+        Reads nothing from prev_out_path or implementer_answer_path — the test
+        run reads only the plan and the tree."""
         cmd = self._extract_test_command(plan_path)
         if not cmd:
             out_path.write_text("ERROR: No '## Test Command' section found in plan.\n")

@@ -16,11 +16,11 @@ PlannerReviewer.plan()      ← uses the test-planner prompt
                     └─► mark_done() + git commit
 ```
 
-The key difference from `implement` is the final step. Instead of an LLM reviewer reading the test file "by eye," a real test command runs. `TestRunner` reads the `## Test Command` section from the plan file (the test planner always writes it), runs the command via shell, and captures stdout+stderr and the exit code. Exit code 0 means the task is done. Otherwise, the path to the test-output file in `test-runs/` is passed to the implementer directly as feedback for the next iteration.
+The key difference from `implement` is the final step. Instead of an LLM reviewer reading the test file "by eye," a real test command runs. `TestRunner` reads the `## Test Command` section from the plan file (the test planner always returns it in its answer, and the run writes the plan file from it), runs the command via shell, and captures stdout+stderr and the exit code. Exit code 0 means the task is done. Otherwise, the content of the test-output file in `test-runs/` reaches the implementer inline, in its message, as feedback for the next iteration.
 
 Unlike the implement flow, the final check here is a real test run, not an LLM review — tests either pass or they do not. This closes a class of error an LLM cannot see: a test compiles and looks plausible, but fails at runtime because of a wrong mock or a wrong invariant.
 
-In test mode, `PlannerReviewer` uses a specialized prompt: it reads the full source of the target files, finds existing `*.spec.*` / `*.test.*` patterns, and writes a plan where each task is one `describe` block with named test cases. The plan's required field is `## Test Command`, with the exact command to run.
+In test mode, `PlannerReviewer` uses a specialized prompt: it reads the full source of the target files, finds existing `*.spec.*` / `*.test.*` patterns, and returns a plan where each task is one `describe` block with named test cases. The plan's required field is `## Test Command`, with the exact command to run.
 
 ## Task format
 

@@ -19,7 +19,7 @@ from orchestrator.agents import (
 )
 from orchestrator.claude_cli import ClaudeAgentBackend, _classify_result
 from orchestrator.process_control import kill_active_child
-from orchestrator.errors import EscalationError, HaltError, MissingArtifactError, RateLimitError
+from orchestrator.errors import EmptyAnswerError, EscalationError, HaltError, RateLimitError
 from orchestrator.protocol import (
     _escalation_excerpt,
     _has_escalation,
@@ -29,7 +29,7 @@ from orchestrator.protocol import (
     _write_sessions,
 )
 from orchestrator.ports import AgentRole, RoleSetting
-from tests.fakes import FakeAgentBackend, silent_backend, target_path, writing_backend
+from tests.fakes import FakeAgentBackend
 
 
 # ---------------------------------------------------------------------------
@@ -982,67 +982,76 @@ ESCALATION_ARTIFACT = "Some notes\n\n## Escalation\nMissing decision: pick A or 
 
 
 def test_plan_escalation_raises_and_writes_sidecar(tmp_path):
-    """plan() raises EscalationError and the sidecar ends with step=escalated plus a
-    non-empty escalation summary when the written plan artifact ends with ESCALATION."""
+    """plan() raises EscalationError and the sidecar ends with step=escalated plus the
+    escalation summary naming the plan file when the planner's answer ends with ESCALATION."""
     plan_path = tmp_path / "01-slug.md"
-    backend = writing_backend(plan_path, ESCALATION_ARTIFACT)
+    backend = FakeAgentBackend(on_call=lambda call: ESCALATION_ARTIFACT, sid="sid-1")
     pr = PlannerReviewer(tmp_path, backend)
 
     with pytest.raises(EscalationError):
         pr.plan("Task title", "Task description", plan_path)
 
+    assert plan_path.read_text() == ESCALATION_ARTIFACT
     sessions = json.loads(plan_path.with_suffix(".json").read_text())
     assert sessions["step"] == "escalated"
-    assert sessions["escalation"]
+    assert sessions["escalation"] == f"planner: Missing decision: pick A or B. ({plan_path})"
 
 
-def test_review_escalation_raises_before_review_pass_check(tmp_path):
-    """review() raises EscalationError and writes the sidecar when the review artifact ends
-    with ESCALATION, without falling through to the REVIEW_PASS check."""
+def test_review_escalation_raises_before_review_pass_check(tmp_path, monkeypatch):
+    """review() raises EscalationError and writes the sidecar when the reviewer's
+    answer ends with ESCALATION, without falling through to the REVIEW_PASS check.
+    The answer is recorded at the review path before the raise."""
     plan_path = tmp_path / "01-slug.md"
     plan_path.write_text("# Plan")
     review_path = tmp_path / "01-slug-review-1.md"
-    backend = writing_backend(review_path, ESCALATION_ARTIFACT)
+    backend = FakeAgentBackend(on_call=lambda call: ESCALATION_ARTIFACT, sid="sid-1")
     pr = PlannerReviewer(tmp_path, backend)
 
     with pytest.raises(EscalationError):
         pr.review(plan_path, review_path)
 
+    assert review_path.read_text() == ESCALATION_ARTIFACT
     sessions = json.loads(plan_path.with_suffix(".json").read_text())
     assert sessions["step"] == "escalated"
     assert sessions["escalation"]
 
 
 def test_review_plan_escalation_raises_and_writes_sidecar(tmp_path):
-    """review_plan() raises EscalationError and writes the sidecar when the plan-review
-    artifact ends with ESCALATION, without falling through to the PLAN_REVIEW_PASS check."""
+    """review_plan() raises EscalationError and writes the sidecar when the reviewer's
+    answer ends with ESCALATION, without falling through to the PLAN_REVIEW_PASS check.
+    The answer is recorded at the review path before the raise."""
     plan_path = tmp_path / "01-slug.md"
     plan_path.write_text("# Plan")
     review_path = tmp_path / "01-slug-plan-review-1.md"
-    backend = writing_backend(review_path, ESCALATION_ARTIFACT)
+    backend = FakeAgentBackend(on_call=lambda call: ESCALATION_ARTIFACT, sid="sid-1")
     reviewer = PlanReviewer(tmp_path, backend)
 
     with pytest.raises(EscalationError):
         reviewer.review_plan(plan_path, review_path, 1)
 
+    assert review_path.read_text() == ESCALATION_ARTIFACT
     sessions = json.loads(plan_path.with_suffix(".json").read_text())
     assert sessions["step"] == "escalated"
     assert sessions["escalation"]
 
 
 def test_implement_escalation_raises_and_writes_sidecar(tmp_path):
-    """implement() raises EscalationError and writes the sidecar when the plan artifact it
-    owns ends with ESCALATION."""
+    """implement() raises EscalationError and writes the sidecar when the implementer's
+    answer ends with ESCALATION. The answer lands at the answer path and the sidecar's
+    escalation records that file."""
     plan_path = tmp_path / "01-slug.md"
-    backend = writing_backend(plan_path, ESCALATION_ARTIFACT)
+    plan_path.write_text("# Plan")
+    answer_path = tmp_path / "01-slug-implementer-1.md"
+    backend = FakeAgentBackend(on_call=lambda call: ESCALATION_ARTIFACT, sid="sid-1")
     impl = Implementer(tmp_path, backend)
 
     with pytest.raises(EscalationError):
-        impl.implement(plan_path)
+        impl.implement(plan_path, answer_path)
 
+    assert answer_path.read_text() == ESCALATION_ARTIFACT
     sessions = json.loads(plan_path.with_suffix(".json").read_text())
     assert sessions["step"] == "escalated"
-    assert sessions["escalation"]
+    assert sessions["escalation"] == f"implementer: Missing decision: pick A or B. ({answer_path})"
 
 
 # ---------------------------------------------------------------------------
@@ -1050,34 +1059,36 @@ def test_implement_escalation_raises_and_writes_sidecar(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_review_regression_no_escalation_returns_bool(tmp_path):
-    """An artifact ending with REVIEW_PASS and no ESCALATION line returns True, with no
-    raise and no 'escalated' sidecar."""
+def test_review_regression_no_escalation_returns_bool(tmp_path, monkeypatch):
+    """An answer ending with REVIEW_PASS and no ESCALATION line returns True, with
+    no raise, and lands verbatim at the review path."""
     plan_path = tmp_path / "01-slug.md"
     plan_path.write_text("# Plan")
     review_path = tmp_path / "01-slug-review-1.md"
-    backend = writing_backend(review_path, "All good\n\nREVIEW_PASS")
+    backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
     pr = PlannerReviewer(tmp_path, backend)
 
     assert pr.review(plan_path, review_path) is True
 
+    assert review_path.read_text() == "All good\n\nREVIEW_PASS"
     sessions = json.loads(plan_path.with_suffix(".json").read_text())
     assert sessions.get("step") != "escalated"
     assert "escalation" not in sessions
 
 
 def test_review_plan_regression_no_escalation_returns_bool(tmp_path):
-    """An artifact ending with PLAN_REVIEW_PASS and no ESCALATION line returns True, with
-    no raise. The sidecar holds only the reviewer's session id, with no 'step' and no
-    'escalation'."""
+    """An answer ending with PLAN_REVIEW_PASS and no ESCALATION line returns True, with
+    no raise, and lands verbatim at the review path. The sidecar holds only the
+    reviewer's session id, with no 'step' and no 'escalation'."""
     plan_path = tmp_path / "01-slug.md"
     plan_path.write_text("# Plan")
     review_path = tmp_path / "01-slug-plan-review-1.md"
-    backend = writing_backend(review_path, "All good\n\nPLAN_REVIEW_PASS")
+    backend = FakeAgentBackend(on_call=lambda call: "All good\n\nPLAN_REVIEW_PASS", sid="sid-1")
     reviewer = PlanReviewer(tmp_path, backend)
 
     assert reviewer.review_plan(plan_path, review_path, 1) is True
 
+    assert review_path.read_text() == "All good\n\nPLAN_REVIEW_PASS"
     assert json.loads(plan_path.with_suffix(".json").read_text()) == {"plan-reviewer-1": "sid-1"}
 
 
@@ -1086,45 +1097,49 @@ def test_review_plan_regression_no_escalation_returns_bool(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_review_missing_file_raises_missing_artifact_error(tmp_path):
-    """PlannerReviewer.review raises MissingArtifactError, not a False verdict, when the
-    agent ends its turn without writing the review file. The session write still happens;
-    no 'step' is written for this halt."""
+def test_review_blank_answer_raises_empty_answer_error(tmp_path, monkeypatch):
+    """PlannerReviewer.review raises EmptyAnswerError, not a False verdict, when the
+    reviewer's answer is blank. The planner write still happens, no review file is
+    written, and `step` stays at its value before the turn, so a resumed run
+    repeats the review."""
     plan_path = tmp_path / "01-slug.md"
     plan_path.write_text("# Plan")
+    plan_path.with_suffix(".json").write_text(json.dumps({"runtime": "claude", "step": "implemented:1"}))
     review_path = tmp_path / "01-slug-review-1.md"
-    backend = silent_backend()
+    backend = FakeAgentBackend(on_call=lambda call: "  \n", sid="sid-1")
     pr = PlannerReviewer(tmp_path, backend)
 
-    with pytest.raises(MissingArtifactError) as exc_info:
+    with pytest.raises(EmptyAnswerError) as exc_info:
         pr.review(plan_path, review_path)
 
     lines = str(exc_info.value).splitlines()
-    assert lines[0] == "Agent ended without writing its review"
+    assert lines[0] == "Agent returned an empty answer"
     assert lines[1] == str(review_path)
 
-    sessions = json.loads(plan_path.with_suffix(".json").read_text())
-    assert sessions.get("planner") == "sid-1"
-    assert "step" not in sessions
+    assert not review_path.exists()
+    assert json.loads(plan_path.with_suffix(".json").read_text()) == {
+        "runtime": "claude", "step": "implemented:1", "planner": "sid-1",
+    }
 
 
-def test_review_plan_missing_file_raises_missing_artifact_error(tmp_path):
-    """PlanReviewer.review_plan raises MissingArtifactError, not a False verdict, when the
-    agent ends its turn without writing the review file. The session id is written even
-    though no review exists, and no 'step' is written."""
+def test_review_plan_blank_answer_raises_empty_answer_error(tmp_path):
+    """PlanReviewer.review_plan raises EmptyAnswerError, not a False verdict, when the
+    agent's answer is blank. The session id is written even though no review exists,
+    no review file is written, and no 'step' is written."""
     plan_path = tmp_path / "01-slug.md"
     plan_path.write_text("# Plan")
     review_path = tmp_path / "01-slug-plan-review-1.md"
-    backend = silent_backend()
+    backend = FakeAgentBackend(on_call=lambda call: "  \n\t\n", sid="sid-1")
     reviewer = PlanReviewer(tmp_path, backend)
 
-    with pytest.raises(MissingArtifactError) as exc_info:
+    with pytest.raises(EmptyAnswerError) as exc_info:
         reviewer.review_plan(plan_path, review_path, 1)
 
     lines = str(exc_info.value).splitlines()
-    assert lines[0] == "Agent ended without writing its review"
+    assert lines[0] == "Agent returned an empty answer"
     assert lines[1] == str(review_path)
 
+    assert not review_path.exists()
     assert json.loads(plan_path.with_suffix(".json").read_text()) == {"plan-reviewer-1": "sid-1"}
 
 
@@ -1133,22 +1148,159 @@ def test_review_plan_missing_file_raises_missing_artifact_error(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _artifact_writing_backend(plan_review_text: str = "ok\n\nPLAN_REVIEW_PASS") -> FakeAgentBackend:
-    """A fake that writes whatever artifact the prompt names, shaped by the role."""
+def _artifact_writing_backend(plan_review_text: str = "ok\n\nPLAN_REVIEW_PASS",
+                              review_text: str = "All good\n\nREVIEW_PASS") -> FakeAgentBackend:
+    """A fake that writes whatever artifact the prompt names, shaped by the role;
+    the plan reviewer and the code reviewer return their reviews as their answers."""
 
     def _write(call):
-        path = target_path(call.prompt)
-        if call.role is AgentRole.PLANNER_REVIEWER and "review" not in path.name:
-            path.write_text("# Plan")
-        elif call.role is AgentRole.PLANNER_REVIEWER:
-            path.write_text("All good\n\nREVIEW_PASS")
-        elif call.role is AgentRole.PLAN_REVIEWER:
-            path.write_text(plan_review_text)
+        if call.role is AgentRole.PLAN_REVIEWER:
+            return plan_review_text
+        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+            return review_text
+        return "# Plan"
 
     return FakeAgentBackend(on_call=_write)
 
 
-def test_planner_reviewer_passes_complete_instructions_and_continues_session(tmp_path):
+def test_review_message_carries_plan_answer_and_no_previous_review_or_diff(tmp_path):
+    """A first review tells the reviewer to see the changes itself, carries no diff
+    section, and holds the plan and the implementer's answer under their headings
+    with no path of the run's tree."""
+    plan_path = tmp_path / "01-slug.md"
+    plan_path.write_text("# Plan: The work")
+    review_path = tmp_path / "01-slug-review-1.md"
+    answer_path = tmp_path / "01-slug-implementer-1.md"
+    answer_path.write_text("Did the work.\nDEVIATION: said x / showed y / did z")
+    backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
+    pr = PlannerReviewer(tmp_path, backend)
+
+    assert pr.review(plan_path, review_path, implementer_answer_path=answer_path) is True
+
+    prompt = backend.calls[0].prompt
+    assert "Run `git diff HEAD` and `git status` to see ALL changes." in prompt
+    assert "## Diff against the base" not in prompt
+    assert "## Plan\n\n# Plan: The work" in prompt
+    assert "## The implementer's answer\n\nDid the work.\nDEVIATION: said x / showed y / did z" in prompt
+    assert "## The previous review" not in prompt
+    assert "Return your full review as your answer." in prompt
+    assert "If you have no findings at all, end your answer with REVIEW_PASS on its own line." in prompt
+    for path in (plan_path, review_path, answer_path):
+        assert str(path) not in prompt
+
+
+def test_re_review_message_keeps_the_quoted_obligations_and_carries_the_previous_review(tmp_path):
+    """A re-review message carries the previous review's text under its heading,
+    tells the reviewer to see the changes itself, carries no diff section and
+    keeps the re-review obligations byte-identical."""
+    plan_path = tmp_path / "01-slug.md"
+    plan_path.write_text("# Plan")
+    review_1 = tmp_path / "01-slug-review-1.md"
+    review_1.write_text("Finding one.")
+    review_2 = tmp_path / "01-slug-review-2.md"
+    backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
+    pr = PlannerReviewer(tmp_path, backend)
+
+    assert pr.review(plan_path, review_2, prev_review_path=review_1) is True
+
+    prompt = backend.calls[0].prompt
+    assert "This is a RE-REVIEW after fixes were applied to address the previous review under `## The previous review`." in prompt
+    assert "Do NOT trust your session memory about file contents — the code has changed since your last pass." in prompt
+    assert (
+        "For each finding in the previous review, open the cited file as it is now and read it in full, "
+        "quote the CURRENT content relevant to that finding, and give a verdict: Fixed or Not fixed, "
+        "with the quote as evidence."
+    ) in prompt
+    assert "Then run the normal full review for new issues:" in prompt
+    assert "Return your full review (per-finding verdicts plus any new issues) as your answer." in prompt
+    assert "## The previous review\n\nFinding one." in prompt
+    assert "Run `git diff HEAD` and `git status` to see ALL changes." in prompt
+    assert "## Diff against the base" not in prompt
+    assert str(review_1) not in prompt and str(review_2) not in prompt
+
+
+def test_plan_messages_carry_the_task_and_the_revision_context(tmp_path):
+    """The first planning message carries the task and asks for the plan as the answer;
+    a revision message carries the current plan's and the review's text under their
+    headings and names no path of either."""
+    plan_path = tmp_path / "01-slug.md"
+    plan_path.write_text("# Plan: The work")
+    review_path = tmp_path / "01-slug-plan-review-1.md"
+    review_path.write_text("Missing step for X.")
+    backend = FakeAgentBackend(on_call=lambda call: "# Plan: The work", sid="sid-1")
+    pr = PlannerReviewer(tmp_path, backend)
+
+    pr.plan("Task title", "Task description", plan_path)
+    first = backend.calls[0].prompt
+    assert "**Task title**" in first and "Task description" in first
+    assert "Return the plan as your answer." in first
+    assert "## Plan review" not in first
+    assert str(plan_path) not in first
+
+    pr.plan("Task title", "Task description", plan_path, plan_review_path=review_path)
+    revision = backend.calls[1].prompt
+    assert "Your plan was reviewed and has issues." in revision
+    assert "Address the issues of the review below and return the revised plan as your answer." in revision
+    assert "## Plan\n\n# Plan: The work" in revision
+    assert "## Plan review\n\nMissing step for X." in revision
+    assert str(plan_path) not in revision and str(review_path) not in revision
+
+
+def test_plan_answer_lands_verbatim_at_plan_path(tmp_path):
+    plan_path = tmp_path / "01-slug.md"
+    backend = FakeAgentBackend(on_call=lambda call: "# Plan: Fresh\n\nbody\n", sid="sid-1")
+    pr = PlannerReviewer(tmp_path, backend)
+
+    pr.plan("Task title", "Task description", plan_path)
+
+    assert plan_path.read_text() == "# Plan: Fresh\n\nbody\n"
+
+
+def test_plan_blank_answer_halts_and_leaves_the_round_recorded(tmp_path):
+    """A blank planner answer raises EmptyAnswerError, leaves an existing plan exactly
+    as it was and leaves step at planning:N, so a resumed run repeats the round."""
+    plan_path = tmp_path / "01-slug.md"
+    plan_path.write_text("# Plan: The old plan")
+    plan_path.with_suffix(".json").write_text(json.dumps({"runtime": "claude", "step": "planning:2"}))
+    backend = FakeAgentBackend(on_call=lambda call: " \n", sid="sid-1")
+    pr = PlannerReviewer(tmp_path, backend)
+
+    with pytest.raises(EmptyAnswerError) as exc_info:
+        pr.plan("Task title", "Task description", plan_path)
+
+    lines = str(exc_info.value).splitlines()
+    assert lines[0] == "Agent returned an empty answer"
+    assert lines[1] == str(plan_path)
+    assert plan_path.read_text() == "# Plan: The old plan"
+    assert json.loads(plan_path.with_suffix(".json").read_text()) == {
+        "runtime": "claude", "step": "planning:2", "planner": "sid-1",
+    }
+
+
+def test_review_plan_message_carries_the_plan_text_and_names_no_path(tmp_path):
+    """The reviewer's message carries the plan's text under a ## Plan heading, keeps the
+    Check-for sentence byte-identical, and names neither the plan's path nor the
+    review's path."""
+    plan_path = tmp_path / "01-slug.md"
+    plan_path.write_text("# Plan: Add the door\n\n1. Do it.\n")
+    review_path = tmp_path / "01-slug-plan-review-1.md"
+    backend = _artifact_writing_backend()
+    reviewer = PlanReviewer(tmp_path, backend)
+
+    assert reviewer.review_plan(plan_path, review_path, 1) is True
+
+    prompt = backend.calls[0].prompt
+    assert "## Plan\n\n# Plan: Add the door\n\n1. Do it.\n" in prompt
+    assert (
+        "Check for: missing steps, wrong assumptions about the codebase, "
+        "architectural mistakes, missing migrations, security issues, "
+        "incorrect file paths or API usage.\n"
+    ) in prompt
+    assert str(plan_path) not in prompt
+    assert str(review_path) not in prompt
+
+
+def test_planner_reviewer_passes_complete_instructions_and_continues_session(tmp_path, monkeypatch):
     """Every PlannerReviewer call carries the complete planner + reviewer + escalation
     instructions, resumed ones included; the session id handed in is the one returned last."""
     backend = _artifact_writing_backend()
@@ -1186,10 +1338,14 @@ def test_implementer_fixes_continue_session_with_complete_instructions(tmp_path)
     backend = FakeAgentBackend()
     impl = Implementer(tmp_path, backend)
     plan_path = tmp_path / "01-slug.md"
+    plan_path.write_text("# Plan: The work")
     feedback = tmp_path / "01-slug-review-1.md"
+    feedback.write_text("Fix the edge case.")
+    answer_1 = tmp_path / "01-slug-implementer-1.md"
+    answer_2 = tmp_path / "01-slug-implementer-2.md"
 
-    impl.implement(plan_path)
-    impl.implement(plan_path, feedback_path=feedback)
+    impl.implement(plan_path, answer_1)
+    impl.implement(plan_path, answer_2, feedback_path=feedback)
 
     first, second = backend.calls
     for call in (first, second):
@@ -1199,44 +1355,90 @@ def test_implementer_fixes_continue_session_with_complete_instructions(tmp_path)
         assert _load_prompt("escalation") in call.instructions
     assert first.session_id is None
     assert second.session_id == backend.returned[0]
-    assert str(feedback) in second.prompt
-    assert "Review feedback" in second.prompt
+    assert "## Plan\n\n# Plan: The work" in first.prompt
+    assert str(plan_path) not in first.prompt
+    assert "Apply the fixes of the review below." in second.prompt
+    assert "## Review\n\nFix the edge case." in second.prompt
+    assert str(feedback) not in second.prompt
+    assert str(plan_path) not in second.prompt
+    assert answer_1.read_text() == "fake output"
+    assert answer_2.read_text() == "fake output"
+
+
+def test_implementer_blank_answer_raises_empty_answer_error(tmp_path):
+    """implement() raises EmptyAnswerError when the implementer's answer is blank.
+    No answer file is written; the sidecar keeps the implementer's id and `step`
+    stays at its value before the turn, so a resumed run calls the implementer again."""
+    plan_path = tmp_path / "01-slug.md"
+    plan_path.write_text("# Plan")
+    plan_path.with_suffix(".json").write_text(json.dumps({"runtime": "claude", "step": "plan_reviewed"}))
+    answer_path = tmp_path / "01-slug-implementer-1.md"
+    backend = FakeAgentBackend(on_call=lambda call: " \n", sid="sid-1")
+    impl = Implementer(tmp_path, backend)
+
+    with pytest.raises(EmptyAnswerError) as exc_info:
+        impl.implement(plan_path, answer_path)
+
+    lines = str(exc_info.value).splitlines()
+    assert lines[0] == "Agent returned an empty answer"
+    assert lines[1] == str(answer_path)
+    assert not answer_path.exists()
+    assert json.loads(plan_path.with_suffix(".json").read_text()) == {
+        "runtime": "claude", "step": "plan_reviewed", "implementer": "sid-1",
+    }
 
 
 def test_implementer_continuing_session_without_feedback_sends_plan_prompt(tmp_path):
     backend = FakeAgentBackend()
     impl = Implementer(tmp_path, backend)
     plan_path = tmp_path / "01-slug.md"
+    plan_path.write_text("# Plan: The work")
     roadmap_path = tmp_path / "roadmap.md"
 
-    impl.implement(plan_path, roadmap_path=roadmap_path, line_number=4)
-    impl.implement(plan_path, feedback_path=None, roadmap_path=roadmap_path, line_number=4)
+    impl.implement(plan_path, tmp_path / "01-slug-implementer-1.md", roadmap_path=roadmap_path, line_number=4)
+    impl.implement(plan_path, tmp_path / "01-slug-implementer-2.md", feedback_path=None, roadmap_path=roadmap_path, line_number=4)
 
     first, second = backend.calls
     assert second.session_id == backend.returned[0]
     assert second.prompt == (
         f"Roadmap: {roadmap_path} (line 5)\n"
-        f"Implement the plan at: {plan_path}"
+        "Implement the plan below.\n"
+        "\n"
+        "## Plan\n"
+        "\n"
+        "# Plan: The work\n"
+        "\n"
+        "Your answer states what was done, and carries one `DEVIATION: <plan said / "
+        "file showed / done>` line for each point where the file disagreed with the plan."
     )
-    assert "Review feedback" not in second.prompt
+    assert "Apply the fixes" not in second.prompt
 
 
 def test_implementer_fresh_session_with_feedback_path_sends_plan_prompt(tmp_path):
     backend = FakeAgentBackend()
     impl = Implementer(tmp_path, backend)
     plan_path = tmp_path / "01-slug.md"
+    plan_path.write_text("# Plan: The work")
     roadmap_path = tmp_path / "roadmap.md"
     feedback = tmp_path / "01-slug-review-1.md"
+    feedback.write_text("Findings.")
 
-    impl.implement(plan_path, feedback_path=feedback, roadmap_path=roadmap_path, line_number=4)
+    impl.implement(plan_path, tmp_path / "01-slug-implementer-1.md", feedback_path=feedback, roadmap_path=roadmap_path, line_number=4)
 
     call = backend.calls[0]
     assert call.session_id is None
     assert call.prompt == (
         f"Roadmap: {roadmap_path} (line 5)\n"
-        f"Implement the plan at: {plan_path}"
+        "Implement the plan below.\n"
+        "\n"
+        "## Plan\n"
+        "\n"
+        "# Plan: The work\n"
+        "\n"
+        "Your answer states what was done, and carries one `DEVIATION: <plan said / "
+        "file showed / done>` line for each point where the file disagreed with the plan."
     )
-    assert "Review feedback" not in call.prompt
+    assert "Apply the fixes" not in call.prompt
 
 
 def test_plan_review_attempts_inherit_no_session(tmp_path):

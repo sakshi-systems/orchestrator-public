@@ -14,7 +14,7 @@ from .notify import Outcome, report
 from .ports import AgentBackendProtocol, VerifyKind
 from .protocol import _read_sessions, _write_session, _write_sessions
 from .resume import _attempt_budget, _check_attempt, _detect_step, _interpret_step, _validate_sidecar_step, plan_review_budget
-from .roadmap import mark_done, mark_skipped, parse_roadmap
+from .roadmap import mark_done, parse_roadmap
 from .runtime import _run_summary
 from . import state
 
@@ -24,7 +24,6 @@ class Mode(NamedTuple):
     roadmap_relpath: str  # path relative to `.ai-factory/`
     header_label: str
     planner_prompt_name: str
-    skip_message: str
     verify: VerifyKind
     artifact_subdir: str | None = None  # per-roadmap artifact dir segment; None = flat (default pair)
 
@@ -33,7 +32,6 @@ IMPLEMENT_MODE = Mode(
     roadmap_relpath="ROADMAP.md",
     header_label="TASK",
     planner_prompt_name="planner",
-    skip_message="Planner did not create a plan (task may already be done). Skipping.",
     verify=REVIEW_VERIFY,
 )
 
@@ -41,7 +39,6 @@ TEST_MODE = Mode(
     roadmap_relpath="ROADMAP_TESTS.md",
     header_label="TEST TASK",
     planner_prompt_name="test-planner",
-    skip_message="Planner did not create a plan. Skipping.",
     verify=TEST_RUN_VERIFY,
 )
 
@@ -99,9 +96,11 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     plans_dir = _artifact_dir(project_dir, mode, "plans")
     output_dir = _artifact_dir(project_dir, mode, mode.verify.output_dirname)
     plan_reviews_dir = _artifact_dir(project_dir, mode, "plan-reviews")
+    reviews_dir = _artifact_dir(project_dir, mode, "reviews")
     plans_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     plan_reviews_dir.mkdir(parents=True, exist_ok=True)
+    reviews_dir.mkdir(parents=True, exist_ok=True)
 
     roadmap_path = project_dir / ".ai-factory" / mode.roadmap_relpath
     seq = f"{task_index:02d}"
@@ -161,12 +160,6 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         else:
             planner_reviewer.plan(task.title, task.description, plan_path, roadmap_path=roadmap_path, line_number=task.line_number)
 
-        if not plan_path.exists():
-            _write_sessions(plan_path, {"runtime": config.runtime, "step": "done"})
-            print(f">>> {mode.skip_message}")
-            mark_skipped(roadmap_path, task)
-            return planner_reviewer.session_id
-
         step = "plan_review"
         _write_session(plan_path, "step", f"planned:{counter}")
         _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
@@ -201,11 +194,6 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
                 plan_review_path=plan_review_path,
                 roadmap_path=roadmap_path, line_number=task.line_number,
             )
-            if not plan_path.exists():
-                _write_sessions(plan_path, {"runtime": config.runtime, "step": "done"})
-                print(f">>> {mode.skip_message}")
-                mark_skipped(roadmap_path, task)
-                return planner_reviewer.session_id
             _write_session(plan_path, "step", f"planned:{attempt + 1}")
 
     # Step 2-3: Implement → Verify loop
@@ -218,7 +206,8 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
             print(f"\n>>> IMPLEMENTING (iteration {iteration})...")
             feedback_path = output_dir / f"{seq}-{task.slug}{mode.verify.output_suffix.format(n=iteration - 1)}" if iteration > 1 else None
             verifier.begin_turn(plan_path)
-            implementer.implement(plan_path, feedback_path=feedback_path, roadmap_path=roadmap_path, line_number=task.line_number)
+            answer_path = reviews_dir / f"{seq}-{task.slug}-implementer-{iteration}.md"
+            implementer.implement(plan_path, answer_path, feedback_path=feedback_path, roadmap_path=roadmap_path, line_number=task.line_number)
             _write_session(plan_path, "step", f"implemented:{iteration}")
             _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
 
@@ -230,7 +219,9 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
             prev = output_dir / f"{seq}-{task.slug}{mode.verify.output_suffix.format(n=iteration - 1)}"
             if prev.exists():
                 prev_out_path = prev
-        passed = verifier.verify(plan_path, out_path, prev_out_path)
+        implementer_answer = reviews_dir / f"{seq}-{task.slug}-implementer-{iteration}.md"
+        passed = verifier.verify(plan_path, out_path, prev_out_path,
+                                 implementer_answer if implementer_answer.exists() else None)
         _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
 
         if passed:
@@ -295,7 +286,7 @@ def _run_dynamic_loop(project_dir: Path, roadmap_path: Path, config: Orchestrato
         if signature == last_signature:
             raise PipelineStopError(
                 f"Task '{task.title}' checkbox is still unchecked after processing. "
-                f"Refusing to re-run the same task forever — check mark_done / mark_skipped."
+                f"Refusing to re-run the same task forever — check mark_done."
             )
         last_signature = signature
 

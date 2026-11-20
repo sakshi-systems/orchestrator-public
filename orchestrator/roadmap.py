@@ -98,14 +98,3 @@ def mark_done(path: Path, task: Task, elapsed_secs: int | None = None) -> None:
         new_line = new_line.rstrip() + f" [{time_str}]"
     lines[idx] = new_line
     path.write_text("\n".join(lines) + "\n")
-
-
-def mark_skipped(path: Path, task: Task) -> None:
-    """Mark a task as skipped (already done) in ROADMAP.md."""
-    lines = path.read_text().splitlines()
-    idx = _find_task_line(lines, task)
-    if idx is None:
-        idx = task.line_number
-    line = lines[idx]
-    lines[idx] = line.replace("- [ ]", "- [x] ⚠️ SKIPPED (already implemented)", 1)
-    path.write_text("\n".join(lines) + "\n")

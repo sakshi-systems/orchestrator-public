@@ -34,9 +34,9 @@ Before every initial or revised planner invocation, the orchestrator atomically 
 
 `planning:N` is producer-owned pending intent. A failed or incomplete invocation leaves it authoritative even if plausible Markdown or review artifacts exist. Restart repeats round N in the same selected record group, using its saved identity when available; pending intent never falls back to artifacts.
 
-Every initial, resumed or revised planning assignment carries the current task title and description, the supplied roadmap location and the assigned plan output path. Review feedback is included only when its artifact exists. Missing feedback does not reset the recorded round, invent findings or erase or replace a known session identity. Pending planning above round 1 still receives this complete task context when neither a saved task identity nor a phase identity exists. This assignment delivery does not replace native instruction policy or reconstruct a session.
+Every initial, resumed or revised planning assignment carries the current task title and description, the supplied roadmap location and the grammar the planner's answer takes. Review feedback is included inline only when its artifact exists. Missing feedback does not reset the recorded round, invent findings or erase or replace a known session identity. Pending planning above round 1 still receives this complete task context when neither a saved task identity nor a phase identity exists. This assignment delivery does not replace native instruction policy or reconstruct a session.
 
-A successful planner return with a plan advances the boundary to `planned:N`. Returned role identities retain their normal persistence and escalation handling. An identity that the runtime never returns and the orchestrator never persists has no recovery guarantee.
+A successful planner return advances the boundary to `planned:N`. Returned role identities retain their normal persistence and escalation handling. An identity that the runtime never returns and the orchestrator never persists has no recovery guarantee.
 
 ## `step` values
 
@@ -52,7 +52,7 @@ The `:N` suffix is an ASCII decimal integer greater than zero. Leading zeroes ma
 | `review_failed:N` | Round N's code review failed | Implements iteration N + 1 |
 | `test_run_failed:N` | Round N's test run failed in test mode | Implements iteration N + 1 |
 | `escalated` | An unresolved decision stops the task | Stops immediately without restoring session identities |
-| `done` | The record is closed by successful completion or a successful no-plan skip | Excludes the record from continuation selection |
+| `done` | The record is closed by successful completion | Excludes the record from continuation selection |
 
 ### Attempt limits
 
@@ -91,4 +91,4 @@ A tagged record with a missing or unknown step halts. A non-string step or malfo
 
 Normal successful verification marks the roadmap task done, records `done`, then commits through the existing pipeline. Where the head reviews, a finished implementation takes that place: once the project is found changed outside `.ai-factory/` against its tree as it stood when the implementer's turn began, the task closes the same way; otherwise the implement step fails and the run stops on the task, with its record left at the boundary before the implementer, so a later run calls the implementer again, continuing its session with the plan. A resume at `implemented:N` runs in a new process with no such tree to compare against, so it closes the task unchecked.
 
-Only a successful planner return with no plan takes the no-plan skip path. It records `done` before marking the roadmap task skipped, so a later task with the same title cannot adopt that JSON-only record. A crash between those writes can leave the task unchecked; the next run retries that task with a fresh record. Skip retains its existing commit behavior and introduces no separate terminal token.
+No planner return closes a record without a plan: an empty planner answer halts like the empty answer of any role, and the resumed run repeats the planning round. A task whose work already holds goes through plan and review like any other, and its review sees an empty diff.

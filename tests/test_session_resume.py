@@ -17,8 +17,8 @@ from orchestrator.errors import EscalationError
 from orchestrator.layout import _artifact_subdir, _tests_sibling
 from orchestrator.pipeline import IMPLEMENT_MODE, TEST_MODE, _artifact_dir, _next_number, process_task
 from orchestrator.ports import AgentRole
-from orchestrator.roadmap import mark_skipped, parse_roadmap
-from tests.fakes import FakeAgentBackend, target_path
+from orchestrator.roadmap import parse_roadmap
+from tests.fakes import FakeAgentBackend
 
 
 INVALID_FIELDS = [
@@ -139,14 +139,12 @@ def _review(flow, number=1, *, passed=True, prefix=None):
 def _backend(flow):
     def write(call):
         if call.role is AgentRole.IMPLEMENTER:
-            return
-        path = target_path(call.prompt)
+            return None
         if call.role is AgentRole.PLAN_REVIEWER:
-            path.write_text("PLAN_REVIEW_PASS")
-        elif path.parent == flow.plan.parent:
-            path.write_text("# Plan\n\n## Test Command\n`true`\n")
-        else:
-            path.write_text("REVIEW_PASS")
+            return "PLAN_REVIEW_PASS"
+        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+            return "REVIEW_PASS"
+        return "# Plan\n\n## Test Command\n`true`\n"
     return FakeAgentBackend(on_call=write)
 
 
@@ -165,7 +163,8 @@ def _assert_planner_assignment(call, flow):
     assert flow.task.title in call.prompt
     assert flow.task.description in call.prompt
     assert f"Roadmap: {flow.roadmap} (line {flow.task.line_number + 1})" in call.prompt
-    assert target_path(call.prompt) == flow.plan
+    assert "Return the plan as your answer." in call.prompt
+    assert str(flow.plan) not in call.prompt
     names = ("execution", flow.mode.planner_prompt_name, "reviewer", "escalation")
     fragments = [_load_prompt(name) for name in names]
     assert all(call.instructions.count(fragment) == 1 for fragment in fragments)
@@ -415,30 +414,32 @@ def test_pending_round_two_replays_rooted_assignment_and_incoming_identity(flow,
             assert disk["step"] == "planned:2"
             assert int(disk["elapsed"]) >= 7
             assert call.session_id is None
-        elif target_path(call.prompt) == f.plan:
+        elif call.role is AgentRole.PLANNER_REVIEWER:
             expected_id = saved_id if saved_id is not None else phase
             assert disk["runtime"] == runtime and disk["step"] == "planning:2"
             assert disk.get("planner") == expected_id
             assert disk["elapsed"] == "007"
             assert call.session_id == expected_id
-        delegate(call)
+        return delegate(call)
 
     # Inspect planning and its immediate plan review before implementation changes identities.
     def inspect_first_calls(call):
         if len(backend.calls) <= 2:
-            inspect(call)
-        else:
-            delegate(call)
+            return inspect(call)
+        return delegate(call)
     backend.on_call = inspect_first_calls
     _run(f, backend, phase=phase)
     planning, review, implement, verify = backend.calls
     _assert_planner_assignment(planning, f)
     assert planning.session_id == (saved_id if saved_id is not None else phase)
-    assert (str(previous) in planning.prompt) is feedback
-    assert ("Read the review at:" in planning.prompt) is feedback
+    if feedback:
+        assert f"## Plan review\n\n{previous.read_text()}" in planning.prompt
+    else:
+        assert "## Plan review" not in planning.prompt
+    assert ("## Plan review" in planning.prompt) is feedback
     assert ("has issues" in planning.prompt) is feedback
     assert review.role is AgentRole.PLAN_REVIEWER and review.session_id is None
-    assert target_path(review.prompt) == f.prd / f"{f.plan.stem}-plan-review-2.md"
+    assert (f.prd / f"{f.plan.stem}-plan-review-2.md").read_text() == "PLAN_REVIEW_PASS"
     assert implement.session_id == "saved implementer"
     assert verify.session_id == backend.returned[0]
     assert _read_sessions(f.plan)["step"] == "done"
@@ -457,7 +458,7 @@ def test_json_only_done_history_is_excluded_and_next_call_uses_fresh_group(flow,
     _run(f, backend)
     first = backend.calls[0]
     assert first.session_id is None
-    assert target_path(first.prompt) == f.plan.with_name(f"02-{f.task.slug}.md")
+    assert f.plan.with_name(f"02-{f.task.slug}.md").exists()
     assert f.plan.with_suffix(".json").read_bytes() == original
 
 
@@ -533,7 +534,7 @@ def test_flow_preserves_selected_prefix_for_every_artifact_and_isolates_segments
                                          padded_review, padded_output, broad)}
     backend = _backend(f)
     _run(f, backend)
-    assert target_path(backend.calls[0].prompt) == f.prd / f"{f.plan.stem}-plan-review-2.md"
+    assert (f.prd / f"{f.plan.stem}-plan-review-2.md").read_text() == "PLAN_REVIEW_PASS"
     assert backend.calls[0].session_id is None
     expected_output = f.output / f"{f.plan.stem}{f.mode.verify.output_suffix.format(n=1)}"
     assert expected_output.exists()
@@ -541,9 +542,11 @@ def test_flow_preserves_selected_prefix_for_every_artifact_and_isolates_segments
         assert expected_output.read_text().rstrip().endswith("TEST_PASS")
         assert [call.role for call in backend.calls] == [AgentRole.PLAN_REVIEWER, AgentRole.IMPLEMENTER]
     else:
-        assert target_path(backend.calls[-1].prompt) == expected_output
+        assert expected_output.read_text() == "REVIEW_PASS"
         assert backend.calls[-1].session_id == "selected-planner"
     assert _read_sessions(f.plan)["step"] == "done"
+    implementer_answers = _artifact_dir(f.project, f.mode, "reviews")
+    assert (implementer_answers / f"{f.plan.stem}-implementer-1.md").read_text() == "fake output"
     assert {p: p.read_bytes() for p in decoys} == decoys
     assert not f.plan.with_name(f"02-{f.task.slug}.json").exists()
     main_roadmap = "roadmaps/developer.md" if named else "ROADMAP.md"
@@ -558,7 +561,7 @@ def test_closed_unpadded_history_does_not_collide_with_padded_unfinished_flow(fl
     original = closed.read_bytes()
     backend = _backend(f)
     _run(f, backend)
-    assert target_path(backend.calls[0].prompt) == f.prd / f"01-{f.task.slug}-plan-review-1.md"
+    assert (f.prd / f"01-{f.task.slug}-plan-review-1.md").read_text() == "PLAN_REVIEW_PASS"
     assert closed.read_bytes() == original
     assert _read_sessions(f.plan)["step"] == "done"
 
@@ -577,178 +580,20 @@ def test_unfinished_numeric_collision_stops_flow_without_modifying_evidence(flow
     assert _snapshot(f) == before
 
 
-@pytest.mark.parametrize("named", [False, True])
-@pytest.mark.parametrize("test_mode", [False, True])
-@pytest.mark.parametrize("runtime", ["claude", "codex"])
-def test_successful_fresh_skip_closes_before_mark_and_later_same_title_gets_fresh_group(flow, monkeypatch, replacements, named, test_mode, runtime):
-    f = flow(named=named, test_mode=test_mode, prefix="01", runtime=runtime)
-    closed_records = []
-
-    def inspect_skip(path, task):
-        record = _read_sessions(f.plan)
-        assert record["step"] == "done"
-        assert record["runtime"] == f.config.runtime
-        assert record["planner"] == backend.returned[0]
-        assert replacements[-1] == (f.plan.with_suffix(".json"), record)
-        assert not parse_roadmap(path).tasks[0].done
-        closed_records.append(record)
-        mark_skipped(path, task)
-
-    monkeypatch.setattr(pipeline, "mark_skipped", inspect_skip)
-    monkeypatch.setattr(pipeline, "_git_commit", lambda *args: pytest.fail("skip must not commit"))
-    backend = FakeAgentBackend()
-    returned = _run(f, backend)
-    assert returned == backend.returned[0]
-    assert len(backend.calls) == 1
-    assert closed_records
-    assert not f.plan.exists()
-    first_record = f.plan.with_suffix(".json").read_bytes()
-    assert _next_number(f.plan.parent) == 2
-    with f.roadmap.open("a") as roadmap_file:
-        roadmap_file.write("- [ ] **Runtime task** — Later same-title task\n")
-    later = [task for task in parse_roadmap(f.roadmap).tasks if not task.done][0]
-    later_flow = SimpleNamespace(**{**vars(f), "task": later})
-    monkeypatch.setattr(pipeline, "_git_commit", lambda *args: None)
-    later_backend = _backend(later_flow)
-    _run(later_flow, later_backend)
-    assert target_path(later_backend.calls[0].prompt) == f.plan.with_name(f"02-{f.task.slug}.md")
-    assert later_backend.calls[0].session_id is None
-    assert f.plan.with_suffix(".json").read_bytes() == first_record
-    assert all(task.done for task in parse_roadmap(f.roadmap).tasks)
-
-
-@pytest.mark.parametrize("runtime", ["claude", "codex"])
-def test_resumed_json_only_skip_retains_owner_ids_and_optional_metadata(flow, monkeypatch, runtime):
-    f = flow(runtime=runtime)
-    data = {"runtime": runtime, "step": "planning:2", "planner": "saved",
-            "implementer": "unused-impl", "plan-reviewer-1": "audit", "optional": [None, {"a": 1}]}
-    _seed(f, data, markdown=False)
-    calls_at_skip = []
-
-    def inspect_skip(path, task):
-        record = _read_sessions(f.plan)
-        assert record == {**data, "step": "done", "planner": backend.returned[0]}
-        assert not parse_roadmap(path).tasks[0].done
-        calls_at_skip.append(len(backend.calls))
-        mark_skipped(path, task)
-
-    monkeypatch.setattr(pipeline, "mark_skipped", inspect_skip)
-    backend = FakeAgentBackend()
-    assert _run(f, backend, phase="phase") == backend.returned[0]
-    assert calls_at_skip == [1]
-    assert backend.calls[0].session_id == "saved"
-    _assert_planner_assignment(backend.calls[0], f)
-
-
-@pytest.mark.parametrize("test_mode", [False, True])
-@pytest.mark.parametrize("runtime", ["claude", "codex"])
-def test_inline_revision_without_plan_closes_before_skip_and_keeps_complete_context(flow, monkeypatch, replacements, test_mode, runtime):
-    f = flow(test_mode=test_mode, runtime=runtime)
-    metadata = {"implementer": "unused impl", "elapsed": "009", "optional": {"nested": [None, True]}}
-    _seed(f, {"runtime": runtime, "step": "planned:1", "planner": "saved", **metadata})
-    previous = f.prd / f"{f.plan.stem}-plan-review-1.md"
-    skipped = []
-
-    def write(call):
-        if call.role is AgentRole.PLAN_REVIEWER:
-            target_path(call.prompt).write_text("Actual revision findings")
-        else:
-            f.plan.unlink()
-
-    backend = FakeAgentBackend(on_call=write)
-
-    def inspect_skip(path, task):
-        record = _read_sessions(f.plan)
-        assert record["step"] == "done"
-        assert record["runtime"] == runtime
-        assert record["planner"] == backend.returned[1]
-        assert record["plan-reviewer-1"] == backend.returned[0]
-        assert record["implementer"] == metadata["implementer"]
-        assert record["optional"] == metadata["optional"]
-        assert int(record["elapsed"]) >= 9
-        assert replacements[-1] == (f.plan.with_suffix(".json"), record)
-        assert not parse_roadmap(path).tasks[0].done
-        skipped.append(True)
-        mark_skipped(path, task)
-
-    monkeypatch.setattr(pipeline, "mark_skipped", inspect_skip)
-    monkeypatch.setattr(pipeline, "_git_commit", lambda *args: pytest.fail("skip must not commit"))
-    assert _run(f, backend) == backend.returned[1]
-    assert skipped == [True]
-    assert [call.role for call in backend.calls] == [AgentRole.PLAN_REVIEWER, AgentRole.PLANNER_REVIEWER]
-    revision = backend.calls[1]
-    assert revision.session_id == "saved"
-    _assert_planner_assignment(revision, f)
-    assert f"Read the review at: {previous}" in revision.prompt
-    assert not f.plan.exists()
-    assert not (f.prd / f"{f.plan.stem}-plan-review-2.md").exists()
-
-
-@pytest.mark.parametrize("runtime", ["claude", "codex"])
-@pytest.mark.parametrize("named,test_mode", [(False, False), (True, True)])
 @pytest.mark.parametrize("revision", [False, True])
-def test_crash_after_skip_closure_retries_unchecked_task_in_fresh_group(
-    flow, monkeypatch, replacements, runtime, named, test_mode, revision,
-):
-    f = flow(runtime=runtime, named=named, test_mode=test_mode, prefix="01")
-    if revision:
-        _seed(f, {"runtime": runtime, "step": "planned:1", "planner": "closed incoming",
-                  "optional": {"nested": [None, True]}})
-    committed = []
-    monkeypatch.setattr(pipeline, "_git_commit", lambda *args: committed.append(args))
-    closed = []
-
-    def crash_before_mark(path, task):
-        record = _read_sessions(f.plan)
-        assert record["runtime"] == runtime and record["step"] == "done"
-        assert record["planner"] == f"planner_reviewer-sid-{2 if revision else 1}"
-        assert replacements[-1] == (f.plan.with_suffix(".json"), record)
-        assert not parse_roadmap(path).tasks[0].done
-        closed.append(f.plan.with_suffix(".json").read_bytes())
-        raise RuntimeError("crash before skip mark")
-
-    monkeypatch.setattr(pipeline, "mark_skipped", crash_before_mark)
-
-    def skip_output(call):
-        if call.role is AgentRole.PLAN_REVIEWER:
-            target_path(call.prompt).write_text("Actual findings")
-        elif f.plan.exists():
-            f.plan.unlink()
-
-    first = FakeAgentBackend(on_call=skip_output)
-    with pytest.raises(RuntimeError, match="crash before skip mark"):
-        _run(f, first)
-    assert committed == []
-    assert closed and not f.plan.exists()
-    assert not parse_roadmap(f.roadmap).tasks[0].done
-    assert _next_number(f.plan.parent) == 2
-    replay = _backend(f)
-    _run(f, replay)
-    assert replay.calls[0].session_id is None
-    assert target_path(replay.calls[0].prompt) == f.plan.with_name(f"02-{f.task.slug}.md")
-    assert f.plan.with_suffix(".json").read_bytes() == closed[0]
-    assert parse_roadmap(f.roadmap).tasks[0].done
-    assert len(committed) == 1
-
-
-@pytest.mark.parametrize("revision", [False, True])
-def test_planner_exception_does_not_close_or_mark_skipped(flow, monkeypatch, revision):
+def test_planner_exception_does_not_close_the_task(flow, monkeypatch, revision):
     f = flow(prefix="01")
     if revision:
         _seed(f, {"runtime": "claude", "step": "planned:1", "planner": "saved"})
-    skipped = []
-    monkeypatch.setattr(pipeline, "mark_skipped", lambda *args: skipped.append(args))
 
     def fail(call):
         if call.role is AgentRole.PLAN_REVIEWER:
-            target_path(call.prompt).write_text("Findings")
-        else:
-            raise RuntimeError("planner interrupted")
+            return "Findings"
+        raise RuntimeError("planner interrupted")
 
     backend = FakeAgentBackend(on_call=fail)
     with pytest.raises(RuntimeError, match="planner interrupted"):
         _run(f, backend)
-    assert skipped == []
     assert _read_sessions(f.plan).get("step") != "done"
     assert _read_sessions(f.plan)["step"] == f"planning:{2 if revision else 1}"
     assert not parse_roadmap(f.roadmap).tasks[0].done
@@ -765,7 +610,7 @@ def test_every_planning_call_records_current_identity_and_success_advances_befor
 
     def inspect(call):
         nonlocal planning_calls, review_calls
-        if call.role is AgentRole.PLANNER_REVIEWER and target_path(call.prompt) == f.plan:
+        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" not in call.prompt:
             planning_calls += 1
             expected_id = " phase identity " if planning_calls == 1 else "planner_reviewer-sid-1"
             assert call.session_id == expected_id
@@ -774,7 +619,7 @@ def test_every_planning_call_records_current_identity_and_success_advances_befor
             assert data["step"] == f"planning:{planning_calls}"
             assert data["planner"] == expected_id
             _assert_planner_assignment(call, f)
-            assert ("Read the review at:" in call.prompt) is (planning_calls == 2)
+            assert ("## Plan review" in call.prompt) is (planning_calls == 2)
             observed.append(data.copy())
         elif call.role is AgentRole.PLAN_REVIEWER:
             review_calls += 1
@@ -783,9 +628,8 @@ def test_every_planning_call_records_current_identity_and_success_advances_befor
             assert data["planner"] == f"planner_reviewer-sid-{1 if review_calls == 1 else 3}"
             assert call.session_id is None
             if review_calls == 1:
-                target_path(call.prompt).write_text("Revise the actual plan")
-                return
-        delegate(call)
+                return "Revise the actual plan"
+        return delegate(call)
 
     backend = FakeAgentBackend(on_call=inspect)
     _run(f, backend, phase=" phase identity ")
@@ -818,7 +662,6 @@ def test_failed_planning_restarts_exact_group_round_and_known_incoming_identity(
         _seed(f, data)
         _review(f, passed=False)
     effects = []
-    monkeypatch.setattr(pipeline, "mark_skipped", lambda *args: effects.append("skip"))
     real_mark_done = pipeline.mark_done
     def observe_done(*args):
         effects.append("done")
@@ -836,7 +679,7 @@ def test_failed_planning_restarts_exact_group_round_and_known_incoming_identity(
             expected["planner"] = incoming
         assert disk == expected
         seen.append(disk)
-        assert ("Read the review at:" in call.prompt) is (start == "resumed")
+        assert ("## Plan review" in call.prompt) is (start == "resumed")
         if plausible:
             f.plan.write_text("# A plausible plan produced before the invocation fails\n")
         raise RuntimeError("planning did not return")
@@ -860,16 +703,16 @@ def test_failed_planning_restarts_exact_group_round_and_known_incoming_identity(
             _assert_planner_assignment(call, f)
             assert call.session_id == incoming
             assert _read_sessions(f.plan) == seen[0]
-            assert ("Read the review at:" in call.prompt) is (start == "resumed")
+            assert ("## Plan review" in call.prompt) is (start == "resumed")
         elif call.role is AgentRole.PLAN_REVIEWER:
             assert call.session_id is None
             assert _read_sessions(f.plan)["step"] == f"planned:{round_number}"
             assert _read_sessions(f.plan)["planner"] == "planner_reviewer-sid-1"
-            assert target_path(call.prompt) == f.prd / f"{f.plan.stem}-plan-review-{round_number}.md"
-        delegate(call)
+        return delegate(call)
 
     replay.on_call = inspect_replay
     _run(f, replay)
+    assert (f.prd / f"{f.plan.stem}-plan-review-{round_number}.md").read_text() == "PLAN_REVIEW_PASS"
     assert effects == ["done", "commit"]
     assert parse_roadmap(f.roadmap).tasks[0].done
     assert f.plan.with_suffix(".json").read_bytes() != failed_bytes
@@ -903,7 +746,6 @@ def test_failed_inline_revision_restarts_pending_round_with_latest_successful_id
     previous = f.prd / f"{f.plan.stem}-plan-review-{initial_round}.md"
     future = f.prd / f"{f.plan.stem}-plan-review-{pending_round}.md"
     effects = []
-    monkeypatch.setattr(pipeline, "mark_skipped", lambda *args: effects.append("skip"))
     monkeypatch.setattr(pipeline, "_git_commit", lambda *args: effects.append("commit"))
     planning_count = 0
     delegate = _backend(f).on_call
@@ -916,22 +758,19 @@ def test_failed_inline_revision_restarts_pending_round_with_latest_successful_id
             assert disk["step"] == f"planned:{initial_round}"
             assert disk["planner"] == "planner_reviewer-sid-1"
             assert call.session_id is None
-            assert target_path(call.prompt) == previous
-            previous.write_text("Actual findings that require revision")
-            return
+            return "Actual findings that require revision"
         _assert_planner_assignment(call, f)
         planning_count += 1
         if planning_count == 1:
             assert call.session_id == ("saved before planning" if data else "first phase identity")
             assert disk["step"] == f"planning:{initial_round}"
-            delegate(call)
-            return
+            return delegate(call)
         assert call.session_id == "planner_reviewer-sid-1"
         assert disk["planner"] == "planner_reviewer-sid-1"
         assert disk["step"] == f"planning:{pending_round}"
         assert disk["runtime"] == runtime
         assert disk[f"plan-reviewer-{initial_round}"] == "plan_reviewer-sid-2"
-        assert f"Read the review at: {previous}" in call.prompt
+        assert f"## Plan review\n\n{previous.read_text()}" in call.prompt
         if data:
             for key in ("optional", "implementer", "plan-reviewer-1"):
                 assert disk[key] == data[key]
@@ -961,17 +800,17 @@ def test_failed_inline_revision_restarts_pending_round_with_latest_successful_id
             _assert_planner_assignment(call, f)
             assert call.session_id == "planner_reviewer-sid-1"
             assert _read_sessions(f.plan) == pending_records[0]
-            assert f"Read the review at: {previous}" in call.prompt
+            assert f"## Plan review\n\n{previous.read_text()}" in call.prompt
             assert future.exists() is plausible
         elif call.role is AgentRole.PLAN_REVIEWER:
             assert call.session_id is None
-            assert target_path(call.prompt) == future
             assert _read_sessions(f.plan)["step"] == f"planned:{pending_round}"
             assert _read_sessions(f.plan)["planner"] == "new successful replay identity"
-        replay_delegate(call)
+        return replay_delegate(call)
 
     replay.on_call = inspect_replay
     _run(f, replay, phase="competing restart phase")
+    assert future.read_text() == "PLAN_REVIEW_PASS"
     assert effects == ["commit"]
     assert parse_roadmap(f.roadmap).tasks[0].done
     assert _read_sessions(f.plan)["step"] == "done"
@@ -992,8 +831,9 @@ def test_planning_assignment_includes_supplied_roadmap_without_display_line(flow
     prompt = backend.calls[0].prompt
     assert f"Roadmap: {f.roadmap}\n" in prompt
     assert f.task.title in prompt and f.task.description in prompt
-    assert target_path(prompt) == f.plan
-    assert (str(review) in prompt) is feedback
+    assert "Return the plan as your answer." in prompt
+    assert str(f.plan) not in prompt
+    assert ("## Plan review" in prompt) is feedback
 
 
 @pytest.mark.parametrize("runtime", ["claude", "codex"])
@@ -1005,7 +845,7 @@ def test_tagged_completed_missing_review_can_infer_in_budget_dispatch(flow, runt
     # The failed review artifact is absent, so the existing plan gets its first review.
     assert backend.calls[0].role is AgentRole.PLAN_REVIEWER
     assert backend.calls[0].session_id is None
-    assert target_path(backend.calls[0].prompt) == f.prd / f"{f.plan.stem}-plan-review-1.md"
+    assert (f.prd / f"{f.plan.stem}-plan-review-1.md").read_text() == "PLAN_REVIEW_PASS"
     assert backend.calls[-1].session_id == "saved"
 
 
@@ -1046,7 +886,7 @@ def test_flat_fresh_flow_ignores_suffix_bearing_named_segments(flow, suffix, tes
     backend = _backend(f)
     _run(f, backend)
     fresh = f.plan.with_name(f"01-{f.task.slug}.md")
-    assert target_path(backend.calls[0].prompt) == fresh
+    assert fresh.exists()
     assert backend.calls[0].session_id is None
     assert _read_sessions(fresh)["step"] == "done"
     assert {path: path.read_bytes() for path in preserved} == preserved

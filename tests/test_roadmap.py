@@ -1,8 +1,8 @@
-"""Unit tests for parse_roadmap, Task.slug, _find_task_line, mark_done, and mark_skipped."""
+"""Unit tests for parse_roadmap, Task.slug, _find_task_line, and mark_done."""
 
 from pathlib import Path
 
-from orchestrator.roadmap import _find_task_line, mark_done, mark_skipped, parse_roadmap, Task
+from orchestrator.roadmap import _find_task_line, mark_done, parse_roadmap, Task
 
 
 # ---------------------------------------------------------------------------
@@ -275,33 +275,3 @@ def test_mark_done_leaves_other_lines_unchanged(tmp_path):
     lines = path.read_text().splitlines()
     assert lines[0] == "# Roadmap"
     assert lines[2] == "- [ ] **Task B** — description B"
-
-
-# ---------------------------------------------------------------------------
-# Task 7: mark_skipped line mutation
-# ---------------------------------------------------------------------------
-
-
-def test_mark_skipped_replaces_checkbox_preserves_description(tmp_path):
-    """Should replace "- [ ]" with "- [x] ⚠️ SKIPPED (already implemented)" preserving the rest of the line."""
-    path = _write_roadmap(tmp_path, [
-        "- [ ] **My Task** — original description",
-    ])
-    m = Task(title="My Task", description="original description", done=False, line_number=0)
-    mark_skipped(path, m)
-    lines = path.read_text().splitlines()
-    assert "- [x] ⚠️ SKIPPED (already implemented)" in lines[0]
-    assert "original description" in lines[0]
-
-
-def test_mark_skipped_resolves_stale_line_number(tmp_path):
-    """Should mark the title-matched line even when task.line_number is stale, resolving via _find_task_line."""
-    path = _write_roadmap(tmp_path, [
-        "# Heading",
-        "- [ ] **Actual Task** — description",
-    ])
-    m = Task(title="Actual Task", description="description", done=False, line_number=0)
-    mark_skipped(path, m)
-    lines = path.read_text().splitlines()
-    assert "⚠️ SKIPPED" in lines[1]
-    assert lines[0] == "# Heading"

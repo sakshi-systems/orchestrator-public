@@ -6,7 +6,7 @@ When a run cannot proceed, the first question is whose failure it is: the work's
 
 An agent's output is a verdict only when it is a judgment about the work. A report of the transport dying is not a judgment about the work, whatever channel carries it and however much output preceded it — an agent that never answered has not answered, and text describing why it could not answer is not an answer. How much output arrived before the failure is evidence about the failure, never a substitute for reading what the failure says.
 
-Nor is a verdict read from silence. A review lives in the file the reviewer writes, so a reviewer that ended without writing it has not answered — its absence says nothing about the work, and least of all that the work failed.
+Nor is a verdict read from silence. A review lives in the answer the reviewer returns, so a reviewer whose answer is empty has not answered — its absence says nothing about the work, and least of all that the work failed.
 
 ## An unrecognized fault surfaces
 
@@ -34,8 +34,7 @@ Every fault the orchestrator can meet, and the handling it requires.
 | A transport failure that arrives carrying its own error text | Handled identically to a transport failure that arrives with no answer at all |
 | An exhausted rate limit reported by the agent | A halt |
 | A genuine invocation error — a bad argument, a missing file, an unusable session | Surfaces as a defect, not absorbed |
-| An answer that is empty when one was required | Surfaces as a defect, not absorbed |
-| A reviewer that ends without writing its review | A halt; the resumed run repeats that review |
+| An answer that is empty when one was required, from any role | A halt; the resumed run repeats that call |
 
 **From the budget**
 

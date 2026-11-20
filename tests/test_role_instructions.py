@@ -10,7 +10,7 @@ from orchestrator import agents
 from orchestrator.agents import Implementer, PlanReviewer, PlannerReviewer, _load_prompt
 from orchestrator.ports import AgentRole
 from orchestrator.protocol import _read_sessions
-from tests.fakes import BackendCall, FakeAgentBackend, target_path
+from tests.fakes import BackendCall, FakeAgentBackend
 
 _PROMPT_NAMES = ("execution", "planner", "test-planner", "reviewer", "implementer", "escalation")
 
@@ -47,19 +47,17 @@ def _assert_composition(instructions: str, expected: list[str]) -> None:
 
 
 def _artifact_backend() -> FakeAgentBackend:
-    """A fake that writes the artifact each assignment names, as the real roles' agents do."""
+    """A fake that answers the reviewers and writes the artifact each other
+    assignment names, as the real roles' agents do."""
 
-    def on_call(call: BackendCall) -> None:
+    def on_call(call: BackendCall) -> str | None:
         if call.role is AgentRole.IMPLEMENTER:
-            return
-        path = target_path(call.prompt)
-        path.parent.mkdir(parents=True, exist_ok=True)
+            return None
         if call.role is AgentRole.PLAN_REVIEWER:
-            path.write_text("ok\n\nPLAN_REVIEW_PASS")
-        elif "-review-" in path.name:
-            path.write_text("ok\n\nREVIEW_PASS")
-        else:
-            path.write_text("# Plan")
+            return "ok\n\nPLAN_REVIEW_PASS"
+        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+            return "ok\n\nREVIEW_PASS"
+        return "# Plan"
 
     return FakeAgentBackend(on_call=on_call)
 
@@ -88,10 +86,14 @@ def test_planner_reviewer_carries_full_composition_across_plan_revision_review_a
     assert [c.session_id for c in backend.calls] == [None, *backend.returned[:3]]
 
     plan_call, revision_call, review_call, re_review_call = backend.calls
-    assert str(plan) in plan_call.prompt
-    assert str(plan) in revision_call.prompt and str(plan_review) in revision_call.prompt
-    assert str(review_1) in review_call.prompt
-    assert str(review_2) in re_review_call.prompt and str(review_1) in re_review_call.prompt
+    assert "**Title**" in plan_call.prompt and "Description" in plan_call.prompt
+    assert str(plan) not in plan_call.prompt
+    assert "## Plan\n\n# Plan" in revision_call.prompt
+    assert "## Plan review\n\nfindings" in revision_call.prompt
+    assert str(plan) not in revision_call.prompt and str(plan_review) not in revision_call.prompt
+    assert str(review_1) not in review_call.prompt and str(review_2) not in review_call.prompt
+    assert str(review_2) not in re_review_call.prompt and str(review_1) not in re_review_call.prompt
+    assert "## The previous review" in re_review_call.prompt
 
 
 def test_test_planner_variant_replaces_planner_fragment_and_continues_session(
@@ -141,9 +143,10 @@ def test_implementer_initial_call_and_fix_share_composition_and_continue_session
     plan = tmp_path / "plan.md"
     plan.write_text("# Plan")
     feedback = tmp_path / "feedback.md"
+    feedback.write_text("address the findings")
 
-    role.implement(plan)
-    role.implement(plan, feedback_path=feedback)
+    role.implement(plan, tmp_path / "impl-1.md")
+    role.implement(plan, tmp_path / "impl-2.md", feedback_path=feedback)
 
     first, fix = backend.calls
     for call in backend.calls:
@@ -152,27 +155,31 @@ def test_implementer_initial_call_and_fix_share_composition_and_continue_session
         _assert_composition(call.instructions, ["implementer", "escalation"])
     assert first.session_id is None
     assert fix.session_id == backend.returned[0]
-    assert str(plan) in first.prompt
-    assert str(feedback) in fix.prompt
+    assert "## Plan\n\n# Plan" in first.prompt
+    assert str(plan) not in first.prompt
+    assert "## Review\n\naddress the findings" in fix.prompt
+    assert str(feedback) not in fix.prompt
 
 
 def test_re_review_assignment_requires_current_file_evidence(project_dir, tmp_path):
     backend = _artifact_backend()
     role = PlannerReviewer(project_dir, backend)
     plan = tmp_path / "plan.md"
+    plan.write_text("# Plan")
     review_1 = tmp_path / "x-review-1.md"
     review_2 = tmp_path / "x-review-2.md"
 
     role.review(plan, review_1)
     role.review(plan, review_2, prev_review_path=review_1)
-
     prompt = backend.calls[-1].prompt
-    assert str(review_1) in prompt
+
     assert "as it is now" in prompt
     assert "read it in full" in prompt
     assert "quote the CURRENT content" in prompt
     assert "Fixed or Not fixed" in prompt
     assert "new issues" in prompt
+    assert "## The previous review" in prompt
+    assert str(review_1) not in prompt and str(review_2) not in prompt
 
 
 def test_packaged_execution_home_reaches_every_role_before_its_own_fragment(project_dir, tmp_path):
@@ -186,7 +193,7 @@ def test_packaged_execution_home_reaches_every_role_before_its_own_fragment(proj
     planner.plan("Title", "Description", plan)
     planner.review(plan, review)
     PlanReviewer(project_dir, backend).review_plan(plan, tmp_path / "pr-1.md", 1)
-    Implementer(project_dir, backend).implement(plan)
+    Implementer(project_dir, backend).implement(plan, tmp_path / "impl-1.md")
 
     own_fragment = {
         0: "planner",

@@ -37,7 +37,7 @@ from orchestrator.usage import _check_usage_limits, _parse_pct
 from orchestrator.agents import _load_prompt
 from orchestrator.ports import AgentRole, RoleSetting
 from orchestrator.roadmap import mark_done
-from tests.fakes import FakeAgentBackend, target_path
+from tests.fakes import FakeAgentBackend
 from tests.test_config import _write_config, _write_override
 
 # ---------------------------------------------------------------------------
@@ -924,7 +924,7 @@ def test_process_task_records_done_after_mark_and_before_commit(tmp_path, monkey
         def __init__(self, *args, **kwargs):
             self.session_id = None
 
-        def verify(self, plan_path, out_path, prev_out_path):
+        def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path):
             return True
 
     class _ImplementerStub:
@@ -1446,8 +1446,8 @@ def _seed_review_failed(tmp_path: Path, sidecar: dict) -> tuple[Path, Path]:
 
 def _review_writing_backend(review_2: Path) -> FakeAgentBackend:
     def _write(call):
-        if call.role is AgentRole.PLANNER_REVIEWER:
-            review_2.write_text("All good\n\nREVIEW_PASS")
+        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+            return "All good\n\nREVIEW_PASS"
 
     return FakeAgentBackend(on_call=_write)
 
@@ -1465,7 +1465,9 @@ def test_process_task_restores_saved_sessions_from_disk(tmp_path, monkeypatch):
     impl_call, review_call = backend.calls
     assert impl_call.role is AgentRole.IMPLEMENTER
     assert impl_call.session_id == "saved-impl"
-    assert str(review_2.with_name(f"{DMS_SEQ}-{DMS_SLUG}-review-1.md")) in impl_call.prompt
+    assert "Apply the fixes of the review below." in impl_call.prompt
+    assert "## Review\n\nFindings, no pass" in impl_call.prompt
+    assert str(review_2.with_name(f"{DMS_SEQ}-{DMS_SLUG}-review-1.md")) not in impl_call.prompt
     for name in ("implementer", "escalation"):
         assert _load_prompt(name) in impl_call.instructions
     assert impl_call.instructions.count(_load_prompt("execution")) == 1
@@ -1499,9 +1501,9 @@ def test_process_task_test_mode_verifies_by_shell_not_backend(tmp_path, monkeypa
 
     def _write(call):
         if call.role is AgentRole.PLANNER_REVIEWER:
-            target_path(call.prompt).write_text("# Plan\n\n## Test Command\n`true`\n")
+            return "# Plan\n\n## Test Command\n`true`\n"
         elif call.role is AgentRole.PLAN_REVIEWER:
-            target_path(call.prompt).write_text("Fine\n\nPLAN_REVIEW_PASS")
+            return "Fine\n\nPLAN_REVIEW_PASS"
 
     backend = FakeAgentBackend(on_call=_write)
 
@@ -2013,18 +2015,17 @@ def test_process_task_inferred_over_budget_halts_without_creating_sidecar(tmp_pa
 
 
 def _passing_backend(plan_review_passes: bool = True, code_review_passes: bool = True) -> FakeAgentBackend:
-    """Write each assigned artifact: plans as text, reviews with or without the PASS signal."""
+    """Answer the plan reviewer; write each other assigned artifact: plans as text,
+    reviews with or without the PASS signal."""
 
     def _write(call):
         if call.role is AgentRole.IMPLEMENTER:
-            return
-        path = target_path(call.prompt)
+            return None
         if call.role is AgentRole.PLAN_REVIEWER:
-            path.write_text("Fine\n\nPLAN_REVIEW_PASS" if plan_review_passes else "Findings, no pass")
-        elif "-review-" in path.name:
-            path.write_text("All good\n\nREVIEW_PASS" if code_review_passes else "Findings, no pass")
-        else:
-            path.write_text("# Plan\n\n## Test Command\n`false`\n")
+            return "Fine\n\nPLAN_REVIEW_PASS" if plan_review_passes else "Findings, no pass"
+        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+            return "All good\n\nREVIEW_PASS" if code_review_passes else "Findings, no pass"
+        return "# Plan\n\n## Test Command\n`false`\n"
 
     return FakeAgentBackend(on_call=_write)
 
@@ -2040,7 +2041,7 @@ def test_process_task_planned_at_bound_runs_plan_review_at_that_attempt(tmp_path
 
     first = backend.calls[0]
     assert first.role is AgentRole.PLAN_REVIEWER
-    assert f"{DMS_SEQ}-{DMS_SLUG}-plan-review-3.md" in first.prompt
+    assert (prd / f"{DMS_SEQ}-{DMS_SLUG}-plan-review-3.md").read_text() == "Fine\n\nPLAN_REVIEW_PASS"
 
 
 def test_process_task_plan_review_failed_in_budget_revises_then_reviews_next_attempt(tmp_path, monkeypatch):
@@ -2055,9 +2056,9 @@ def test_process_task_plan_review_failed_in_budget_revises_then_reviews_next_att
 
     revision, review = backend.calls[0], backend.calls[1]
     assert revision.role is AgentRole.PLANNER_REVIEWER
-    assert f"{DMS_SEQ}-{DMS_SLUG}-plan-review-2.md" in revision.prompt
+    assert "## Plan review" in revision.prompt
     assert review.role is AgentRole.PLAN_REVIEWER
-    assert f"{DMS_SEQ}-{DMS_SLUG}-plan-review-3.md" in review.prompt
+    assert (prd / f"{DMS_SEQ}-{DMS_SLUG}-plan-review-3.md").read_text() == "Fine\n\nPLAN_REVIEW_PASS"
 
 
 def test_process_task_live_plan_review_exhaustion_is_a_work_failure(tmp_path, monkeypatch):
@@ -2086,6 +2087,11 @@ def test_process_task_live_code_review_exhaustion_is_a_work_failure(tmp_path, mo
         process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend)
 
     assert _read_sessions(plan_path)["step"] == "review_failed:3"
+    implementer_calls = [c for c in backend.calls if c.role is AgentRole.IMPLEMENTER]
+    assert "## Review\n\nFindings, no pass" in implementer_calls[1].prompt
+    assert "## Review\n\nFindings, no pass" in implementer_calls[2].prompt
+    for n in (1, 2, 3):
+        assert (rv / f"{DMS_SEQ}-{DMS_SLUG}-implementer-{n}.md").read_text() == "fake output"
 
 
 def test_process_task_live_test_run_exhaustion_is_a_work_failure(tmp_path, monkeypatch):
@@ -2142,6 +2148,7 @@ def test_process_task_planned_1_at_budget_zero_resumes_into_implementer_without_
 def test_process_task_budget_above_max_iterations_runs_that_many_reviews_before_the_stop(tmp_path, monkeypatch):
     """A budget above the iteration limit is not cut by a check: every review runs, then the plan stop fires."""
     _neutralize_side_effects(monkeypatch)
+    prd, _, _ = _dms_dirs(tmp_path)
     backend = _passing_backend(plan_review_passes=False)
     config = _flow_config()
     config.plan_review_iterations = 5
@@ -2151,7 +2158,7 @@ def test_process_task_budget_above_max_iterations_runs_that_many_reviews_before_
 
     reviews = [c for c in backend.calls if c.role is AgentRole.PLAN_REVIEWER]
     assert len(reviews) == 5
-    assert f"{DMS_SEQ}-{DMS_SLUG}-plan-review-5.md" in reviews[-1].prompt
+    assert (prd / f"{DMS_SEQ}-{DMS_SLUG}-plan-review-5.md").read_text() == "Findings, no pass"
 
 
 @pytest.mark.parametrize("raw,setting,label,attempt,named_setting,value", [
@@ -2201,9 +2208,9 @@ def test_process_task_resume_plan_review_failed_above_max_iterations_revises_wit
 
     revision, review = backend.calls[0], backend.calls[1]
     assert revision.role is AgentRole.PLANNER_REVIEWER
-    assert f"{DMS_SEQ}-{DMS_SLUG}-plan-review-4.md" in revision.prompt
+    assert "## Plan review" in revision.prompt
     assert review.role is AgentRole.PLAN_REVIEWER
-    assert f"{DMS_SEQ}-{DMS_SLUG}-plan-review-5.md" in review.prompt
+    assert (prd / f"{DMS_SEQ}-{DMS_SLUG}-plan-review-5.md").read_text() == "Fine\n\nPLAN_REVIEW_PASS"
     assert _read_sessions(plan_path)["step"] == "done"
 
 

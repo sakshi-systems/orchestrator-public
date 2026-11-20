@@ -24,7 +24,7 @@ A deadlock an agent can name outright does not have to wait for this resolution:
 
 Outwardly this is indistinguishable from pattern 2 — the same finding repeats round after round — but the nature is different: the blocker is not semantic, the finding is already closed in the code, the reviewer simply did not check the file's current state.
 
-The countermeasure is at the prompt level, not the loop level: starting with the second round, `review()` passes the path to the previous review file and requires, for each of its findings, explicitly rereading the cited file via Read, quoting the current state of the lines, and giving a Fixed / Not fixed verdict with that quote as evidence, only then moving on to the normal search for new problems. This forces the model to check the file instead of its session memory on every round.
+The countermeasure is at the prompt level, not the loop level: starting with the second round, the reviewer's message carries the previous review and requires, for each of its findings, explicitly rereading the cited file via Read, quoting the current state of the lines, and giving a Fixed / Not fixed verdict with that quote as evidence, only then moving on to the normal search for new problems. This forces the model to check the file instead of its session memory on every round.
 
 ## Why the limit is small, and that is correct
 
@@ -32,7 +32,7 @@ The iteration limit is the price of not distinguishing the two patterns, not a c
 
 ## The reviewers' strictness is intended
 
-A plan review and a code review pass only when they have no findings at all, and that strictness is intended: it is not a defect of the loop, and no layer routes around it. A stop is repaired at its layer: the spec, the plan, a rollback of the sidecar and the artifacts to the repaired state, and a nit that recurs made a standing line of the spec. A stop is never repaired by loosening a pass condition, or by carrying a review's remarks to the implementer beside the plan.
+A plan review and a code review pass only when they have no findings at all, and that strictness is intended: it is not a defect of the loop, and no layer routes around it. The reviews are the firewall of the flow, so the reviewers' instructions are final in strictness and criteria: the reviewer prompt `orchestrator/prompts/reviewer.md`, which the plan review and the code review share, and the task text the plan review is given in `PlanReviewer.review_plan` (`orchestrator/agents.py`). They change only in their channel, how the plan and the diff arrive and how the review returns, never in what they ask for, and no change to either is made to get a task past a stop. A stop is repaired at its layer: the spec, the plan, a rollback of the sidecar and the artifacts to the repaired state, and a nit that recurs made a standing line of the spec. A stop is never repaired by loosening a pass condition, or by carrying a review's remarks to the implementer beside the plan.
 
 The reason is where each thing lies. What the implementer must do is in the task and its spec, and what a plan review or a code review holds is for whoever reviews and repairs the task, so a remark that must reach the implementer reaches it through the spec.
 
@@ -41,5 +41,6 @@ The reason is where each thing lies. What the implementer must do is in the task
 - **The severity trend across rounds** — dropping (pattern 1) or climbing (pattern 2).
 - **Repetition** — different findings in different places (pattern 1), or one blocker across every round (pattern 2).
 - **The review's language** — phrasing like "spec-owner decision," "by design," "carried over" in the early rounds.
+- **The implementer's answers** — its `DEVIATION:` notes in the file beside each review, which say where it departed from the plan and why.
 
 Diagnosis and repair are carried out by a chat skill over the remaining artifacts: `/task-rescue` diagnoses how deep the root cause runs (spec / plan / code), repairs to that depth, and rolls the sidecar and artifacts back to the repaired state.

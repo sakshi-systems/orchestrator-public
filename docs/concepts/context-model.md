@@ -1,13 +1,15 @@
 # Context model: the agent's tree of perception
 
-The pipeline passes the agent a minimum: the task's contract line and the path to the roadmap. All other context the agent raises itself, by following links out from that line. This page describes what an agent's effective perception is made of, and why it is assembled lazily — as a tree around the task, not a graph of the whole project.
+The pipeline passes the agent a minimum: the task's contract line and the path to the roadmap, with the plan and the results of the roles before it inline. All other context the agent raises itself, by following links out from that line. This page describes what an agent's effective perception is made of, and why it is assembled lazily — as a tree around the task, not a graph of the whole project.
 
 ## What the agent receives literally
 
-- **The planner** — the task's title and description (the whole contract line) plus the line `Roadmap: <path> (line N)`.
-- **The plan reviewer** — the path to the plan file; a fresh session on every attempt.
-- **The code reviewer** — the path to the plan; runs in the planner's own session and inherits all of its exploration.
-- **The implementer** — the path to the plan plus, on its first message, the line `Roadmap: <path> (line N)` — optional context for what is already done, what comes next, and where a neighbouring task's scope begins, which it is not forced to read; holds one session through the whole fix cycle.
+- **The planner** — the task's title and description (the whole contract line) plus the line `Roadmap: <path> (line N)`; on a revision, the current plan and the plan review inline.
+- **The plan reviewer** — the plan inline; a fresh session on every attempt.
+- **The code reviewer** — the plan inline, the implementer's answer and the previous review; it sees all changes itself, with `git diff HEAD`, and runs in the planner's own session and inherits all of its exploration.
+- **The implementer** — the plan inline, plus, on its first message, the line `Roadmap: <path> (line N)` — optional context for what is already done, what comes next, and where a neighbouring task's scope begins, which it is not forced to read; on a fix iteration, the review inline; it holds one session through the whole fix cycle.
+
+Every message is self-contained: no runtime depends on reaching a path in the run's tree, and an agent that runs in it may still read what the message names ([Invoking a role](../features/agent-runtime.md#invoking-a-role)).
 
 Neighboring tasks, spec notes, and architecture documents are not injected into the prompt.
 

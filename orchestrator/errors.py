@@ -23,8 +23,9 @@ class NetworkError(HaltError):
     through the runtime adapter's bounded retries."""
 
 
-class MissingArtifactError(HaltError):
-    """Raised when an agent ends its turn without writing the artifact its step requires."""
+class EmptyAnswerError(HaltError):
+    """Raised when an agent ends its turn with an empty answer where the run
+    writes the artifact from that answer."""
 
 
 class PipelineStopError(Exception):

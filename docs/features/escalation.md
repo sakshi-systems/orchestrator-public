@@ -14,7 +14,7 @@ The escalating agent names the missing decision and its options; it never picks 
 
 ## How it is signalled
 
-The agent signals this by writing `ESCALATION` as the last line of the artifact it is already producing — the plan file for the planner and the implementer, the plan-review or review file for the two reviewers (see [pipeline.md](../pipeline.md) for the shared signal protocol). The section above that line carries the missing decision and its options in full.
+The agent signals this by ending its answer with `ESCALATION` as the last line, and the run writes the answer as the artifact it is already producing — the plan file for the planner, the implementer's answer file for the implementer, the plan-review or review file for the two reviewers (see [pipeline.md](../pipeline.md#completion-signals) for the shared signal protocol). The section above that line carries the missing decision and its options in full.
 
 ## What happens next
 

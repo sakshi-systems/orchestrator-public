@@ -4,7 +4,7 @@ You may reach a point where producing your own mandated output honestly would re
 
 To escalate:
 
-- Write the exact line `ESCALATION` on its own line, at the end of the artifact you are already writing (the plan file for the planner and the implementer; the plan-review or review file for the two reviewers) — mirroring the `PLAN_REVIEW_PASS`/`REVIEW_PASS` exact-line convention. Never mix `ESCALATION` with either of those signals on the same file.
+- Write the exact line `ESCALATION` on its own line, at the end of your answer — mirroring the `PLAN_REVIEW_PASS`/`REVIEW_PASS` exact-line convention. Never mix `ESCALATION` with either of those signals in one answer.
 - Immediately above the marker, write a `## Escalation` section stating the missing decision and its options as a plain list. State the options; do not resolve them — picking one is exactly the authority you do not have.
 
 Escalating stops the run immediately, before burning more of the iteration budget. This is not the old `BLOCKED:` behavior of leaving a checkbox unchecked while independent tasks continue — escalating halts the entire run, pending a human decision.

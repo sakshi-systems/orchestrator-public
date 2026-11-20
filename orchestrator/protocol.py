@@ -10,9 +10,23 @@ from pathlib import Path
 from typing import Any
 
 from .config import AGENT_RUNTIMES
-from .errors import HaltError
+from .errors import EmptyAnswerError, HaltError
 
 PLAN_REVIEW_PASS = "PLAN_REVIEW_PASS"
+
+
+def _write_artifact(path: Path, answer: str) -> None:
+    """Write an agent's answer unchanged to `path` in UTF-8, creating the parent
+    directories.
+
+    Raises EmptyAnswerError before anything is written when the answer is empty.
+    Writes directly — it does not go through os.replace, so it never crosses the
+    sidecar writer's atomic replacement boundary.
+    """
+    if not answer.strip():
+        raise EmptyAnswerError(f"Agent returned an empty answer\n{path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(answer, encoding="utf-8")
 
 
 def _has_signal(text: str, signal: str) -> bool:
