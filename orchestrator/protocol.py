@@ -29,6 +29,11 @@ def _write_artifact(path: Path, answer: str) -> None:
     path.write_text(answer, encoding="utf-8")
 
 
+def _read_artifact(path: Path) -> str:
+    """Read an artifact the run wrote back as UTF-8, whatever the machine's locale."""
+    return path.read_text(encoding="utf-8")
+
+
 def _has_signal(text: str, signal: str) -> bool:
     """Return True if signal appears as an exact line within the last 5 lines."""
     return any(line.strip() == signal for line in text.splitlines()[-5:])

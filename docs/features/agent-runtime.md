@@ -62,7 +62,7 @@ The adapter keeps normal project guidance, user configuration, rules and authent
 
 ## Codex completion and failure evidence
 
-Each invocation is read through process exit. Success requires a successful process, an unambiguous terminal completion, one consistent valid thread identity and a nonempty final completed agent message. A continued thread's emitted identity matches the requested identity. The return text is that last completed agent message, rather than concatenated commentary or tool output. [Codex runtime — Stream fields](../reference/codex-runtime.md#stream-fields) defines the consumed native fields.
+Each invocation is read through process exit. Success requires a successful process, an unambiguous terminal completion and one consistent valid thread identity. A continued thread's emitted identity matches the requested identity. The return text is that last completed agent message, rather than concatenated commentary or tool output, and it is empty when the turn completed with none; the run handles an empty one as any role's empty answer, a halt, as [Fault handling — The known faults](../concepts/fault-handling.md#the-known-faults) states. [Codex runtime — Stream fields](../reference/codex-runtime.md#stream-fields) defines the consumed native fields.
 
 Unknown event kinds are ignored. Malformed JSON, malformed consumed fields, conflicting identities and conflicting terminal outcomes surface as protocol defects. A completed successful invocation ignores stale intermediate errors and stderr warnings; assistant prose and tool output are never fault diagnostics.
 

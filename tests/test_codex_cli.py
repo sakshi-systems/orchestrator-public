@@ -35,8 +35,9 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator import codex_cli, process_control, state
+from orchestrator.agents import PlanReviewer
 from orchestrator.codex_cli import CodexAgentBackend
-from orchestrator.errors import NetworkError, RateLimitError
+from orchestrator.errors import EmptyAnswerError, NetworkError, RateLimitError
 from orchestrator.ports import AgentRole, RoleSetting
 
 CREATED_UUID = "11111111-1111-4111-8111-111111111111"
@@ -810,12 +811,11 @@ class TestCodexCompletion:
     @pytest.mark.parametrize(
         "lines,returncode",
         [
-            ([_thread_started(CREATED_UUID), _agent_message("earlier"), _agent_message("  "), _turn_completed()], 0),
             ([_agent_message("done"), _turn_completed()], 0),
             ([_thread_started(CREATED_UUID), _agent_message("done")], 0),
             ([_thread_started(CREATED_UUID), _agent_message("done"), _turn_completed()], 1),
         ],
-        ids=["empty-final-message", "no-identity", "no-terminal-event", "nonzero-exit"],
+        ids=["no-identity", "no-terminal-event", "nonzero-exit"],
     )
     def test_incomplete_invocations_fail_without_retry(self, child_env, tmp_path, lines, returncode):
         """Completion evidence that is partial or contradicted by the exit status is not success."""
@@ -826,6 +826,50 @@ class TestCodexCompletion:
         assert type(observed.exc) is RuntimeError
         assert len(child_env.spawn.argvs) == 1
         assert child_env.sleeps == []
+
+    @pytest.mark.parametrize(
+        "lines,expected",
+        [
+            ([_thread_started(CREATED_UUID), _agent_message(""), _turn_completed()], ""),
+            ([_thread_started(CREATED_UUID), _agent_message("  "), _turn_completed()], "  "),
+            ([_thread_started(CREATED_UUID), _turn_completed()], ""),
+        ],
+        ids=["empty-final-message", "blank-final-message", "no-agent-message"],
+    )
+    def test_completed_turn_returns_the_final_message_whatever_it_is(self, child_env, tmp_path, lines, expected):
+        """A completed turn whose last agent message is empty, blank or absent is a
+        success: that text as the answer, "" where there is none, with the thread
+        id, and no retry."""
+        child_env.child(lines)
+
+        observed = _invoke(CodexAgentBackend(), **_run_kwargs(tmp_path))
+
+        assert observed.exc is None
+        assert observed.result == (expected, CREATED_UUID)
+        assert len(child_env.spawn.argvs) == 1
+        assert child_env.sleeps == []
+
+    def test_a_role_records_the_session_and_halts_on_a_completed_turn_without_an_answer(self, child_env, tmp_path):
+        """A completed turn that answered nothing reaches the role as ("", thread id):
+        the plan's sidecar records the reviewer's session, no review file is written
+        and _write_artifact halts with EmptyAnswerError."""
+        child_env.child([_thread_started(CREATED_UUID), _turn_completed()])
+        plan_path = tmp_path / "01-slug.md"
+        plan_path.write_text("# Plan: Add the door\n")
+        review_path = tmp_path / "01-slug-plan-review-1.md"
+        reviewer = PlanReviewer(tmp_path, CodexAgentBackend())
+
+        with pytest.raises(EmptyAnswerError) as exc_info:
+            reviewer.review_plan(plan_path, review_path, 1)
+
+        assert str(exc_info.value).splitlines()[0] == "Agent returned an empty answer"
+        assert str(exc_info.value).splitlines()[1] == str(review_path)
+        assert not review_path.exists()
+        assert json.loads(plan_path.with_suffix(".json").read_text()) == {
+            "plan-reviewer-1": CREATED_UUID,
+        }
+        assert len(child_env.spawn.argvs) == 1
+
 
     def test_fresh_attempt_without_identity_retries_fresh(self, child_env, tmp_path):
         """A fresh attempt that created no thread retries as a fresh turn."""

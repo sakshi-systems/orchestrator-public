@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .errors import EscalationError, PipelineStopError
 from .ports import AgentBackendProtocol, AgentRole, VerifierProtocol, VerifyKind
-from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_sessions, _write_artifact, _write_session
+from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_artifact, _read_sessions, _write_artifact, _write_session
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -204,8 +204,8 @@ class PlannerReviewer:
             )
             sections = []
             if plan_path.exists():
-                sections += ["## Plan", "", plan_path.read_text()]
-            sections += ["## Plan review", "", plan_review_path.read_text()]
+                sections += ["## Plan", "", _read_artifact(plan_path)]
+            sections += ["## Plan review", "", _read_artifact(plan_review_path)]
             prompt += "\n" + "\n".join(sections)
 
         answer, self.session_id = self.backend.run(
@@ -237,12 +237,12 @@ class PlannerReviewer:
         sections = [
             "## Plan",
             "",
-            plan_path.read_text(),
+            _read_artifact(plan_path),
         ]
         if implementer_answer_path is not None:
-            sections += ["", "## The implementer's answer", "", implementer_answer_path.read_text()]
+            sections += ["", "## The implementer's answer", "", _read_artifact(implementer_answer_path)]
         if prev_review_path:
-            sections += ["", "## The previous review", "", prev_review_path.read_text()]
+            sections += ["", "## The previous review", "", _read_artifact(prev_review_path)]
         body = "\n".join(sections)
 
         naming_lines = (
@@ -335,7 +335,7 @@ class PlanReviewer:
             "\n"
             "## Plan\n"
             "\n"
-            f"{plan_path.read_text()}"
+            f"{_read_artifact(plan_path)}"
         )
 
         answer, sid = self.backend.run(
@@ -392,7 +392,7 @@ class Implementer:
                 "\n"
                 "## Review\n"
                 "\n"
-                f"{feedback_path.read_text()}\n"
+                f"{_read_artifact(feedback_path)}\n"
                 "\n"
                 f"{answer_grammar}"
             )
@@ -407,7 +407,7 @@ class Implementer:
                 "\n"
                 "## Plan\n"
                 "\n"
-                f"{plan_path.read_text()}\n"
+                f"{_read_artifact(plan_path)}\n"
                 "\n"
                 f"{answer_grammar}"
             )
@@ -447,7 +447,7 @@ class TestRunner:
         run reads only the plan and the tree."""
         cmd = self._extract_test_command(plan_path)
         if not cmd:
-            out_path.write_text("ERROR: No '## Test Command' section found in plan.\n")
+            out_path.write_text("ERROR: No '## Test Command' section found in plan.\n", encoding="utf-8")
             return False
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -467,7 +467,7 @@ class TestRunner:
         passed = result.returncode == 0
         if passed:
             output += f"\n{TEST_RUN_VERIFY.pass_signal}"
-        out_path.write_text(output)
+        out_path.write_text(output, encoding="utf-8")
         status = "PASSED" if passed else "FAILED"
         print(f"--- TestRunner: {status} (exit {result.returncode}, {elapsed:.1f}s) ---")
         return passed
@@ -475,7 +475,7 @@ class TestRunner:
     @staticmethod
     def _extract_test_command(plan_path: Path) -> str | None:
         """Read `## Test Command` section from the plan and return the command string."""
-        lines = plan_path.read_text().splitlines()
+        lines = _read_artifact(plan_path).splitlines()
         in_section = False
         for line in lines:
             if line.strip() == "## Test Command":

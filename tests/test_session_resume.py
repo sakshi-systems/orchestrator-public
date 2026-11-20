@@ -1,5 +1,6 @@
 """Behavioral evidence for runtime-owned records and continuation through the shared flow."""
 
+import io
 import json
 import os
 import subprocess
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.errors import HaltError
-from orchestrator.protocol import _read_sessions, _write_session, _write_sessions
+from orchestrator.protocol import _read_sessions, _write_artifact, _write_session, _write_sessions
 from orchestrator import pipeline
 from orchestrator.agents import PlannerReviewer, _load_prompt
 from orchestrator.config import OrchestratorConfig
@@ -286,6 +287,35 @@ def test_tagged_artifact_fallback_replaces_stale_boundary_before_role(flow, repl
     with pytest.raises(RuntimeError, match="observed tagged fallback"):
         _run(f, FakeAgentBackend(on_call=inspect))
     assert replacements == [(f.plan.with_suffix(".json"), {**record, "step": expected})]
+
+
+@pytest.mark.parametrize("passed,role", [(True, AgentRole.IMPLEMENTER), (False, AgentRole.PLANNER_REVIEWER)])
+def test_resume_reads_a_non_ascii_plan_review_as_written(flow, monkeypatch, passed, role):
+    """A resume signal read of a non-ASCII plan review decides the boundary under a default
+    text encoding that is not UTF-8: a passing review resumes at the implementer with the
+    plan's exact text in its message, a failing one revises the plan carrying the review's
+    exact text."""
+    f = flow()
+    _seed(f, {"runtime": "claude", "step": "plan_reviewed", "planner": "saved", "implementer": "impl-saved"},
+          markdown=False)
+    _write_artifact(f.plan, "# План: работа ✓\n\n## Test Command\n`true`\n")
+    review_text = "Проблемы — не хватает шага."
+    if passed:
+        review_text += "\n\nPLAN_REVIEW_PASS\n"
+    _write_artifact(f.prd / f"1-{f.task.slug}-plan-review-1.md", review_text)
+
+    def inspect(call):
+        assert call.role is role
+        if passed:
+            assert call.session_id == "impl-saved"
+            assert "## Plan\n\n# План: работа ✓" in call.prompt
+        else:
+            assert "## Plan review\n\nПроблемы — не хватает шага." in call.prompt
+        raise RuntimeError("observed first role")
+
+    monkeypatch.setattr(io, "text_encoding", lambda enc, *a, **k: "latin-1" if enc is None else enc)
+    with pytest.raises(RuntimeError, match="observed first role"):
+        _run(f, FakeAgentBackend(on_call=inspect))
 
 
 @pytest.mark.parametrize("runtime", ["claude", "codex"])

@@ -85,7 +85,7 @@ The native stream is JSON Lines on stdout. Every line is parsed as a JSON object
 | `turn.failed` | Terminal failure, with `error.message` as a string |
 | `error` | Top-level native `message` string; intermediate until the invocation ends |
 
-Malformed consumed fields are protocol defects. A completion marker with an empty final message, no usable identity or a contradictory terminal event is not successful. Item events for tools, reasoning and other non-message content do not supply return text or fault evidence. Native usage accompanies completion but represents thread totals; this adapter does not sum resumed values as per-invocation usage.
+Malformed consumed fields are protocol defects. A completion marker with no usable identity or a contradictory terminal event is not successful; one with an empty final message, or none, is a successful invocation that returns empty text. Item events for tools, reasoning and other non-message content do not supply return text or fault evidence. Native usage accompanies completion but represents thread totals; this adapter does not sum resumed values as per-invocation usage.
 
 ## Failure recognition
 

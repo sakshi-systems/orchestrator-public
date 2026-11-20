@@ -402,14 +402,15 @@ def _parse_stream(stdout: str) -> _Stream:
 
 
 def _succeeded(run: _Completed, stream: _Stream, requested: str | None) -> bool:
-    """True only for a clean exit, a completed turn, a usable identity and a non-empty final message."""
+    """True only for a clean exit, a completed turn, no failed message and a usable,
+    matching thread identity — whatever the last message is."""
     if run.returncode != 0 or not stream.completed or stream.failed_message is not None:
         return False
     if stream.thread_id is None:
         return False
     if requested is not None and stream.thread_id != requested:
         return False
-    return stream.last_message is not None and bool(stream.last_message.strip())
+    return True
 
 
 # ---------------------------------------------------------------------------

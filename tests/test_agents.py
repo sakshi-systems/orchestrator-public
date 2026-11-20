@@ -1,6 +1,7 @@
 """Unit tests for _has_signal, TestRunner._extract_test_command, _resolve_claude,
 sidecar session I/O (_read_sessions/_write_session), and kill_active_child."""
 
+import io
 import json
 import os
 import subprocess
@@ -24,7 +25,9 @@ from orchestrator.protocol import (
     _escalation_excerpt,
     _has_escalation,
     _has_signal,
+    _read_artifact,
     _read_sessions,
+    _write_artifact,
     _write_session,
     _write_sessions,
 )
@@ -1254,6 +1257,40 @@ def test_plan_answer_lands_verbatim_at_plan_path(tmp_path):
     pr.plan("Task title", "Task description", plan_path)
 
     assert plan_path.read_text() == "# Plan: Fresh\n\nbody\n"
+
+
+def test_artifacts_round_trip_through_one_utf_8_reader(tmp_path, monkeypatch):
+    """An artifact _write_artifact wrote with non-ASCII text reads back identical through
+    _read_artifact under a default text encoding that is not UTF-8, modelled by patching
+    io.text_encoding so a missing encoding resolves to latin-1 — pathlib routes a missing
+    encoding through it, so the modelled locale reaches Path.read_text and not the read."""
+    path = tmp_path / "01-slug-plan-review-1.md"
+    text = "Ревью — résumé ✓\n"
+    _write_artifact(path, text)
+
+    monkeypatch.setattr(io, "text_encoding", lambda enc, *a, **k: "latin-1" if enc is None else enc)
+    assert path.read_text() != text  # the modelled default reaches the read, and it is not UTF-8
+
+    assert _read_artifact(path) == text
+
+
+def test_prompt_building_reads_artifacts_as_utf_8_whatever_the_locale(tmp_path, monkeypatch):
+    """A revision planning message carries a non-ASCII plan's and plan review's exact text
+    under a default text encoding that is not UTF-8, the artifacts having been written by
+    _write_artifact."""
+    plan_path = tmp_path / "01-slug.md"
+    _write_artifact(plan_path, "# План: работа ✓")
+    review_path = tmp_path / "01-slug-plan-review-1.md"
+    _write_artifact(review_path, "Проблемы —缺少一步。")
+    backend = FakeAgentBackend(on_call=lambda call: "# План: работа ✓", sid="sid-1")
+    pr = PlannerReviewer(tmp_path, backend)
+
+    monkeypatch.setattr(io, "text_encoding", lambda enc, *a, **k: "latin-1" if enc is None else enc)
+    pr.plan("Task title", "Task description", plan_path, plan_review_path=review_path)
+
+    revision = backend.calls[0].prompt
+    assert "## Plan\n\n# План: работа ✓" in revision
+    assert "## Plan review\n\nПроблемы —缺少一步。" in revision
 
 
 def test_plan_blank_answer_halts_and_leaves_the_round_recorded(tmp_path):

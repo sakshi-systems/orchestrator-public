@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .errors import HaltError
 from .ports import VerifyKind
-from .protocol import PLAN_REVIEW_PASS, _has_signal, _read_sessions
+from .protocol import PLAN_REVIEW_PASS, _has_signal, _read_artifact, _read_sessions
 
 
 def _parse_counter(step_value: str, prefix: str) -> int:
@@ -122,7 +122,7 @@ def _validate_sidecar_step(
         return step_value
     if step_value == "plan_reviewed":
         if not any(
-            _has_signal(f.read_text(), PLAN_REVIEW_PASS)
+            _has_signal(_read_artifact(f), PLAN_REVIEW_PASS)
             for f in plan_reviews_dir.glob(f"{seq}-{slug}-plan-review-*.md")
         ):
             return ""
@@ -218,7 +218,7 @@ def _detect_step(
         return ("plan_review", 1, plan_path)
 
     # 4. Latest plan-review didn't pass → plan needs revision
-    if not _has_signal(plan_review_files[-1].read_text(), PLAN_REVIEW_PASS):
+    if not _has_signal(_read_artifact(plan_review_files[-1]), PLAN_REVIEW_PASS):
         return ("plan", len(plan_review_files) + 1, plan_path)
 
     # 5. Latest plan review passed → implement from iteration 1

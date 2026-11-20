@@ -12,7 +12,7 @@ from .config import OrchestratorConfig
 from .errors import EscalationError, PipelineStopError
 from .notify import Outcome, report
 from .ports import AgentBackendProtocol, VerifyKind
-from .protocol import _read_sessions, _write_session, _write_sessions
+from .protocol import _read_artifact, _read_sessions, _write_session, _write_sessions
 from .resume import _attempt_budget, _check_attempt, _detect_step, _interpret_step, _validate_sidecar_step, plan_review_budget
 from .roadmap import mark_done, parse_roadmap
 from .runtime import _run_summary
@@ -182,7 +182,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
             if attempt == budget:
                 raise PipelineStopError(
                     f"Plan failed\n\n"
-                    f"Last review: {plan_review_path}\n\n{plan_review_path.read_text()}"
+                    f"Last review: {plan_review_path}\n\n{_read_artifact(plan_review_path)}"
                 )
 
             _check_attempt("plan", attempt + 1, *_attempt_budget("plan", max_iterations, config.plan_review_iterations))
@@ -232,7 +232,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
             _write_session(plan_path, "step", f"{mode.verify.fail_tag}{iteration}")
             if iteration == max_iterations:
                 raise PipelineStopError(
-                    mode.verify.max_iterations_message.format(n=max_iterations, path=out_path, content=out_path.read_text())
+                    mode.verify.max_iterations_message.format(n=max_iterations, path=out_path, content=_read_artifact(out_path))
                 )
 
     # Step 4: Mark done + commit
