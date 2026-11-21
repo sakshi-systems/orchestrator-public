@@ -35,6 +35,9 @@ Every fault the orchestrator can meet, and the handling it requires.
 | An exhausted rate limit reported by the agent | A halt |
 | A genuine invocation error — a bad argument, a missing file, an unusable session | Surfaces as a defect, not absorbed |
 | An answer that is empty when one was required, from any role | A halt; the resumed run repeats that call |
+| A call to a Hermes instance that meets a refused connection, a timeout, a server error or a fault while the answer is read | Handled as a transport failure with no answer: retried a bounded number of times, then a halt |
+| A call to a Hermes instance that his server refuses on the key, that is answered by a redirect, or whose key file holds no usable key | Surfaces as a defect, a configuration fault, not absorbed |
+| A head taking a role of the run that cannot be reached, a non-send | A halt at once, with the person told; see A head takes a role of the run |
 
 **From the budget**
 

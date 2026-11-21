@@ -7,11 +7,13 @@ import time
 from pathlib import Path
 from typing import Callable, NamedTuple
 
-from .agents import REVIEW_VERIFY, TEST_RUN_VERIFY, Implementer, PlannerReviewer, PlanReviewer
-from .config import OrchestratorConfig
+from .agents import REVIEW_VERIFY, TEST_RUN_VERIFY, CodeReviewer, Implementer, Planner, PlanReviewer
+from .config import OrchestratorConfig, role_runtimes
 from .errors import EscalationError, PipelineStopError
+from .exchange import remove_task
+from .iteration_ref import make_iteration_commit, push_iteration_ref, remove_iteration_refs
 from .notify import Outcome, report
-from .ports import AgentBackendProtocol, VerifyKind
+from .ports import AgentBackendProtocol, ImplementerResultProtocol, VerifyKind
 from .protocol import _read_artifact, _read_sessions, _write_session, _write_sessions
 from .resume import _attempt_budget, _check_attempt, _detect_step, _interpret_step, _validate_sidecar_step, plan_review_budget
 from .roadmap import mark_done, parse_roadmap
@@ -82,17 +84,18 @@ def _git_commit(project_dir: Path, task_title: str) -> None:
         print(">>> WARNING: git push failed, continuing anyway.")
 
 
-def _record_planning(plan_path: Path, owner: str, attempt: int, session_id: str | None) -> None:
+def _record_planning(plan_path: Path, runtimes: dict[str, dict[str, str]], attempt: int, session_id: str | None) -> None:
     """Persist pending intent and the effective continuation before invoking planning."""
-    updates = {"runtime": owner, "step": f"planning:{attempt}"}
+    updates = {"runtime": runtimes, "step": f"planning:{attempt}"}
     if session_id is not None:
         updates["planner"] = session_id
     _write_sessions(plan_path, updates)
 
 
-def process_task(project_dir: Path, task, task_index: int, config: OrchestratorConfig, mode: Mode = IMPLEMENT_MODE, phase_session_id: str | None = None, *, backend: AgentBackendProtocol) -> str | None:
+def process_task(project_dir: Path, task, task_index: int, config: OrchestratorConfig, mode: Mode = IMPLEMENT_MODE, phase_session_id: str | None = None, *, backend: AgentBackendProtocol, implementer_result: ImplementerResultProtocol) -> str | None:
     """Plan → implement → verify loop for a single task (verify = review, or a real test run in test mode)."""
     max_iterations = config.max_iterations
+    runtimes = role_runtimes(config.runtime, config.roles)
     plans_dir = _artifact_dir(project_dir, mode, "plans")
     output_dir = _artifact_dir(project_dir, mode, mode.verify.output_dirname)
     plan_reviews_dir = _artifact_dir(project_dir, mode, "plan-reviews")
@@ -111,12 +114,16 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
 
     step, counter, plan_path = _detect_step(
         seq, task.slug, plan_path, plan_reviews_dir, output_dir, mode.verify,
-        max_iterations=max_iterations, runtime=config.runtime,
+        max_iterations=max_iterations, runtimes=runtimes,
         plan_review_iterations=config.plan_review_iterations,
     )
     seq = plan_path.stem.split("-", 1)[0]
 
     sessions = _read_sessions(plan_path)
+    if not sessions:
+        # A task started afresh never meets an earlier attempt's message,
+        # marker or answer under the same plan stem; a resume keeps its files.
+        remove_task(project_dir, plan_path)
     elapsed_offset = int(sessions.get("elapsed", "0"))
     task_start = time.monotonic() - elapsed_offset
 
@@ -140,25 +147,30 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     }[step]
     # Inferred planning is adopted by the pending write immediately before its call.
     if ("runtime" not in sessions or boundary != raw_boundary) and not (step == "plan" and not valid_boundary):
-        _write_sessions(plan_path, {"runtime": config.runtime, "step": boundary})
+        _write_sessions(plan_path, {"runtime": runtimes, "step": boundary})
 
     # Create agents
-    planner_reviewer = PlannerReviewer(project_dir, backend, planner_prompt_name=mode.planner_prompt_name)
-    implementer = Implementer(project_dir, backend)
-    verifier = mode.verify.make_verifier(planner_reviewer, project_dir)
+    planner = Planner(project_dir, backend, planner_prompt_name=mode.planner_prompt_name)
+    code_reviewer = CodeReviewer(project_dir, backend)
+    implementer = Implementer(
+        project_dir, backend,
+        result=implementer_result,
+    )
+    verifier = mode.verify.make_verifier(code_reviewer, project_dir)
 
-    planner_reviewer.session_id = sessions["planner"] if "planner" in sessions else phase_session_id
+    planner.session_id = sessions["planner"] if "planner" in sessions else phase_session_id
     implementer.session_id = sessions.get("implementer")
+    code_reviewer.session_id = sessions.get("code-reviewer")
 
     # Step 1: Plan
     if step == "plan":
         print("\n>>> PLANNING...")
-        _record_planning(plan_path, config.runtime, counter, planner_reviewer.session_id)
+        _record_planning(plan_path, runtimes, counter, planner.session_id)
         if counter > 1:
             prev_plan_review = plan_reviews_dir / f"{seq}-{task.slug}-plan-review-{counter - 1}.md"
-            planner_reviewer.plan(task.title, task.description, plan_path, roadmap_path=roadmap_path, line_number=task.line_number, plan_review_path=prev_plan_review)
+            planner.plan(task.title, task.description, plan_path, roadmap_path=roadmap_path, line_number=task.line_number, plan_review_path=prev_plan_review)
         else:
-            planner_reviewer.plan(task.title, task.description, plan_path, roadmap_path=roadmap_path, line_number=task.line_number)
+            planner.plan(task.title, task.description, plan_path, roadmap_path=roadmap_path, line_number=task.line_number)
 
         step = "plan_review"
         _write_session(plan_path, "step", f"planned:{counter}")
@@ -188,8 +200,8 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
             _check_attempt("plan", attempt + 1, *_attempt_budget("plan", max_iterations, config.plan_review_iterations))
             print(">>> Plan has issues — revising plan...")
             _write_session(plan_path, "step", f"plan_review_failed:{attempt}")
-            _record_planning(plan_path, config.runtime, attempt + 1, planner_reviewer.session_id)
-            planner_reviewer.plan(
+            _record_planning(plan_path, runtimes, attempt + 1, planner.session_id)
+            planner.plan(
                 task.title, task.description, plan_path,
                 plan_review_path=plan_review_path,
                 roadmap_path=roadmap_path, line_number=task.line_number,
@@ -205,7 +217,6 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         else:
             print(f"\n>>> IMPLEMENTING (iteration {iteration})...")
             feedback_path = output_dir / f"{seq}-{task.slug}{mode.verify.output_suffix.format(n=iteration - 1)}" if iteration > 1 else None
-            verifier.begin_turn(plan_path)
             answer_path = reviews_dir / f"{seq}-{task.slug}-implementer-{iteration}.md"
             implementer.implement(plan_path, answer_path, feedback_path=feedback_path, roadmap_path=roadmap_path, line_number=task.line_number)
             _write_session(plan_path, "step", f"implemented:{iteration}")
@@ -213,6 +224,8 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
 
         print(f"\n>>> {mode.verify.running_header} (iteration {iteration})...")
         subprocess.run(["git", "add", "-A"], cwd=project_dir, check=True)
+        iteration_state = make_iteration_commit(project_dir, plan_path.stem, iteration)
+        push_iteration_ref(project_dir, iteration_state)
         out_path = output_dir / f"{seq}-{task.slug}{mode.verify.output_suffix.format(n=iteration)}"
         prev_out_path = None
         if iteration > 1:
@@ -221,7 +234,8 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
                 prev_out_path = prev
         implementer_answer = reviews_dir / f"{seq}-{task.slug}-implementer-{iteration}.md"
         passed = verifier.verify(plan_path, out_path, prev_out_path,
-                                 implementer_answer if implementer_answer.exists() else None)
+                                 implementer_answer if implementer_answer.exists() else None,
+                                 iteration_state)
         _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
 
         if passed:
@@ -241,11 +255,13 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     state.tasks_done += 1
     _write_session(plan_path, "step", "done")
     _git_commit(project_dir, task.title)
+    remove_iteration_refs(project_dir, plan_path)
+    remove_task(project_dir, plan_path)  # a sweep of the files of a call that never got its answer
     report(config, Outcome.TASK_DONE, project_dir.name, task.title, _run_summary())
 
     mins, secs = divmod(elapsed, 60)
     print(f">>> Task done [{mins}m {secs}s]")
-    return planner_reviewer.session_id
+    return planner.session_id
 
 
 def _run_dynamic_loop(project_dir: Path, roadmap_path: Path, config: OrchestratorConfig, process_fn, mode: Mode, *, usage_check: Callable[[], None]) -> None:

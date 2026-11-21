@@ -16,9 +16,9 @@ from orchestrator import layout as layout_module
 from orchestrator import main as main_module
 from orchestrator import pipeline as pipeline_module
 from orchestrator import usage as usage_module
-from orchestrator.agents import HEAD_VERIFY, REVIEW_VERIFY, TEST_RUN_VERIFY
-from orchestrator.errors import EscalationError, HaltError, PipelineStopError, RateLimitError
-from orchestrator.config import OrchestratorConfig, load_config
+from orchestrator.agents import REVIEW_VERIFY, TEST_RUN_VERIFY
+from orchestrator.errors import EscalationError, HaltError, HeadNotReachedError, PipelineStopError, RateLimitError
+from orchestrator.config import OrchestratorConfig, load_config, role_runtimes
 from orchestrator.layout import _artifact_subdir, _resolve_roadmap_relpath, _tests_sibling
 from orchestrator.notify import Outcome
 from orchestrator.protocol import _read_sessions
@@ -33,9 +33,12 @@ from orchestrator.resume import (
     _detect_step,
     _validate_sidecar_step,
 )
+from orchestrator.implementer_result import HermesResult, WorkingTreeResult
+from orchestrator.role_backend import RoleRoutedBackend
 from orchestrator.usage import _check_usage_limits, _parse_pct
 from orchestrator.agents import _load_prompt
 from orchestrator.ports import AgentRole, RoleSetting
+from tests.conftest import git_in
 from orchestrator.roadmap import mark_done
 from tests.fakes import FakeAgentBackend
 from tests.test_config import _write_config, _write_override
@@ -288,7 +291,7 @@ def _detect_task_step(
     """Detect where a previous implement run stopped: `_detect_step` with `REVIEW_VERIFY`."""
     return _detect_step(
         seq, slug, plan_path, plan_reviews_dir, reviews_dir,
-        REVIEW_VERIFY, max_iterations=max_iterations, runtime="claude",
+        REVIEW_VERIFY, max_iterations=max_iterations, runtimes=role_runtimes("claude"),
     )
 
 
@@ -300,14 +303,32 @@ def _detect_test_task_step(
     """Detect where a previous test run stopped: `_detect_step` with `TEST_RUN_VERIFY`."""
     return _detect_step(
         seq, slug, plan_path, plan_reviews_dir, test_runs_dir,
-        TEST_RUN_VERIFY, max_iterations=max_iterations, runtime="claude",
+        TEST_RUN_VERIFY, max_iterations=max_iterations, runtimes=role_runtimes("claude"),
     )
+
+
+def _flow_repo(project):
+    """Make a flow's directory a git repository with an identity set, so the
+    iteration's commit can be made."""
+    git_in(project, "init", "-q", "-b", "main", ".")
+    git_in(project, "config", "user.email", "test@example.com")
+    git_in(project, "config", "user.name", "Test")
+    (project / ".gitkeep").write_text("")
+    git_in(project, "add", ".gitkeep")
+    git_in(project, "commit", "-q", "-m", "initial")
+
+    origin = project.parent / f"{project.name}-origin.git"
+    git_in(project.parent, "init", "--bare", "-b", "main", str(origin))
+    git_in(project, "remote", "add", "origin", str(origin))
+    git_in(project, "push", "-q", "origin", "HEAD:refs/heads/main")
 
 
 def _dms_dirs(tmp_path: Path) -> tuple[Path, Path, Path]:
     """Build .ai-factory/{plans,plan-reviews,reviews} and return (plan_reviews_dir, reviews_dir, plan_path).
 
     plan_path points to plans/01-slug.md (not created — caller decides whether to write it).
+    The project is a git repository with an identity set, so the iteration's
+    commit can be made.
     """
     plans_dir = tmp_path / ".ai-factory" / "plans"
     plan_reviews_dir = tmp_path / ".ai-factory" / "plan-reviews"
@@ -315,6 +336,7 @@ def _dms_dirs(tmp_path: Path) -> tuple[Path, Path, Path]:
     plans_dir.mkdir(parents=True)
     plan_reviews_dir.mkdir(parents=True)
     reviews_dir.mkdir(parents=True)
+    _flow_repo(tmp_path)
     plan_path = plans_dir / f"{DMS_SEQ}-{DMS_SLUG}.md"
     return plan_reviews_dir, reviews_dir, plan_path
 
@@ -797,7 +819,7 @@ def _run_cli_with(monkeypatch, exc):
     """Patch load_config/run_implement/report/argv; return the list report() calls get recorded into."""
     recorded = []
 
-    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None, *, task_reviewers=None: _cli_config())
+    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None: _cli_config())
 
     def _raise_run_implement(project_dir, config):
         raise exc
@@ -871,7 +893,7 @@ def test_check_usage_limits_raises_halt_error_over_threshold(monkeypatch):
 
 def test_process_task_escalated_sidecar_raises_without_constructing_agents(tmp_path, monkeypatch):
     """Should raise EscalationError immediately, before constructing any agent
-    (PlannerReviewer/Implementer/PlanReviewer) and without calling mark_done/_git_commit,
+    (Planner/CodeReviewer/Implementer/PlanReviewer) and without calling mark_done/_git_commit,
     when the sidecar step is "escalated" — a resumed-but-unresolved escalation must not
     silently re-run past the decision it stopped for."""
     prd, rv, plan_path = _dms_dirs(tmp_path)
@@ -883,7 +905,8 @@ def test_process_task_escalated_sidecar_raises_without_constructing_agents(tmp_p
     def _fail_if_constructed(*args, **kwargs):
         raise AssertionError("agent must not be constructed for an escalated task")
 
-    monkeypatch.setattr(pipeline_module, "PlannerReviewer", _fail_if_constructed)
+    monkeypatch.setattr(pipeline_module, "Planner", _fail_if_constructed)
+    monkeypatch.setattr(pipeline_module, "CodeReviewer", _fail_if_constructed)
     monkeypatch.setattr(pipeline_module, "Implementer", _fail_if_constructed)
     monkeypatch.setattr(pipeline_module, "PlanReviewer", _fail_if_constructed)
 
@@ -907,7 +930,7 @@ def test_process_task_escalated_sidecar_raises_without_constructing_agents(tmp_p
         line_number = 0
 
     with pytest.raises(EscalationError, match="pick A or B"):
-        process_task(tmp_path, _TaskStub(), 1, config, backend=FakeAgentBackend())
+        process_task(tmp_path, _TaskStub(), 1, config, backend=FakeAgentBackend(), implementer_result=WorkingTreeResult())
 
 
 def test_process_task_records_done_after_mark_and_before_commit(tmp_path, monkeypatch):
@@ -920,18 +943,19 @@ def test_process_task_records_done_after_mark_and_before_commit(tmp_path, monkey
         "Review notes\n\nPLAN_REVIEW_PASS"
     )
 
-    class _PlannerStub:
+    class _RoleStub:
         def __init__(self, *args, **kwargs):
             self.session_id = None
 
-        def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path):
+        def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path, iteration_state):
             return True
 
     class _ImplementerStub:
         def __init__(self, *args, **kwargs):
             self.session_id = None
 
-    monkeypatch.setattr(pipeline_module, "PlannerReviewer", _PlannerStub)
+    monkeypatch.setattr(pipeline_module, "Planner", _RoleStub)
+    monkeypatch.setattr(pipeline_module, "CodeReviewer", _RoleStub)
     monkeypatch.setattr(pipeline_module, "Implementer", _ImplementerStub)
 
     recorded: list[str | None] = []
@@ -956,7 +980,7 @@ def test_process_task_records_done_after_mark_and_before_commit(tmp_path, monkey
         description = "Some description"
         line_number = 0
 
-    process_task(tmp_path, _TaskStub(), 1, config, backend=FakeAgentBackend())
+    process_task(tmp_path, _TaskStub(), 1, config, backend=FakeAgentBackend(), implementer_result=WorkingTreeResult())
 
     assert recorded == ["implemented:1", "done"]
 
@@ -988,7 +1012,7 @@ def test_process_task_resume_past_max_iterations_raises_halt_error(tmp_path):
 
     backend = FakeAgentBackend()
     with pytest.raises(HaltError):
-        process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
 
     assert backend.calls == []
     assert sidecar.read_bytes() == before
@@ -1446,21 +1470,23 @@ def _seed_review_failed(tmp_path: Path, sidecar: dict) -> tuple[Path, Path]:
 
 def _review_writing_backend(review_2: Path) -> FakeAgentBackend:
     def _write(call):
-        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+        if call.role is AgentRole.CODE_REVIEWER and "Review the CODE CHANGES" in call.prompt:
             return "All good\n\nREVIEW_PASS"
 
     return FakeAgentBackend(on_call=_write)
 
 
 def test_process_task_restores_saved_sessions_from_disk(tmp_path, monkeypatch):
-    """A saved planner identity beats the phase identity; the implementer resumes its own."""
+    """The implementer and the code reviewer each resume their own saved session; the
+    planner's identity is never the reviewer's."""
     plan_path, review_2 = _seed_review_failed(
-        tmp_path, {"planner": "saved-planner", "implementer": "saved-impl", "step": "review_failed:1"}
+        tmp_path, {"planner": "saved-planner", "implementer": "saved-impl",
+                   "code-reviewer": "saved-reviewer", "step": "review_failed:1"}
     )
     _neutralize_side_effects(monkeypatch)
     backend = _review_writing_backend(review_2)
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), phase_session_id="phase-sid", backend=backend)
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), phase_session_id="phase-sid", backend=backend, implementer_result=WorkingTreeResult())
 
     impl_call, review_call = backend.calls
     assert impl_call.role is AgentRole.IMPLEMENTER
@@ -1471,50 +1497,91 @@ def test_process_task_restores_saved_sessions_from_disk(tmp_path, monkeypatch):
     for name in ("implementer", "escalation"):
         assert _load_prompt(name) in impl_call.instructions
     assert impl_call.instructions.count(_load_prompt("execution")) == 1
-    assert review_call.role is AgentRole.PLANNER_REVIEWER
-    assert review_call.session_id == "saved-planner"
-    for name in ("planner", "reviewer", "escalation"):
+    assert review_call.role is AgentRole.CODE_REVIEWER
+    assert review_call.session_id == "saved-reviewer"
+    for name in ("reviewer", "escalation"):
         assert _load_prompt(name) in review_call.instructions
     sessions = _read_sessions(plan_path)
     assert sessions["step"] == "done"
-    assert sessions["planner"] == backend.returned[1]
+    assert sessions["planner"] == "saved-planner"
+    assert sessions["code-reviewer"] == backend.returned[1]
     assert sessions["implementer"] == backend.returned[0]
 
 
-def test_process_task_falls_back_to_phase_session_without_saved_planner(tmp_path, monkeypatch):
+def test_process_task_phase_session_never_reaches_the_code_reviewer(tmp_path, monkeypatch):
+    """Without a saved planner the phase identity reaches no role that runs here, and the
+    code reviewer opens a session of its own."""
     plan_path, review_2 = _seed_review_failed(
         tmp_path, {"implementer": "saved-impl", "step": "review_failed:1"}
     )
     _neutralize_side_effects(monkeypatch)
     backend = _review_writing_backend(review_2)
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), phase_session_id="phase-sid", backend=backend)
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), phase_session_id="phase-sid", backend=backend, implementer_result=WorkingTreeResult())
 
     impl_call, review_call = backend.calls
     assert impl_call.session_id == "saved-impl"
-    assert review_call.session_id == "phase-sid"
+    assert review_call.session_id is None
 
 
 def test_process_task_test_mode_verifies_by_shell_not_backend(tmp_path, monkeypatch):
     """Test mode makes exactly the planning, plan-review and implement backend calls; the test run is shell."""
     _neutralize_side_effects(monkeypatch)
+    _flow_repo(tmp_path)
 
     def _write(call):
-        if call.role is AgentRole.PLANNER_REVIEWER:
+        if call.role is AgentRole.PLANNER:
             return "# Plan\n\n## Test Command\n`true`\n"
         elif call.role is AgentRole.PLAN_REVIEWER:
             return "Fine\n\nPLAN_REVIEW_PASS"
 
     backend = FakeAgentBackend(on_call=_write)
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), TEST_MODE, backend=backend)
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), TEST_MODE, backend=backend, implementer_result=WorkingTreeResult())
 
     assert [c.role for c in backend.calls] == [
-        AgentRole.PLANNER_REVIEWER, AgentRole.PLAN_REVIEWER, AgentRole.IMPLEMENTER,
+        AgentRole.PLANNER, AgentRole.PLAN_REVIEWER, AgentRole.IMPLEMENTER,
     ]
     assert _load_prompt("test-planner") in backend.calls[0].instructions
     test_run = _artifact_dir(tmp_path, TEST_MODE, "test-runs") / f"{DMS_SEQ}-{DMS_SLUG}-test-1.txt"
     assert test_run.read_text().rstrip().endswith("TEST_PASS")
+
+
+def test_process_task_runs_each_role_on_its_own_runtime_and_records_the_split(tmp_path, monkeypatch):
+    """A run whose roles take two runtimes reaches each role through its own backend and
+    the sidecar records each role's runtime, the code reviewer on the runtime roles names."""
+    _neutralize_side_effects(monkeypatch)
+
+    def claude_call(call):
+        if call.role is AgentRole.PLAN_REVIEWER:
+            return "Fine\n\nPLAN_REVIEW_PASS"
+        return "# Plan"
+
+    def codex_call(call):
+        if call.role is AgentRole.CODE_REVIEWER:
+            return "All good\n\nREVIEW_PASS"
+        return None
+
+    roles = {"implementer": {"runtime": "codex"}, "code_reviewer": {"runtime": "codex"}}
+    claude_backend = FakeAgentBackend(on_call=claude_call)
+    codex_backend = FakeAgentBackend(on_call=codex_call, sid="codex-sid")
+    routed = RoleRoutedBackend(
+        {"claude": claude_backend, "codex": codex_backend},
+        role_runtimes("claude", roles),
+    )
+    config = dataclasses.replace(_flow_config(), roles=roles)
+    prd, rv, plan_path = _dms_dirs(tmp_path)
+
+    process_task(tmp_path, _TaskStub(), 1, config, backend=routed, implementer_result=WorkingTreeResult())
+
+    assert [call.role for call in claude_backend.calls] == [AgentRole.PLANNER, AgentRole.PLAN_REVIEWER]
+    assert [call.role for call in codex_backend.calls] == [AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER]
+    record = _read_sessions(plan_path)
+    assert record["step"] == "done"
+    assert record["runtime"] == role_runtimes("claude", roles)
+    assert record["implementer"] == "codex-sid"
+    assert record["code-reviewer"] == "codex-sid"
+    assert record["planner"].startswith("planner-sid-")
 
 
 def _write_loop_roadmaps(project_dir, content=""):
@@ -1573,7 +1640,10 @@ def test_loops_construct_one_backend_and_forward_it(tmp_path, monkeypatch, loop_
     assert len(constructor_calls) == 1
     assert policy_calls == ([(config,)] if selected == "claude" else [(config, tmp_path)])
     (_, kwargs), = process_calls
-    assert kwargs["backend"] is sentinel
+    routed = kwargs["backend"]
+    assert isinstance(routed, RoleRoutedBackend)
+    assert routed.runtime_of(AgentRole.PLANNER) == selected
+    assert routed.role_settings == sentinel.role_settings
     assert kwargs["phase_session_id"] == "sid"
     if tests_roadmap:
         assert captured["mode"].planner_prompt_name == "test-planner"
@@ -1631,7 +1701,7 @@ def test_selected_constructor_preflights_without_probe(tmp_path, monkeypatch, ca
 def test_loops_apply_and_print_resolved_settings(tmp_path, monkeypatch, capsys, loop_name, selected, overrides):
     _write_loop_roadmaps(tmp_path)
     block = {
-        "planner_reviewer": {"model": "operator-model"},
+        "planner": {"model": "operator-model"},
         "implementer": {"effort": "operator-effort"},
     } if overrides else {}
     config = dataclasses.replace(
@@ -1666,30 +1736,31 @@ def test_loops_apply_and_print_resolved_settings(tmp_path, monkeypatch, capsys, 
     assert len(loops) == 1
     if selected == "claude":
         role_lines = [
-            "  planner_reviewer: opus (high)",
-            "  plan_reviewer: opus (high)",
-            "  implementer: sonnet (high)",
+            "  planner: claude opus (high)",
+            "  plan_reviewer: claude opus (high)",
+            "  implementer: claude sonnet (high)",
+            "  code_reviewer: claude opus (high)",
         ]
         if overrides:
-            role_lines[0] = "  planner_reviewer: operator-model (high)"
-            role_lines[2] = "  implementer: sonnet (operator-effort)"
+            role_lines[0] = "  planner: claude operator-model (high)"
+            role_lines[2] = "  implementer: claude sonnet (operator-effort)"
     else:
         role_lines = [
-            "  planner_reviewer: gpt-6.1-sol (high)",
-            "  plan_reviewer: gpt-6.1-sol (high)",
-            "  implementer: gpt-6.1-sol (high)",
+            "  planner: codex gpt-6.1-sol (high)",
+            "  plan_reviewer: codex gpt-6.1-sol (high)",
+            "  implementer: codex gpt-6.1-sol (high)",
+            "  code_reviewer: codex gpt-6.1-sol (high)",
         ]
         if overrides:
-            role_lines[0] = "  planner_reviewer: operator-model (high)"
-            role_lines[2] = "  implementer: gpt-6.1-sol (operator-effort)"
-    reviewer_line = "test run" if loop_name == "_test_loop" else "run"
+            role_lines[0] = "  planner: codex operator-model (high)"
+            role_lines[2] = "  implementer: codex gpt-6.1-sol (operator-effort)"
     assert capsys.readouterr().out == "\n".join(
-        [f"Agent runtime: {selected}", *role_lines, f"Task reviewer: {reviewer_line}", "Plan review iterations: 3"]
+        [f"Agent runtime: {selected}", *role_lines, "Plan review iterations: 3"]
     ) + "\n"
 
 
 # ---------------------------------------------------------------------------
-# The reviewer choice at the composition root and the run's printed choices
+# The loops' verify kinds and the run's printed choices
 # ---------------------------------------------------------------------------
 
 
@@ -1704,131 +1775,95 @@ def _capture_loop_mode(monkeypatch, project_dir):
     return captured
 
 
-@pytest.mark.parametrize("reviewer,kind", [("run", REVIEW_VERIFY), ("head", HEAD_VERIFY)])
-def test_implement_loop_mode_carries_the_kind_the_setting_names(tmp_path, monkeypatch, reviewer, kind):
+def test_implement_loop_mode_carries_the_review_kind(tmp_path, monkeypatch):
     captured = _capture_loop_mode(monkeypatch, tmp_path)
-    config = dataclasses.replace(_flow_config(), task_reviewer=reviewer)
 
-    main_module._implement_loop(tmp_path, config)
+    main_module._implement_loop(tmp_path, _flow_config())
 
-    assert captured["mode"].verify is kind
-
-
-def test_implement_loop_reads_task_reviewer_from_the_overlay(tmp_path, monkeypatch):
-    """The setting reaches the kind through the merge: an overlay 'head' selects the head's kind."""
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
-    captured = _capture_loop_mode(monkeypatch, project_dir)
-    _write_config(tmp_path, monkeypatch)
-    _write_override(project_dir, {"task_reviewer": "head"})
-    config = load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
-
-    main_module._implement_loop(project_dir, config)
-
-    assert config.task_reviewer == "head"
-    assert captured["mode"].verify is HEAD_VERIFY
+    assert captured["mode"].verify is REVIEW_VERIFY
 
 
-def test_test_loop_mode_carries_the_test_run_when_the_setting_says_head(tmp_path, monkeypatch):
+def test_test_loop_mode_carries_the_test_run_kind(tmp_path, monkeypatch):
     captured = _capture_loop_mode(monkeypatch, tmp_path)
-    config = dataclasses.replace(_flow_config(), task_reviewer="head")
 
-    main_module._test_loop(tmp_path, config)
+    main_module._test_loop(tmp_path, _flow_config())
 
     assert captured["mode"].verify is TEST_RUN_VERIFY
 
 
-@pytest.mark.parametrize("loop_name,setting,reviewer_line", [
-    ("_implement_loop", None, "run"),
-    ("_implement_loop", "head", "head"),
-    ("_test_loop", "head", "test run"),
-])
+@pytest.mark.parametrize("loop_name", ["_implement_loop", "_test_loop"])
 @pytest.mark.parametrize("plan_review_iterations,expected_budget", [(None, 3), (0, 0), (5, 5)])
-def test_loops_print_reviewer_and_budget_after_the_agent_lines(
-    tmp_path, monkeypatch, capsys, loop_name, setting, reviewer_line, plan_review_iterations, expected_budget,
+def test_loops_print_the_budget_after_the_agent_lines(
+    tmp_path, monkeypatch, capsys, loop_name, plan_review_iterations, expected_budget,
 ):
     _capture_loop_mode(monkeypatch, tmp_path)
     config = _flow_config()
     config.plan_review_iterations = plan_review_iterations
-    if setting is not None:
-        config.task_reviewer = setting
 
     getattr(main_module, loop_name)(tmp_path, config)
 
-    assert capsys.readouterr().out == (
-        f"Task reviewer: {reviewer_line}\nPlan review iterations: {expected_budget}\n"
-    )
+    assert capsys.readouterr().out == f"Plan review iterations: {expected_budget}\n"
 
 
-@pytest.mark.parametrize("value", ["universe", None, "", "RUN", "Head"])
-def test_task_reviewer_outside_the_names_exits_naming_the_supplying_file(tmp_path, monkeypatch, value):
+@pytest.mark.parametrize("value", ["run", "head"])
+def test_a_configuration_carrying_task_reviewer_is_retired(tmp_path, monkeypatch, value):
     base_path = _write_config(tmp_path, monkeypatch)
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     overlay_path = _write_override(project_dir, {"task_reviewer": value})
 
     with pytest.raises(SystemExit) as exc:
-        load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
+        load_config(project_dir)
 
     message = str(exc.value)
-    assert "task_reviewer" in message
-    assert repr(value) in message
-    assert str(overlay_path) in message
+    assert message == (
+        f"Invalid 'task_reviewer' in {overlay_path}: "
+        "the setting is retired; name who reviews a task as the runtime of 'roles.code_reviewer'"
+    )
     assert str(base_path) not in message
 
 
-def test_task_reviewer_outside_names_in_base_exits_naming_base(tmp_path, monkeypatch):
-    base_path = _write_config(tmp_path, monkeypatch, {"task_reviewer": "universe"})
+def test_a_configuration_carrying_task_reviewer_in_base_exits_naming_base(tmp_path, monkeypatch):
+    base_path = _write_config(tmp_path, monkeypatch, {"task_reviewer": "run"})
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     overlay_path = _write_override(project_dir, {"max_iterations": 4})
 
     with pytest.raises(SystemExit) as exc:
-        load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
+        load_config(project_dir)
 
     message = str(exc.value)
-    assert "task_reviewer" in message
-    assert "universe" in message
     assert str(base_path) in message
     assert str(overlay_path) not in message
+    assert "the setting is retired" in message
 
 
-def test_absent_task_reviewer_in_base_and_overlay_reads_run(tmp_path, monkeypatch):
-    """A project that sets nothing runs with the run's reviewer: the absent default is 'run'."""
+def test_a_configuration_without_task_reviewer_loads_and_runs_the_review_as_before(tmp_path, monkeypatch):
     _write_config(tmp_path, monkeypatch)
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     _write_override(project_dir, {"max_iterations": 4})
 
-    config = load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
+    config = load_config(project_dir)
 
-    assert config.task_reviewer == "run"
+    assert config.max_iterations == 4  # the merge still works; no field names a reviewer
 
 
-@pytest.mark.parametrize("value", [["run"], {"reviewer": "run"}])
-def test_non_string_task_reviewer_exits_with_the_diagnostic(tmp_path, monkeypatch, value):
-    """A list or object value is a diagnostic like any other bad value, not a traceback."""
-    base_path = _write_config(tmp_path, monkeypatch)
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
-    overlay_path = _write_override(project_dir, {"task_reviewer": value})
 
-    with pytest.raises(SystemExit) as exc:
-        load_config(project_dir, task_reviewers=main_module.TASK_REVIEWERS)
 
-    message = str(exc.value)
-    assert "task_reviewer" in message
-    assert repr(value) in message
-    assert str(overlay_path) in message
-    assert str(base_path) not in message
+
+
+
+
 
 
 @pytest.mark.parametrize("selected", ["claude", "codex"])
 def test_runtime_reads_only_selected_block_and_prints_backend_mapping(tmp_path, monkeypatch, capsys, selected):
-    block = {"planner_reviewer": {"model": "raw-model", "effort": "raw-effort"}}
+    block = {"planner": {"model": "raw-model", "effort": "raw-effort"}}
 
     class SelectedConfig:
         runtime = selected
+        roles: dict[str, dict[str, str]] = {}
 
         @property
         def claude_agents(self):
@@ -1842,9 +1877,10 @@ def test_runtime_reads_only_selected_block_and_prints_backend_mapping(tmp_path, 
 
     backend = FakeAgentBackend()
     backend.role_settings = {
-        AgentRole.IMPLEMENTER: RoleSetting("resolved-builder", "builder-effort"),
-        AgentRole.PLANNER_REVIEWER: RoleSetting("resolved-planner", "planner-effort"),
+        AgentRole.PLANNER: RoleSetting("resolved-planner", "planner-effort"),
         AgentRole.PLAN_REVIEWER: RoleSetting("resolved-reviewer", "reviewer-effort"),
+        AgentRole.IMPLEMENTER: RoleSetting("resolved-builder", "builder-effort"),
+        AgentRole.CODE_REVIEWER: RoleSetting("resolved-code", "code-effort"),
     }
     constructed = []
 
@@ -1859,16 +1895,297 @@ def test_runtime_reads_only_selected_block_and_prints_backend_mapping(tmp_path, 
 
     result, usage_check = main_module._make_runtime(SelectedConfig(), tmp_path)
 
-    assert result is backend
+    assert isinstance(result, RoleRoutedBackend)
+    assert result.runtime_of(AgentRole.PLANNER) == selected
+    assert result.role_settings == backend.role_settings
     assert len(constructed) == 1
     assert constructed[0] is block
     assert callable(usage_check)
     assert capsys.readouterr().out == (
         f"Agent runtime: {selected}\n"
-        "  implementer: resolved-builder (builder-effort)\n"
-        "  planner_reviewer: resolved-planner (planner-effort)\n"
-        "  plan_reviewer: resolved-reviewer (reviewer-effort)\n"
+        f"  planner: {selected} resolved-planner (planner-effort)\n"
+        f"  plan_reviewer: {selected} resolved-reviewer (reviewer-effort)\n"
+        f"  implementer: {selected} resolved-builder (builder-effort)\n"
+        f"  code_reviewer: {selected} resolved-code (code-effort)\n"
     )
+
+
+def test_make_runtime_builds_each_taken_runtime_and_composes_both_checks_in_order(tmp_path, monkeypatch, capsys):
+    """A roles object that splits the run's roles over two runtimes builds one backend
+    per runtime, prints each role with its runtime, and runs the Claude usage check
+    before the Codex one; a runtime no role takes is built and checked by no one."""
+    constructed = []
+    claude_backend, codex_backend = FakeAgentBackend(), FakeAgentBackend()
+    checks = []
+
+    def claude_factory(agents=None):
+        constructed.append(("claude", agents))
+        return claude_backend
+
+    def codex_factory(agents=None):
+        constructed.append(("codex", agents))
+        return codex_backend
+
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", claude_factory)
+    monkeypatch.setattr(main_module, "CodexAgentBackend", codex_factory)
+    monkeypatch.setattr(main_module, "_check_usage_limits", lambda c: checks.append("claude"))
+    monkeypatch.setattr(main_module, "_check_codex_usage_limits", lambda c, p: checks.append(("codex", p)))
+    config = dataclasses.replace(
+        _flow_config(),
+        roles={"implementer": {"runtime": "codex"}, "code_reviewer": {"runtime": "codex"}},
+    )
+
+    backend, usage_check = main_module._make_runtime(config, tmp_path)
+
+    assert constructed == [("claude", {}), ("codex", {})]
+    usage_check()
+    assert checks == ["claude", ("codex", tmp_path)]
+    assert capsys.readouterr().out == (
+        "Agent runtime: claude\n"
+        "  planner: claude fake-planner (fake-effort)\n"
+        "  plan_reviewer: claude fake-plan_reviewer (fake-effort)\n"
+        "  implementer: codex fake-implementer (fake-effort)\n"
+        "  code_reviewer: codex fake-code_reviewer (fake-effort)\n"
+    )
+    backend.run(role=AgentRole.PLANNER, prompt="p", cwd="c", instructions="i")
+    backend.run(role=AgentRole.IMPLEMENTER, prompt="p", cwd="c", instructions="i")
+    assert [call.role for call in claude_backend.calls] == [AgentRole.PLANNER]
+    assert [call.role for call in codex_backend.calls] == [AgentRole.IMPLEMENTER]
+
+
+def test_a_roles_runtime_missing_executable_fails_at_assembly(tmp_path, monkeypatch, capsys):
+    """A project whose roles take two runtimes needs both executables: a missing one
+    fails inside _make_runtime, before any task runs."""
+    monkeypatch.setattr(claude_module, "_CLAUDE_BIN", None)
+    monkeypatch.setattr(claude_module, "_resolve_claude", lambda: "/offline/claude")
+
+    def missing():
+        raise FileNotFoundError("codex CLI not found")
+
+    monkeypatch.setattr(codex_module, "_resolve_codex", missing)
+    config = dataclasses.replace(_flow_config(), roles={"implementer": {"runtime": "codex"}})
+
+    with pytest.raises(FileNotFoundError):
+        main_module._make_runtime(config, tmp_path)
+    assert capsys.readouterr().out == "Agent runtime: claude\n"
+
+
+def test_make_runtime_builds_one_hermes_backend_per_named_instance_and_prints_his_roles(
+    tmp_path, monkeypatch, capsys,
+):
+    """A role on Hermes gets one backend per named instance, the line `  <role>: hermes
+    <instance>`, no usage check of his own, and dispatch to his backend."""
+    constructed = []
+    local = FakeAgentBackend()
+    checks = []
+
+    def claude_factory(agents=None):
+        constructed.append(("claude", agents))
+        return local
+
+    def hermes_factory(server, port, key_file):
+        constructed.append(("hermes", server, port, key_file))
+        return FakeAgentBackend(sid=f"{server}:{port}")
+
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", claude_factory)
+    monkeypatch.setattr(main_module, "HermesAgentBackend", hermes_factory)
+    monkeypatch.setattr(main_module, "CodexAgentBackend", _unexpected_runtime)
+    monkeypatch.setattr(main_module, "_check_usage_limits", lambda c: checks.append("claude"))
+    monkeypatch.setattr(main_module, "_check_codex_usage_limits", _unexpected_runtime)
+    instances = {
+        "main": {"server": "127.0.0.1", "port": 8801, "key_file": "/stand/keys/main"},
+        "second": {"server": "127.0.0.1", "port": 8802, "key_file": "/stand/keys/second"},
+    }
+    config = dataclasses.replace(
+        _flow_config(),
+        hermes_instances=instances,
+        roles={
+            "planner": {"runtime": "hermes", "instance": "main"},
+            "code_reviewer": {"runtime": "hermes", "instance": "second"},
+        },
+    )
+
+    backend, usage_check = main_module._make_runtime(config, tmp_path)
+
+    assert constructed == [  # one backend per distinct key, in the roles' order
+        ("hermes", "127.0.0.1", 8801, "/stand/keys/main"),
+        ("claude", {}),
+        ("hermes", "127.0.0.1", 8802, "/stand/keys/second"),
+    ]
+    usage_check()
+    assert checks == ["claude"]
+    assert capsys.readouterr().out == (
+        "Agent runtime: claude\n"
+        "  planner: hermes main\n"
+        "  plan_reviewer: claude fake-plan_reviewer (fake-effort)\n"
+        "  implementer: claude fake-implementer (fake-effort)\n"
+        "  code_reviewer: hermes second\n"
+    )
+    assert backend.role_settings == {
+        role: local.role_settings[role]
+        for role in (AgentRole.PLAN_REVIEWER, AgentRole.IMPLEMENTER)
+    }
+    text, session = backend.run(role=AgentRole.PLANNER, prompt="p", cwd="c", instructions="i")
+    assert session == "127.0.0.1:8801"
+
+
+def test_the_implementer_s_result_follows_its_runtime_and_the_mode_s_routing(tmp_path):
+    """A local implementer works in the run's tree; an implementer on Hermes lays his
+    branch, with the run's own artifact paths for the roadmap in play preserved."""
+    assert isinstance(
+        main_module._implementer_result(_flow_config(), tmp_path, IMPLEMENT_MODE),
+        WorkingTreeResult,
+    )
+
+    config = dataclasses.replace(
+        _flow_config(),
+        hermes_instances={"main": {"server": "s", "port": 1, "key_file": "/k"}},
+        roles={"implementer": {"runtime": "hermes", "instance": "main"}},
+    )
+    mode = IMPLEMENT_MODE._replace(artifact_subdir="john-doe")
+    project = _tracked_factory_project(tmp_path)
+
+    result = main_module._implementer_result(config, project, mode)
+
+    assert isinstance(result, HermesResult)
+    assert result.project_dir == project
+    assert result.preserved == tuple(
+        project / ".ai-factory" / name / "john-doe"
+        for name in ("plans", "plan-reviews", "reviews", "test-runs")
+    )
+
+
+def _hermes_implementer_config():
+    return dataclasses.replace(
+        _flow_config(),
+        hermes_instances={"main": {"server": "s", "port": 1, "key_file": "/k"}},
+        roles={"implementer": {"runtime": "hermes", "instance": "main"}},
+    )
+
+
+def _tracked_factory_project(tmp_path):
+    """A git repository whose .ai-factory is tracked, with the run's own files."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".ai-factory" / "plans").mkdir(parents=True)
+    (project / ".ai-factory" / "plans" / "01-slug.md").write_text("# Plan\n")
+    git_in(project, "init", "-q", "-b", "main", ".")
+    git_in(project, "add", ".ai-factory/")
+    git_in(project, "commit", "-q", "-m", "the factory")
+    return project
+
+
+def test_a_tracked_factory_passes_hermes_as_the_implementer(tmp_path):
+    """His clone is git's own view of the project, so a .ai-factory the repository
+    tracks reaches him and he can be the implementer."""
+    project = _tracked_factory_project(tmp_path)
+
+    result = main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE)
+
+    assert isinstance(result, HermesResult)
+    assert result.project_dir == project
+
+
+@pytest.mark.parametrize("kind", ["symlink", "gitignored", "nested", "no repository"])
+def test_an_untracked_factory_refuses_hermes_as_the_implementer(tmp_path, kind):
+    """His clone holds only what the repository tracks: a .ai-factory that is a
+    symlink out, gitignored, a repository of its own or beside any repository
+    never reaches him, so naming him for the implementer is a startup error
+    naming the role and the reason."""
+    project = tmp_path / "project"
+    project.mkdir()
+    factory = project / ".ai-factory"
+    if kind == "symlink":
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "plans").mkdir()
+        factory.symlink_to(elsewhere, target_is_directory=True)
+        git_in(project, "init", "-q", "-b", "main", ".")
+        git_in(project, "add", ".ai-factory")  # a tracked symlink
+        git_in(project, "commit", "-q", "-m", "the factory")
+    elif kind == "gitignored":
+        (factory / "plans").mkdir(parents=True)
+        (project / ".gitignore").write_text(".ai-factory/\n")
+        git_in(project, "init", "-q", "-b", "main", ".")
+        git_in(project, "add", ".gitignore")
+        git_in(project, "commit", "-q", "-m", "the ignore")
+    elif kind == "nested":
+        (factory / "plans").mkdir(parents=True)
+        git_in(project, "init", "-q", "-b", "main", ".")
+        git_in(factory, "init", "-q", "-b", "main", ".")
+    else:  # no repository at all
+        (factory / "plans").mkdir(parents=True)
+
+    with pytest.raises(SystemExit) as exc:
+        main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE)
+
+    message = str(exc.value)
+    assert message == (
+        "Invalid 'roles' role 'implementer': .ai-factory is not tracked in the project's "
+        "repository, so his branch holds none of it"
+    )
+
+
+def test_a_factory_staged_and_never_committed_is_refused(tmp_path):
+    """His clone is built from commits, so a .ai-factory the index holds but no
+    commit does never reaches him, whatever the staged state says."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "readme.md").write_text("readme\n")
+    git_in(project, "init", "-q", "-b", "main", ".")
+    git_in(project, "add", "readme.md")
+    git_in(project, "commit", "-q", "-m", "the project")
+    (project / ".ai-factory" / "plans").mkdir(parents=True)
+    (project / ".ai-factory" / "plans" / "01-slug.md").write_text("# Plan\n")
+    git_in(project, "add", ".ai-factory/")
+
+    with pytest.raises(SystemExit) as exc:
+        main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE)
+
+    assert str(exc.value) == (
+        "Invalid 'roles' role 'implementer': .ai-factory is not tracked in the project's "
+        "repository, so his branch holds none of it"
+    )
+
+
+def test_a_factory_committed_in_a_project_s_subdirectory_passes(tmp_path):
+    """A project at a subdirectory of its repository is asked from its own
+    directory, and the commit it is at holds its .ai-factory."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project = repo / "sub"
+    (project / ".ai-factory" / "plans").mkdir(parents=True)
+    (project / ".ai-factory" / "plans" / "01-slug.md").write_text("# Plan\n")
+    git_in(repo, "init", "-q", "-b", "main", ".")
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-q", "-m", "the project")
+
+    result = main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE)
+
+    assert isinstance(result, HermesResult)
+    assert result.project_dir == project
+
+
+@pytest.mark.parametrize("loop_name", ["_implement_loop", "_test_loop"])
+def test_a_loop_with_hermes_as_the_implementer_of_an_untracked_factory_exits_before_any_call(
+    tmp_path, monkeypatch, loop_name,
+):
+    """Both loops choose the implementer's result before a task is processed, so an
+    untracked .ai-factory stops the run at startup with no backend call behind it."""
+    _write_loop_roadmaps(tmp_path)
+    backend = FakeAgentBackend()
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", lambda agents=None: backend)
+    monkeypatch.setattr(main_module, "CodexAgentBackend", _unexpected_runtime)
+    loops = []
+    monkeypatch.setattr(main_module, "_run_dynamic_loop", lambda *a, **k: loops.append(a))
+
+    with pytest.raises(SystemExit) as exc:
+        getattr(main_module, loop_name)(tmp_path, _hermes_implementer_config())
+
+    assert "is not tracked in the project's repository" in str(exc.value)
+    assert "'implementer'" in str(exc.value)
+    assert loops == []
+    assert backend.calls == []
 
 
 @pytest.mark.parametrize("loop_name", ["_implement_loop", "_test_loop"])
@@ -1885,7 +2202,7 @@ def test_mode_assembly_binds_merged_config(tmp_path, monkeypatch, loop_name, sel
         "runtime": selected, "usage_threshold_5h": 61, "usage_threshold_weekly": 72,
     }))
     monkeypatch.setenv("ORCHESTRATOR_CONFIG", str(base_path))
-    config = load_config(tmp_path, task_reviewers=main_module.TASK_REVIEWERS)
+    config = load_config(tmp_path)
     config.roadmap_path = None
     calls = []
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", (lambda agents=None: FakeAgentBackend()) if selected == "claude" else _unexpected_runtime)
@@ -1938,8 +2255,11 @@ def test_real_loop_dispatches_selected_policy_before_each_task(tmp_path, monkeyp
     monkeypatch.setattr(usage_module, "_read_rate_limits", acquire if selected == "codex" else _unexpected_runtime)
     monkeypatch.setattr(usage_module, "_run_usage_probe", acquire if selected == "claude" else _unexpected_runtime)
 
-    def process(project_dir, task, index, effective_config, mode, *, phase_session_id, backend):
-        assert backend is sentinel
+    def process(project_dir, task, index, effective_config, mode, *, phase_session_id, backend, implementer_result):
+        assert isinstance(backend, RoleRoutedBackend)
+        assert backend.runtime_of(AgentRole.IMPLEMENTER) == selected
+        assert backend.role_settings == sentinel.role_settings
+        assert isinstance(implementer_result, WorkingTreeResult)
         assert effective_config is config
         events.append("process")
         mark_done(project_dir / ".ai-factory" / mode.roadmap_relpath, task)
@@ -1991,7 +2311,7 @@ def test_process_task_exhausted_resume_halts_without_effects(tmp_path, monkeypat
     backend = FakeAgentBackend()
 
     with pytest.raises(HaltError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend)
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
 
     assert backend.calls == []
     assert sidecar.read_bytes() == before_bytes
@@ -2007,7 +2327,7 @@ def test_process_task_inferred_over_budget_halts_without_creating_sidecar(tmp_pa
     backend = FakeAgentBackend()
 
     with pytest.raises(HaltError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend)
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
 
     assert backend.calls == []
     assert not plan_path.with_suffix(".json").exists()
@@ -2023,7 +2343,7 @@ def _passing_backend(plan_review_passes: bool = True, code_review_passes: bool =
             return None
         if call.role is AgentRole.PLAN_REVIEWER:
             return "Fine\n\nPLAN_REVIEW_PASS" if plan_review_passes else "Findings, no pass"
-        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+        if call.role is AgentRole.CODE_REVIEWER:
             return "All good\n\nREVIEW_PASS" if code_review_passes else "Findings, no pass"
         return "# Plan\n\n## Test Command\n`false`\n"
 
@@ -2037,7 +2357,7 @@ def test_process_task_planned_at_bound_runs_plan_review_at_that_attempt(tmp_path
     plan_path.with_suffix(".json").write_text(json.dumps({"step": "planned:3"}))
     backend = _passing_backend()
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend)
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
 
     first = backend.calls[0]
     assert first.role is AgentRole.PLAN_REVIEWER
@@ -2052,10 +2372,10 @@ def test_process_task_plan_review_failed_in_budget_revises_then_reviews_next_att
     _failing_plan_reviews(prd, (1, 2))
     backend = _passing_backend()
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend)
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
 
     revision, review = backend.calls[0], backend.calls[1]
-    assert revision.role is AgentRole.PLANNER_REVIEWER
+    assert revision.role is AgentRole.PLANNER
     assert "## Plan review" in revision.prompt
     assert review.role is AgentRole.PLAN_REVIEWER
     assert (prd / f"{DMS_SEQ}-{DMS_SLUG}-plan-review-3.md").read_text() == "Fine\n\nPLAN_REVIEW_PASS"
@@ -2066,12 +2386,12 @@ def test_process_task_live_plan_review_exhaustion_is_a_work_failure(tmp_path, mo
     backend = _passing_backend(plan_review_passes=False)
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend)
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
 
     assert [c.role for c in backend.calls] == [
-        AgentRole.PLANNER_REVIEWER, AgentRole.PLAN_REVIEWER,
-        AgentRole.PLANNER_REVIEWER, AgentRole.PLAN_REVIEWER,
-        AgentRole.PLANNER_REVIEWER, AgentRole.PLAN_REVIEWER,
+        AgentRole.PLANNER, AgentRole.PLAN_REVIEWER,
+        AgentRole.PLANNER, AgentRole.PLAN_REVIEWER,
+        AgentRole.PLANNER, AgentRole.PLAN_REVIEWER,
     ]
 
 
@@ -2084,7 +2404,7 @@ def test_process_task_live_code_review_exhaustion_is_a_work_failure(tmp_path, mo
     backend = _passing_backend(code_review_passes=False)
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend)
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
 
     assert _read_sessions(plan_path)["step"] == "review_failed:3"
     implementer_calls = [c for c in backend.calls if c.role is AgentRole.IMPLEMENTER]
@@ -2096,10 +2416,11 @@ def test_process_task_live_code_review_exhaustion_is_a_work_failure(tmp_path, mo
 
 def test_process_task_live_test_run_exhaustion_is_a_work_failure(tmp_path, monkeypatch):
     _neutralize_side_effects(monkeypatch)
+    _flow_repo(tmp_path)
     backend = _passing_backend()
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), TEST_MODE, backend=backend)
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), TEST_MODE, backend=backend, implementer_result=WorkingTreeResult())
 
     plan_path = _artifact_dir(tmp_path, TEST_MODE, "plans") / f"{DMS_SEQ}-{DMS_SLUG}.md"
     assert _read_sessions(plan_path)["step"] == "test_run_failed:3"
@@ -2118,10 +2439,10 @@ def test_process_task_budget_zero_goes_from_planner_to_implementer_without_plan_
     config = _flow_config()
     config.plan_review_iterations = 0
 
-    process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+    process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
 
     assert [c.role for c in backend.calls] == [
-        AgentRole.PLANNER_REVIEWER, AgentRole.IMPLEMENTER, AgentRole.PLANNER_REVIEWER,
+        AgentRole.PLANNER, AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER,
     ]
     assert list(prd.glob(f"{DMS_SEQ}-{DMS_SLUG}-plan-review-*.md")) == []
     assert _read_sessions(plan_path)["step"] == "done"
@@ -2137,7 +2458,7 @@ def test_process_task_planned_1_at_budget_zero_resumes_into_implementer_without_
     config = _flow_config()
     config.plan_review_iterations = 0
 
-    process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+    process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
 
     assert backend.calls[0].role is AgentRole.IMPLEMENTER
     assert AgentRole.PLAN_REVIEWER not in [c.role for c in backend.calls]
@@ -2154,7 +2475,7 @@ def test_process_task_budget_above_max_iterations_runs_that_many_reviews_before_
     config.plan_review_iterations = 5
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
 
     reviews = [c for c in backend.calls if c.role is AgentRole.PLAN_REVIEWER]
     assert len(reviews) == 5
@@ -2181,7 +2502,7 @@ def test_detect_halt_names_the_setting_that_gives_the_bound(tmp_path, raw, setti
     with pytest.raises(HaltError) as exc:
         _detect_step(
             DMS_SEQ, DMS_SLUG, plan_path, prd, rv,
-            REVIEW_VERIFY, max_iterations=3, runtime="claude",
+            REVIEW_VERIFY, max_iterations=3, runtimes=role_runtimes("claude"),
             plan_review_iterations=setting,
         )
 
@@ -2204,10 +2525,10 @@ def test_process_task_resume_plan_review_failed_above_max_iterations_revises_wit
     config.max_iterations = 3
     config.plan_review_iterations = 6
 
-    process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+    process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
 
     revision, review = backend.calls[0], backend.calls[1]
-    assert revision.role is AgentRole.PLANNER_REVIEWER
+    assert revision.role is AgentRole.PLANNER
     assert "## Plan review" in revision.prompt
     assert review.role is AgentRole.PLAN_REVIEWER
     assert (prd / f"{DMS_SEQ}-{DMS_SLUG}-plan-review-5.md").read_text() == "Fine\n\nPLAN_REVIEW_PASS"
@@ -2227,7 +2548,7 @@ def test_process_task_resume_plan_review_failed_past_budget_halts_naming_the_bud
     config.plan_review_iterations = 2
 
     with pytest.raises(HaltError) as exc:
-        process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
 
     assert str(exc.value) == (
         "Resume exceeds the attempt budget\n"
@@ -2243,12 +2564,13 @@ def test_process_task_failing_reviews_keep_the_implement_cycle_at_max_iterations
 ):
     """A non-zero plan-review budget never cuts the implement and verify cycle."""
     _neutralize_side_effects(monkeypatch)
+    _flow_repo(tmp_path)
     backend = _passing_backend(code_review_passes=False)
     config = _flow_config()
     config.plan_review_iterations = plan_review_iterations
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, config, backend=backend)
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
 
     assert [c.role for c in backend.calls].count(AgentRole.IMPLEMENTER) == config.max_iterations
 
@@ -2316,7 +2638,7 @@ def test_detect_tagged_pending_is_authoritative(tmp_path, pending, has_plan):
         plan.write_text("# Plausible plan")
     plan.with_suffix(".json").write_text(json.dumps({"runtime": "codex", "step": pending}))
     (prd / f"{DMS_SEQ}-{DMS_SLUG}-plan-review-1.md").write_text("PLAN_REVIEW_PASS")
-    result = _detect_step("02", DMS_SLUG, plan, prd, rv, REVIEW_VERIFY, max_iterations=3, runtime="codex")
+    result = _detect_step("02", DMS_SLUG, plan, prd, rv, REVIEW_VERIFY, max_iterations=3, runtimes=role_runtimes("codex"))
     assert result == ("plan", int(pending.split(":")[1]), plan)
 
 
@@ -2356,7 +2678,7 @@ def test_detect_json_only_terminal_is_runtime_independent(tmp_path, runtime, ste
     prd, rv, plan = _dms_dirs(tmp_path)
     plan.with_suffix(".json").write_text(json.dumps({"runtime": "claude", "step": step}))
     fresh = plan.with_name(f"02-{DMS_SLUG}.md")
-    result = _detect_step("02", DMS_SLUG, fresh, prd, rv, REVIEW_VERIFY, max_iterations=3, runtime=runtime)
+    result = _detect_step("02", DMS_SLUG, fresh, prd, rv, REVIEW_VERIFY, max_iterations=3, runtimes=role_runtimes(runtime))
     assert result == (("plan", 1, fresh) if step == "done" else ("escalated", 0, plan))
 
 
@@ -2614,7 +2936,7 @@ def completion_env(tmp_path, monkeypatch):
         mark_done(project_dir / ".ai-factory" / mode.roadmap_relpath, task)
 
     monkeypatch.setattr(main_module, "_with_caffeinate", without_sleep_prevention)
-    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None, *, task_reviewers=None: env.config)
+    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None: env.config)
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", constructor)
     monkeypatch.setattr(main_module, "CodexAgentBackend", constructor)
     monkeypatch.setattr(main_module, "_check_usage_limits", lambda *a: events.append("quota"))
@@ -2747,7 +3069,7 @@ def test_cli_resets_exhaustion_before_startup_failure(completion_env, monkeypatc
     if failure == "config":
         error = SystemExit(9)
 
-        def fail_config(project_dir=None, *, task_reviewers=None):
+        def fail_config(project_dir=None):
             assert main_module.state.queue_exhausted is False
             raise error
 
@@ -3107,3 +3429,207 @@ def test_external_evidence_check_preserves_worktree_path_characters(tmp_path, su
         layout_module._external_evidence_path(project, project / "evidence.json")
     external = tmp_path / "external.json"
     assert layout_module._external_evidence_path(project, external) == external.resolve()
+
+
+# ---------------------------------------------------------------------------
+# A head as a runtime a role takes
+
+_HEAD_ROLES = {
+    "planner": {"runtime": "head", "head": {"repository": "/repos/the-project", "owner": "max", "folder": "r-d"}},
+    "plan_reviewer": {"runtime": "claude"},
+    "implementer": {"runtime": "claude"},
+    "code_reviewer": {"runtime": "claude"},
+}
+
+
+def _executable_answer_command(monkeypatch, tmp_path):
+    """Stand the answer command in for an executable file of the test's own."""
+    command = tmp_path / "bin" / "orchestrator-answer"
+    command.parent.mkdir()
+    command.write_text("#!/bin/sh\n", encoding="utf-8")
+    command.chmod(0o755)
+    monkeypatch.setattr(main_module, "answer_command", lambda: command)
+    return command
+
+
+def test_the_answer_command_must_exist_before_any_head_is_asked(tmp_path, monkeypatch):
+    command = tmp_path / "bin" / "orchestrator-answer"
+    command.parent.mkdir()
+    monkeypatch.setattr(main_module, "answer_command", lambda: command)
+
+    def _unexpected(*args, **kwargs):
+        pytest.fail("no backend is built when the answer command does not exist")
+
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", _unexpected)
+    config = dataclasses.replace(_flow_config(), roles=dict(_HEAD_ROLES))
+
+    with pytest.raises(HeadNotReachedError) as caught:
+        main_module._make_runtime(config, tmp_path)
+
+    lines = str(caught.value).splitlines()
+    assert lines[0] == "A head could not be reached"
+    assert lines[1] == f"The answer command {command} does not exist or is not executable"
+
+
+def test_an_answer_command_that_is_not_executable_halts_the_same(tmp_path, monkeypatch):
+    command = tmp_path / "bin" / "orchestrator-answer"
+    command.parent.mkdir()
+    command.write_text("#!/bin/sh\n", encoding="utf-8")
+    command.chmod(0o644)  # a file that exists and is not executable
+    monkeypatch.setattr(main_module, "answer_command", lambda: command)
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend",
+                        lambda agents=None: pytest.fail("no backend is built"))
+    config = dataclasses.replace(_flow_config(), roles=dict(_HEAD_ROLES))
+
+    with pytest.raises(HeadNotReachedError) as caught:
+        main_module._make_runtime(config, tmp_path)
+
+    assert str(caught.value).splitlines()[1] == (
+        f"The answer command {command} does not exist or is not executable"
+    )
+
+
+def test_a_run_with_no_head_role_makes_no_such_check(tmp_path, monkeypatch):
+    command = tmp_path / "bin" / "orchestrator-answer"  # nothing is written here
+    monkeypatch.setattr(main_module, "answer_command", lambda: command)
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", lambda agents=None: FakeAgentBackend())
+    config = dataclasses.replace(_flow_config())
+
+    backend, usage_check = main_module._make_runtime(config, tmp_path)
+
+    assert backend.run(role=AgentRole.PLANNER, prompt="p", cwd="c", instructions="i")[0] != ""
+    assert not command.exists()
+
+
+def test_a_head_whose_address_cannot_be_read_halts_the_assembly_before_any_backend(tmp_path, monkeypatch):
+    _executable_answer_command(monkeypatch, tmp_path)
+
+    def _unexpected(*args, **kwargs):
+        pytest.fail("no backend is built before the head's address is read")
+
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", _unexpected)
+    monkeypatch.setattr(main_module, "CodexAgentBackend", _unexpected)
+    config = dataclasses.replace(_flow_config(), roles=dict(_HEAD_ROLES))
+
+    with pytest.raises(HeadNotReachedError) as caught:
+        main_module._make_runtime(config, tmp_path)
+
+    lines = str(caught.value).splitlines()
+    assert lines[0] == "A head could not be reached"
+    assert lines[1] == "/repos/the-project max r-d"
+    assert "missing" in lines[2]  # the locator's fault text
+
+
+def test_a_head_role_prints_its_line_and_takes_no_usage_check(tmp_path, monkeypatch, capsys):
+    _executable_answer_command(monkeypatch, tmp_path)
+    repository = tmp_path / "the-project"
+    (repository / ".ai-factory" / "architects" / "max" / "r-d").mkdir(parents=True)
+    (repository / ".ai-factory" / "architects" / "max" / "r-d" / "address.json").write_text(
+        json.dumps({"session-id": "tid", "runtime": "claude", "session-name": "the head"}),
+        encoding="utf-8",
+    )
+    roles = {role: ({"runtime": "head", "head": {
+        "repository": str(repository), "owner": "max", "folder": "r-d",
+    }} if role == "planner" else entry) for role, entry in _HEAD_ROLES.items()}
+    config = dataclasses.replace(_flow_config(), roles=roles)
+    checks = []
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", lambda agents=None: FakeAgentBackend())
+    monkeypatch.setattr(main_module, "_check_usage_limits", lambda c: checks.append("claude"))
+
+    backend, usage_check = main_module._make_runtime(config, tmp_path)
+
+    usage_check()
+    assert checks == ["claude"]  # a head's role starts no usage check of its own
+    assert AgentRole.PLANNER not in backend.role_settings  # a head role carries no settings
+    out = capsys.readouterr().out
+    assert f"  planner: head {repository} max r-d\n" in out
+
+
+def test_every_role_reaches_its_own_backend_through_one_routed_assembly(tmp_path, monkeypatch):
+    """A run whose roles take a Claude, a Codex, a Hermes instance and a head
+    builds one backend per distinct key, under `backend_key` alone, and each
+    role reaches its own backend — the head's through the real HeadAgentBackend
+    with a send stand-in that deposits the head's answer for the message."""
+    _executable_answer_command(monkeypatch, tmp_path)
+    repository = tmp_path / "the-project"
+    (repository / ".ai-factory" / "architects" / "max" / "r-d").mkdir(parents=True)
+    (repository / ".ai-factory" / "architects" / "max" / "r-d" / "address.json").write_text(
+        json.dumps({"session-id": "tid", "runtime": "claude", "session-name": "the head"}),
+        encoding="utf-8",
+    )
+    from orchestrator.ports import RoleSetting
+
+    built = {}
+
+    class _Marked:
+        def __init__(self, kind, name):
+            self.kind, self.name = kind, name
+
+        def run(self, **kwargs):
+            return (f"{self.kind}:{self.name}", self.name)
+
+        role_settings = {role: RoleSetting("model", "effort") for role in AgentRole}
+
+    def _builder(kind):
+        def _make(*args, **kwargs):
+            name = f"{kind}{len(built)}"
+            backend = _Marked(kind, name)
+            built[kind] = backend
+            return backend
+        return _make
+
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", _builder("claude"))
+    monkeypatch.setattr(main_module, "CodexAgentBackend", _builder("codex"))
+    monkeypatch.setattr(main_module, "HermesAgentBackend", _builder("hermes"))
+
+    from orchestrator.courier import SendResult
+    from orchestrator.exchange import deposit, exchange_paths
+    from orchestrator.head_backend import HeadAgentBackend
+    from orchestrator.locator import HeadIdentity
+    from tests.conftest import bounded_sleep
+
+    head_identity = HeadIdentity(repository=repository, owner="max", folder="r-d")
+    answer_paths = exchange_paths(repository, AgentRole.CODE_REVIEWER,
+                                  "reviews/john-doe/01-slug-review-1")
+
+    class _DepositingSend:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, identity, text):
+            self.calls.append(identity)
+            deposit(answer_paths.answer, "the head's answer")
+            return SendResult(sent=True, reason=None)
+
+    sender = _DepositingSend()
+    monkeypatch.setattr(
+        main_module, "HeadAgentBackend",
+        lambda identity: HeadAgentBackend(identity, send=sender, sleep=bounded_sleep()),
+    )
+    head_entry = {"runtime": "head", "head": {
+        "repository": str(repository), "owner": "max", "folder": "r-d"}}
+    hermes_entry = {"runtime": "hermes", "instance": "main"}
+    config = dataclasses.replace(
+        _flow_config(), roles={
+            "planner": {"runtime": "claude"},
+            "plan_reviewer": {"runtime": "codex"},
+            "implementer": hermes_entry,
+            "code_reviewer": head_entry,
+        },
+        hermes_instances={"main": {"server": "https://hermes.invalid", "port": 443,
+                                   "key_file": str(tmp_path / "k.pem")}},
+    )
+
+    backend, _usage_check = main_module._make_runtime(config, tmp_path)
+
+    assert sorted(built) == ["claude", "codex", "hermes"]  # the head's backend needs no constructor here
+    for role, kind in ((AgentRole.PLANNER, "claude"), (AgentRole.PLAN_REVIEWER, "codex"),
+                       (AgentRole.IMPLEMENTER, "hermes")):
+        text, _session = backend.run(role=role, prompt="p", cwd="c", instructions="i")
+        assert text.startswith(kind)
+
+    text, session = backend.run(role=AgentRole.CODE_REVIEWER, prompt="p", cwd=str(repository),
+                                instructions="i", exchange="reviews/john-doe/01-slug-review-1")
+    assert sender.calls == [head_identity]  # the call reached the head's backend, once
+    assert text == "the head's answer"
+    assert session == "max/r-d"

@@ -22,7 +22,7 @@ A task line must look like this:
 - [ ] **Name** — Description of what needs to be done
 ```
 
-The name is used as the plan's title and the git commit message. The planner reads the description when composing the plan — the more specific it is, the better the result. A vague description like "improve performance" produces a vague plan.
+The name is used as the plan's title and the git commit message. The planner reads the description when composing the plan — the more specific it is, the better the result. A vague description like "improve performance" produces a vague plan. With planning off the task's spec is the plan, found by the contract line's `Spec:` tag, so the tag is required and a task without it halts the run ([Planning is a stage a project can switch off](../pipeline.md#planning-is-a-stage-a-project-can-switch-off)).
 
 ## Phases
 
@@ -63,4 +63,4 @@ To continue, remove the marker from the file and run the orchestrator again.
 
 ## Git repository
 
-After each task, the orchestrator runs `git add -A`, commits, and `git push -u origin HEAD`; if the push fails (no remote, no network), a warning is logged and the run continues. The repository must be initialized and free of conflicts before the run starts. Run it on a clean tree: `git add -A` stages everything indiscriminately, so any uncommitted changes — including edits made by hand during the run — ride along into the next task's commit.
+After each task, the orchestrator runs `git add -A`, commits, and `git push -u origin HEAD`; if that push fails (no network), a warning is logged and the run continues. The repository must be initialized, hold at least one commit and be free of conflicts before the run starts: each iteration's commit takes the commit the task began on as its parent. It has an `origin` the run can push to and delete from: after each implementer turn the run pushes the iteration's ref there, a push that fails halts the run, and the ref is removed when the task ends ([Invoking a role](../features/agent-runtime.md#invoking-a-role)). Run it on a clean tree: `git add -A` stages everything indiscriminately, so any uncommitted changes — including edits made by hand during the run — ride along into the next task's commit.

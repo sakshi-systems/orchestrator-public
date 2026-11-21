@@ -28,6 +28,47 @@ class EmptyAnswerError(HaltError):
     writes the artifact from that answer."""
 
 
+class BaseNotOnRemoteError(HaltError):
+    """Raised when the commit a hosted role would read the project at is not
+    on the repository's remote, so the role's own clone cannot reach it."""
+
+
+class OriginNotFetchedError(HaltError):
+    """Raised when the repository's remote could not be fetched, so nothing can
+    be said of what its branches hold."""
+
+
+class LeftoverBranchNotRemovedError(HaltError):
+    """Raised when a branch an earlier attempt of the task may have pushed to
+    the remote could not be removed, since keeping it would let the task's
+    first call build on it silently."""
+
+
+class BranchNotFetchedError(HaltError):
+    """Raised when the implementer's branch could not be fetched from the
+    remote, so none of his work can be laid as the run's tree."""
+
+
+class BranchNotFromBaseError(HaltError):
+    """Raised when the implementer's branch does not descend from the commit
+    the run is at, so laying its tip could silently revert the base."""
+
+
+class IterationCommitNotMadeError(HaltError):
+    """Raised when the iteration's commit on the run's ref could not be made,
+    so no reviewing role can be handed the iteration's state."""
+
+
+class IterationRefNotPushedError(HaltError):
+    """Raised when the iteration's ref could not be pushed to origin, so a
+    reviewing role off the machine cannot read the iteration's state."""
+
+
+class HeadNotReachedError(HaltError):
+    """Raised when a head could not be reached — its address could not be read,
+    or the courier could not deliver the call's message to it."""
+
+
 class PipelineStopError(Exception):
     """Raised to request a graceful halt of the pipeline."""
 

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import uuid
 
+from . import courier
 from .layout import _external_evidence_path
 
 
@@ -50,14 +51,9 @@ def _wait(mode: str, target: str, thread_id: str, invocation_id: str, invocation
                 token = "SUCCESS"
 
     print(f"Completion token: {token}", file=sys.stderr, flush=True)
-    try:
-        subprocess.run(
-            ["codex", "queue", "--thread", thread_id, "--message", token],
-            timeout=30, check=True, stdin=subprocess.DEVNULL,
-            stdout=sys.stdout, stderr=subprocess.STDOUT,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"Queue delivery failed: {exc}", file=sys.stderr, flush=True)
+    result = courier.send_codex(thread_id, token)
+    if not result.sent:
+        print(f"Queue delivery failed: {result.reason}", file=sys.stderr, flush=True)
 
 
 def _launch(mode: str, target: str, thread_id: str, evidence_root: str | None) -> Path:

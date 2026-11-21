@@ -11,9 +11,10 @@ from typing import Callable, NamedTuple, Protocol
 class AgentRole(Enum):
     """The semantic role identity handed to the runtime, independent of instruction text."""
 
-    PLANNER_REVIEWER = "planner_reviewer"
+    PLANNER = "planner"
     PLAN_REVIEWER = "plan_reviewer"
     IMPLEMENTER = "implementer"
+    CODE_REVIEWER = "code_reviewer"
 
 
 class RoleSetting(NamedTuple):
@@ -56,17 +57,42 @@ class AgentBackendProtocol(Protocol):
         cwd: str,
         instructions: str,
         session_id: str | None = None,
+        exchange: str | None = None,
     ) -> tuple[str, str]: ...
+
+
+class IterationState(NamedTuple):
+    """The iteration's state as a commit on the run's ref: the base commit the
+    task began on, the iteration's commit and the ref's full name."""
+
+    base: str
+    commit: str
+    ref: str
 
 
 class VerifierProtocol(Protocol):
     """Given the plan and output path, write the verify artifact and report pass or fail by its completion signal."""
 
-    def begin_turn(self, plan_path: Path) -> None:
-        """Record whatever the verifier needs about the project before an implementer's turn."""
+    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None, iteration_state: IterationState) -> bool: ...
+
+
+class ImplementerResultProtocol(Protocol):
+    """The port by which an implementer's result reaches the run's tree."""
+
+    def prepare(self, plan_path: Path) -> None:
+        """Prepare a task's first implementer call, made when no implementer
+        session is recorded."""
         ...
 
-    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None) -> bool: ...
+    def channel_text(self, plan_path: Path, *, first: bool) -> str:
+        """The channel text appended to the implementer's assignment; empty
+        when the implementer works in the run's tree."""
+        ...
+
+    def lay(self, plan_path: Path) -> None:
+        """Lay the implementer's result as the run's working tree, called after
+        the answer is written and not escalated."""
+        ...
 
 
 class VerifyKind(NamedTuple):
@@ -75,9 +101,9 @@ class VerifyKind(NamedTuple):
     fail_tag: str
     output_dirname: str
     output_suffix: str  # artifact tail with an {n} placeholder, e.g. "-review-{n}.md"
-    pass_signal: str | None  # None: the run waits for no signal and never reads it
+    pass_signal: str
     running_header: str
-    pass_line: str  # template with a {path} placeholder; a line with no placeholder names no artifact
-    fail_line: str  # template with a {path} placeholder; a line with no placeholder names no artifact
+    pass_line: str  # template with a {path} placeholder
+    fail_line: str  # template with a {path} placeholder
     max_iterations_message: str  # template with {n}, {path}, {content} placeholders
     make_verifier: Callable[[VerifierProtocol, Path], VerifierProtocol]  # (reviewer, project_dir) -> verifier

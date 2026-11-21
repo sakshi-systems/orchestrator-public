@@ -36,9 +36,10 @@ _CALLER_IDENTITY_VARS = ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TOOL_CALL
 
 
 _ROLE_DEFAULTS: dict[AgentRole, RoleSetting] = {
-    AgentRole.PLANNER_REVIEWER: RoleSetting("gpt-6.1-sol", "high"),
+    AgentRole.PLANNER: RoleSetting("gpt-6.1-sol", "high"),
     AgentRole.PLAN_REVIEWER: RoleSetting("gpt-6.1-sol", "high"),
     AgentRole.IMPLEMENTER: RoleSetting("gpt-6.1-sol", "high"),
+    AgentRole.CODE_REVIEWER: RoleSetting("gpt-6.1-sol", "high"),
 }
 
 
@@ -537,6 +538,7 @@ class CodexAgentBackend:
         cwd: str,
         instructions: str,
         session_id: str | None = None,
+        exchange: str | None = None,
     ) -> tuple[str, str]:
         """Carry out the role's turn and return (final agent message, thread identity).
 

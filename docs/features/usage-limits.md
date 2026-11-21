@@ -2,16 +2,16 @@
 
 ## Selected pre-task check
 
-Implement and test runs use the pre-task usage policy selected with their agent runtime at [assembly](../../orchestrator/main.py). The shared loop invokes that policy after selecting a pending task and its sequence, before task processing begins. An empty or completed queue performs no quota probe. Task execution follows [Pipeline](../pipeline.md) and the existing [stop semantics](../concepts/fault-handling.md#the-known-faults).
+Implement and test runs use the pre-task usage policy of each local runtime, Claude and Codex, that any role of the run takes, selected at [assembly](../../orchestrator/main.py); a Hermes instance and a head taking a role carry no usage policy. The shared loop invokes that policy after selecting a pending task and its sequence, before task processing begins. An empty or completed queue performs no quota probe. Task execution follows [Pipeline](../pipeline.md) and the existing [stop semantics](../concepts/fault-handling.md#the-known-faults).
 
 ## Thresholds
 
-The selected runtime's available five-hour and weekly windows are checked independently. Reaching or exceeding a configured threshold halts the run before the task starts; see [outcomes.md](../concepts/outcomes.md). Comparisons use the observed percentage without rounding. Default values and overlay rules live in [configuration.md](../reference/configuration.md).
+Each such runtime's available five-hour and weekly windows are checked independently. Reaching or exceeding a configured threshold halts the run before the task starts; see [outcomes.md](../concepts/outcomes.md). Comparisons use the observed percentage without rounding. Default values and overlay rules live in [configuration.md](../reference/configuration.md).
 
 | Threshold | Config key | Scope |
 |---|---|---|
-| Five-hour | `usage_threshold_5h` | The selected runtime's reported five-hour window |
-| Weekly | `usage_threshold_weekly` | The selected runtime's reported weekly window |
+| Five-hour | `usage_threshold_5h` | A taken runtime's reported five-hour window |
+| Weekly | `usage_threshold_weekly` | A taken runtime's reported weekly window |
 
 Claude retains its `claude /usage` probe and session/weekly interpretation. Window availability is runtime- and account-dependent; Codex does not guarantee a five-hour window.
 

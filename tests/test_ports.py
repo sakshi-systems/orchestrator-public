@@ -10,9 +10,10 @@ from orchestrator.ports import AgentRole, RoleSetting, resolve_role_settings
 @pytest.fixture
 def defaults():
     return {
-        AgentRole.IMPLEMENTER: RoleSetting("implement-model", "implement-effort"),
+        AgentRole.PLANNER: RoleSetting("plan-model", "plan-effort"),
         AgentRole.PLAN_REVIEWER: RoleSetting("review-model", "review-effort"),
-        AgentRole.PLANNER_REVIEWER: RoleSetting("plan-model", "plan-effort"),
+        AgentRole.IMPLEMENTER: RoleSetting("implement-model", "implement-effort"),
+        AgentRole.CODE_REVIEWER: RoleSetting("code-model", "code-effort"),
     }
 
 
@@ -44,16 +45,18 @@ def test_resolve_role_settings_returns_enum_order_independent_of_inputs(defaults
     agents = {
         "plan_reviewer": {"model": "custom-review"},
         "implementer": {"effort": "custom-implement"},
-        "planner_reviewer": {"model": "custom-plan", "effort": "custom-plan-effort"},
+        "planner": {"model": "custom-plan", "effort": "custom-plan-effort"},
+        "code_reviewer": {"model": "custom-code"},
     }
 
     resolved = resolve_role_settings(agents, defaults)
 
     assert list(resolved) == list(AgentRole)
     assert resolved == {
-        AgentRole.PLANNER_REVIEWER: RoleSetting("custom-plan", "custom-plan-effort"),
+        AgentRole.PLANNER: RoleSetting("custom-plan", "custom-plan-effort"),
         AgentRole.PLAN_REVIEWER: RoleSetting("custom-review", "review-effort"),
         AgentRole.IMPLEMENTER: RoleSetting("implement-model", "custom-implement"),
+        AgentRole.CODE_REVIEWER: RoleSetting("custom-code", "code-effort"),
     }
 
 

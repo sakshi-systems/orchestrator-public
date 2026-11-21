@@ -349,15 +349,17 @@ def _run_claude(
 
 
 _ROLE_DEFAULTS: dict[AgentRole, RoleSetting] = {
-    AgentRole.PLANNER_REVIEWER: RoleSetting("opus", "high"),
+    AgentRole.PLANNER: RoleSetting("opus", "high"),
     AgentRole.PLAN_REVIEWER: RoleSetting("opus", "high"),
     AgentRole.IMPLEMENTER: RoleSetting("sonnet", "high"),
+    AgentRole.CODE_REVIEWER: RoleSetting("opus", "high"),
 }
 
 _ROLE_TOOLS: dict[AgentRole, tuple[str, ...]] = {
-    AgentRole.PLANNER_REVIEWER: ("Read", "Write", "Glob", "Grep", "Bash"),
+    AgentRole.PLANNER: ("Read", "Write", "Glob", "Grep", "Bash"),
     AgentRole.PLAN_REVIEWER: ("Read", "Write", "Glob", "Grep", "Bash"),
     AgentRole.IMPLEMENTER: ("Read", "Write", "Edit", "Bash", "Glob", "Grep"),
+    AgentRole.CODE_REVIEWER: ("Read", "Write", "Glob", "Grep", "Bash"),
 }
 
 
@@ -389,6 +391,7 @@ class ClaudeAgentBackend:
         cwd: str,
         instructions: str,
         session_id: str | None = None,
+        exchange: str | None = None,
     ) -> tuple[str, str]:
         settings = self.role_settings[role]
         return _run_claude(

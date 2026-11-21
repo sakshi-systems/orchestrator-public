@@ -1,5 +1,7 @@
-"""Running git for a review's workspace: one process group per call,
-ended on time or on cancel, laying files readable by everyone.
+"""Running git for a review's workspace and for the run's own adapters:
+one process group per call for the review, ended on time or on cancel,
+laying files readable by everyone; one bounded synchronous call for the
+run, judging no exit status itself.
 
 Sakshi runs git in a repository's checkout to fetch a pull request's
 head and to lay a review's tree.  Each call is a session of its own,
@@ -8,6 +10,11 @@ git began, git itself removing its lock files on the TERM; and the
 files and directories a call creates are readable by group and others
 whatever Sakshi's umask, because a review's tree is read by a role
 user, not by Sakshi.
+
+The run's adapters — the hosted role's reach and the implementer's
+branch — call git synchronously through ``run_git_sync``: bounded,
+with the terminal prompt off, with every pathspec literal, and with
+the exit status left to the caller to judge.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -23,6 +31,8 @@ _KILL_GRACE = 5.0
 _TIMEOUT_RETURNCODE = 124
 
 GIT_TERMINAL_PROMPT = "0"
+
+SYNC_GIT_TIMEOUT = 120
 
 # Git's own repository-local names, less the three configuration
 # channels, which stay because they may carry the stand's credential
@@ -165,3 +175,37 @@ async def run_git(arguments: Sequence[str], *, cwd: Path,
     if returncode != 0:
         raise GitError(returncode, text[:_DETAIL_LIMIT])
     return text
+
+
+def run_git_sync(arguments: Sequence[str], *, cwd: str | Path) -> subprocess.CompletedProcess:
+    """Run ``git <arguments>`` synchronously in ``cwd`` and return the
+    completed process, judging no exit status: each caller decides what
+    a non-zero exit means.
+
+    The call runs with the inherited environment, less the names in
+    ``REPOSITORY_LOCATION_VARIABLES`` — so git uses the repository it is
+    aimed at in ``cwd``, never one an ambient variable points at — plus
+    ``GIT_TERMINAL_PROMPT`` as the module holds it, so git never waits
+    for a credential no one will type, and ``GIT_LITERAL_PATHSPECS=1``,
+    so a path a caller names is a literal path and never a pattern;
+    with the standard input closed; with the standard output and the
+    standard error each captured as text; and with a timeout of
+    ``SYNC_GIT_TIMEOUT`` seconds, past which the call raises
+    ``subprocess.TimeoutExpired`` as it is.
+    """
+    environment = {
+        name: value for name, value in os.environ.items()
+        if name not in REPOSITORY_LOCATION_VARIABLES
+    }
+    environment["GIT_TERMINAL_PROMPT"] = GIT_TERMINAL_PROMPT
+    environment["GIT_LITERAL_PATHSPECS"] = "1"
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=str(cwd),
+        env=environment,
+        timeout=SYNC_GIT_TIMEOUT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )

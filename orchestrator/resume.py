@@ -141,12 +141,17 @@ def _validate_sidecar_step(
 def _detect_step(
     seq: str, slug: str,
     plan_path: Path, plan_reviews_dir: Path, output_dir: Path,
-    verify: VerifyKind, *, max_iterations: int, runtime: str, plan_review_iterations: int | None = None,
+    verify: VerifyKind, *, max_iterations: int, runtimes: dict[str, dict[str, str]], plan_review_iterations: int | None = None,
 ) -> tuple[str, int, Path]:
     """Detect where a previous run stopped and return (step, counter, plan_path) to resume from.
 
     Steps: "plan", "plan_review", "implement", <verify.step>, "escalated".
     Counter is the attempt/iteration number to use next.
+    `runtimes` is the effective runtime of each role, as a record keyed by role; the
+    record's `runtime` is compared against it whole — a legacy single-string owner (or
+    none) reads as that runtime, or Claude, for every role, and a role the record's
+    owner object leaves out takes its effective entry. Any role whose recorded entry
+    differs halts, naming the role.
     A recognized explicit step is checked against its attempt budget (both its own counter and the
     next attempt) before artifact validation can discard it, so a stale marker cannot erase an
     exhausted budget; an over-budget one halts. Counters inferred from artifacts are checked by the caller.
@@ -181,11 +186,20 @@ def _detect_step(
     if raw == "escalated":
         return ("escalated", 0, plan_path)
 
-    owner = sessions.get("runtime", "claude")
-    if owner != runtime:
+    owner = sessions.get("runtime")
+    if not isinstance(owner, dict):
+        # A legacy record holds one runtime string — or none — and reads as that
+        # runtime, or Claude, for every role.
+        legacy = owner if isinstance(owner, str) else "claude"
+        owner = {role: {"runtime": legacy} for role in runtimes}
+    mismatched = [role for role, entry in runtimes.items() if owner.get(role, entry) != entry]
+    if mismatched:
+        details = "\n".join(
+            f"Role: {role}; recorded: {owner[role]}; selected: {runtimes[role]}"
+            for role in mismatched
+        )
         raise HaltError(
-            f"Resume runtime does not match the record owner\n{plan_path.with_suffix('.json')}\n"
-            f"Recorded: {owner}; selected: {runtime}"
+            f"Resume runtime does not match the record owner\n{plan_path.with_suffix('.json')}\n{details}"
         )
     if "runtime" not in sessions and not plan_path.exists():
         raise HaltError(f"Resume record has no legacy plan\n{plan_path.with_suffix('.json')}")

@@ -1,18 +1,22 @@
-"""Roles — the planner/reviewer, plan reviewer and implementer invoked through the agent-runtime port, and the shell test runner."""
+"""Roles — the planner, code reviewer, plan reviewer and implementer invoked through the agent-runtime port, and the shell test runner."""
 
 from __future__ import annotations
 
-import os
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
-from .errors import EscalationError, PipelineStopError
-from .ports import AgentBackendProtocol, AgentRole, VerifierProtocol, VerifyKind
-from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_artifact, _read_sessions, _write_artifact, _write_session
+from .errors import EscalationError
+from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, IterationState, VerifierProtocol, VerifyKind
+from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_artifact, _write_artifact, _write_session
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+def _exchange_of(project_dir: Path, artifact: Path) -> str:
+    """The artifact's exchange: its path relative to .ai-factory, without its
+    suffix and written with `/`, such as `reviews/john-doe/01-slug-review-1`."""
+    return artifact.with_suffix("").relative_to(project_dir / ".ai-factory").as_posix()
 
 
 def _load_prompt(name: str) -> str:
@@ -27,11 +31,11 @@ def _compose_instructions(*parts: str) -> str:
     return _PROMPT_SEPARATOR.join((_load_prompt("execution"), *parts))
 
 
-def _review_verifier(planner_reviewer: VerifierProtocol, project_dir: Path) -> VerifierProtocol:
-    return planner_reviewer
+def _review_verifier(code_reviewer: VerifierProtocol, project_dir: Path) -> VerifierProtocol:
+    return code_reviewer
 
 
-def _test_run_verifier(planner_reviewer: VerifierProtocol, project_dir: Path) -> VerifierProtocol:
+def _test_run_verifier(code_reviewer: VerifierProtocol, project_dir: Path) -> VerifierProtocol:
     return TestRunner(project_dir)
 
 
@@ -62,117 +66,20 @@ TEST_RUN_VERIFY = VerifyKind(
 )
 
 
-class HeadVerifier:
-    """The head's stand-in verdict: the implementer's turn must leave the project changed outside .ai-factory/.
-
-    The check is a content identity of the work tree, taken when the turn begins and compared when
-    the turn ends; a turn that leaves it equal fails the implement step by raising, so the record
-    stands at the boundary before the implementer and a later run calls the implementer again.
-    """
-
-    def __init__(self, project_dir: Path) -> None:
-        self.project_dir = project_dir
-        self._recorded_tree: str | None = None
-        self._recorded_step: str | None = None
-
-    def begin_turn(self, plan_path: Path) -> None:
-        """Record the work tree's identity outside .ai-factory/ and the sidecar step as it stands."""
-        self._recorded_tree = self._tree_identity()
-        self._recorded_step = _read_sessions(plan_path).get("step")
-
-    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None) -> bool:
-        """Pass when the turn changed the tree; on no change restore the boundary and fail the implement step.
-
-        Reads nothing from prev_out_path or implementer_answer_path — the head's
-        check is the tree alone."""
-        if self._recorded_tree is None or self._tree_identity() != self._recorded_tree:
-            return True
-        if self._recorded_step is not None:
-            _write_session(plan_path, "step", self._recorded_step)
-        raise PipelineStopError(
-            "Implement failed\n\n"
-            "The implementer's turn left the project unchanged outside .ai-factory/\n\n"
-            f"Plan: {plan_path}"
-        )
-
-    def _tree_identity(self) -> str:
-        """Return a tree id over a temporary index holding the work tree outside .ai-factory/.
-
-        The index file lives in a temporary directory outside the work tree and is removed with it,
-        so it can never land in a commit, and the repository's real index is left as it was.
-        The temporary index starts as a copy of the real one outside .ai-factory/ — the real index
-        is only read, never written — so a file that git tracks and .gitignore matches is part of
-        the identity; an untracked file that .gitignore matches stays out, and .ai-factory/ is
-        invisible to the identity by design.
-        The add then stages the whole work tree onto that copy with no exclusion pathspec, and
-        .ai-factory is removed from the copy afterwards. An exclusion pathspec would make git
-        refuse the add when .ai-factory is ignored, as a symlink listed in .git/info/exclude is,
-        so the removal is what keeps .ai-factory out, whether it is ignored, a tracked or
-        untracked folder, or a symlink.
-        """
-        with tempfile.TemporaryDirectory(prefix="head-verify-index-") as tmp:
-            env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
-            listing = subprocess.run(
-                ["git", "ls-files", "-s", "-z", "--full-name", "--", ".", ":(exclude).ai-factory"],
-                cwd=str(self.project_dir), check=True,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["git", "update-index", "-z", "--index-info"],
-                cwd=str(self.project_dir), env=env, check=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                input=listing.stdout,
-            )
-            subprocess.run(
-                ["git", "add", "-A", "--", "."],
-                cwd=str(self.project_dir), env=env, check=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                ["git", "rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ".ai-factory"],
-                cwd=str(self.project_dir), env=env, check=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            tree = subprocess.run(
-                ["git", "write-tree"], cwd=str(self.project_dir), env=env, check=True,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            )
-            return tree.stdout.strip()
-
-
-def _head_verifier(planner_reviewer: VerifierProtocol, project_dir: Path) -> VerifierProtocol:
-    return HeadVerifier(project_dir)
-
-
-HEAD_VERIFY = VerifyKind(
-    step="head",
-    fail_tag="head_failed:",
-    output_dirname="reviews",
-    output_suffix="-review-{n}.md",
-    pass_signal=None,
-    running_header="CHECKING THE PROJECT",
-    pass_line="PROJECT CHANGED",
-    fail_line="The implementer changed nothing",
-    max_iterations_message="Implement failed\n\nThe implementer's turn left the project unchanged outside .ai-factory/",
-    make_verifier=_head_verifier,
-)
-
-
-class PlannerReviewer:
-    """Plans and reviews tasks. Same session — reviewer has planner's context."""
+class Planner:
+    """Plans tasks in a session of its own, never reviewing code."""
 
     def __init__(
         self,
         project_dir: Path,
         backend: AgentBackendProtocol,
         planner_prompt_name: str = "planner",
-    ):
+    ) -> None:
         self.project_dir = project_dir
         self.backend = backend
         self.planner_prompt = _load_prompt(planner_prompt_name)
-        self.reviewer_prompt = _load_prompt("reviewer")
         self.escalation_prompt = _load_prompt("escalation")
-        self.system_prompt = _compose_instructions(self.planner_prompt, self.reviewer_prompt, self.escalation_prompt)
+        self.system_prompt = _compose_instructions(self.planner_prompt, self.escalation_prompt)
         self.session_id: str | None = None
 
     def plan(self, task_title: str, task_description: str, plan_path: Path, plan_review_path: Path | None = None, roadmap_path: Path | None = None, line_number: int | None = None) -> None:
@@ -208,12 +115,15 @@ class PlannerReviewer:
             sections += ["## Plan review", "", _read_artifact(plan_review_path)]
             prompt += "\n" + "\n".join(sections)
 
+        revision = plan_review_path if plan_review_path is not None and plan_review_path.exists() else None
+        exchange = _exchange_of(self.project_dir, revision if revision is not None else plan_path)
         answer, self.session_id = self.backend.run(
-            role=AgentRole.PLANNER_REVIEWER,
+            role=AgentRole.PLANNER,
             prompt=prompt,
             cwd=str(self.project_dir),
             instructions=self.system_prompt,
             session_id=self.session_id,
+            exchange=exchange,
         )
         _write_session(plan_path, "planner", self.session_id)
         _write_artifact(plan_path, answer)
@@ -224,15 +134,26 @@ class PlannerReviewer:
             _write_session(plan_path, "step", "escalated")
             raise EscalationError(f"{plan_path}: {excerpt}")
 
-    def review(self, plan_path: Path, review_path: Path, prev_review_path: Path | None = None, implementer_answer_path: Path | None = None) -> bool:
-        """Review code changes. Uses same session as planner for deep context.
+
+class CodeReviewer:
+    """Reviews code changes in a session of its own, never the planner's."""
+
+    def __init__(self, project_dir: Path, backend: AgentBackendProtocol):
+        self.project_dir = project_dir
+        self.backend = backend
+        self.system_prompt = _compose_instructions(_load_prompt("reviewer"), _load_prompt("escalation"))
+        self.session_id: str | None = None
+
+    def review(self, plan_path: Path, review_path: Path, prev_review_path: Path | None = None, implementer_answer_path: Path | None = None, *, iteration_state: IterationState) -> bool:
+        """Review code changes in the reviewer's own session.
 
         The message carries the plan, the implementer's answer and, on a
-        re-review, the previous review, each under its heading; the reviewer sees
-        the changes itself in the tree it works in, and the message names no path
-        of the run's tree. The run writes the reviewer's answer to review_path;
-        an empty answer halts with EmptyAnswerError and leaves ``step`` at
-        ``implemented:<N>``, so a resumed run repeats the review.
+        re-review, the previous review, each under its heading, and names the
+        base and the iteration's commit on the run's ref, so the reviewer reads
+        the changes as the difference between them wherever it lives. The run
+        writes the reviewer's answer to review_path; an empty answer halts with
+        EmptyAnswerError and leaves ``step`` at ``implemented:<N>``, so a
+        resumed run repeats the review.
         """
         sections = [
             "## Plan",
@@ -246,7 +167,9 @@ class PlannerReviewer:
         body = "\n".join(sections)
 
         naming_lines = (
-            "Run `git diff HEAD` and `git status` to see ALL changes.\n"
+            f"Run `git diff {iteration_state.base} {iteration_state.commit}` to see ALL changes: "
+            f"the base is `{iteration_state.base}`, the iteration's commit is `{iteration_state.commit}` "
+            f"on the ref `{iteration_state.ref}`.\n"
             "The plan for context is under `## Plan`.\n"
         )
         if implementer_answer_path is not None:
@@ -280,13 +203,14 @@ class PlannerReviewer:
             )
 
         answer, self.session_id = self.backend.run(
-            role=AgentRole.PLANNER_REVIEWER,
+            role=AgentRole.CODE_REVIEWER,
             prompt=prompt,
             cwd=str(self.project_dir),
             instructions=self.system_prompt,
             session_id=self.session_id,
+            exchange=_exchange_of(self.project_dir, review_path),
         )
-        _write_session(plan_path, "planner", self.session_id)
+        _write_session(plan_path, "code-reviewer", self.session_id)
         _write_artifact(review_path, answer)
         # Look for the review kind's pass signal on its own line in the answer
         if _has_escalation(answer):
@@ -297,11 +221,8 @@ class PlannerReviewer:
 
         return _has_signal(answer, REVIEW_VERIFY.pass_signal)
 
-    def begin_turn(self, plan_path: Path) -> None:
-        """No-op: the reviewer's verdict needs no state from before the turn."""
-
-    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None) -> bool:
-        return self.review(plan_path, out_path, prev_review_path=prev_out_path, implementer_answer_path=implementer_answer_path)
+    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None, iteration_state: IterationState) -> bool:
+        return self.review(plan_path, out_path, prev_review_path=prev_out_path, implementer_answer_path=implementer_answer_path, iteration_state=iteration_state)
 
 
 class PlanReviewer:
@@ -344,6 +265,7 @@ class PlanReviewer:
             cwd=str(self.project_dir),
             instructions=self.system_prompt,
             session_id=None,
+            exchange=_exchange_of(self.project_dir, review_path),
         )
         _write_session(plan_path, f"plan-reviewer-{attempt}", sid)
         _write_artifact(review_path, answer)
@@ -356,11 +278,18 @@ class PlanReviewer:
 
 
 class Implementer:
-    """Implements the plan, then applies the review feedback for the current iteration. Same session."""
+    """Implements the plan, then applies the review feedback for the current iteration. Same session.
 
-    def __init__(self, project_dir: Path, backend: AgentBackendProtocol):
+    How the turn's work reaches the run's tree is the supplied result
+    implementation's: its preparation runs before the backend call of a task's
+    first call, its channel is appended to the assignment, and its lay runs after
+    the answer is written and not escalated.
+    """
+
+    def __init__(self, project_dir: Path, backend: AgentBackendProtocol, result: ImplementerResultProtocol):
         self.project_dir = project_dir
         self.backend = backend
+        self.result = result
         self.system_prompt = _compose_instructions(_load_prompt("implementer"), _load_prompt("escalation"))
         self.session_id: str | None = None
 
@@ -385,6 +314,9 @@ class Implementer:
             "`DEVIATION: <plan said / file showed / done>` line for each point "
             "where the file disagreed with the plan."
         )
+        first = self.session_id is None
+        if first:
+            self.result.prepare(plan_path)
         if self.session_id and feedback_path is not None:
             # Continuing with feedback — apply the fixes
             prompt = (
@@ -412,6 +344,10 @@ class Implementer:
                 f"{answer_grammar}"
             )
 
+        channel = self.result.channel_text(plan_path, first=first)
+        if channel:
+            prompt = f"{prompt}\n\n{channel}"
+
         answer, self.session_id = self.backend.run(
             role=AgentRole.IMPLEMENTER,
             prompt=prompt,
@@ -428,6 +364,8 @@ class Implementer:
             _write_session(plan_path, "step", "escalated")
             raise EscalationError(f"{answer_path}: {excerpt}")
 
+        self.result.lay(plan_path)
+
 
 class TestRunner:
     """Runs the test command from the plan file and captures output. No LLM."""
@@ -437,14 +375,11 @@ class TestRunner:
     def __init__(self, project_dir: Path) -> None:
         self.project_dir = project_dir
 
-    def begin_turn(self, plan_path: Path) -> None:
-        """No-op: the test run reads only the plan and the tree at its own moment."""
-
-    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None) -> bool:
+    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None, iteration_state: IterationState) -> bool:
         """Extract test command from plan, run it, write output. Returns True if exit code 0.
 
-        Reads nothing from prev_out_path or implementer_answer_path — the test
-        run reads only the plan and the tree."""
+        Reads nothing from prev_out_path, implementer_answer_path or the
+        iteration's state — the test run reads only the plan and the tree."""
         cmd = self._extract_test_command(plan_path)
         if not cmd:
             out_path.write_text("ERROR: No '## Test Command' section found in plan.\n", encoding="utf-8")

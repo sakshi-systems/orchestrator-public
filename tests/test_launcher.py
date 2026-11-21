@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 
+from orchestrator import courier as courier_module
 from orchestrator import launcher
 
 
@@ -72,27 +73,34 @@ def test_launch_and_worker_preserve_caller_context(monkeypatch, tmp_path, capsys
 
     def run(argv, **kwargs):
         check_context()
-        if argv[0] == sys.executable:
-            calls.append("child")
-            assert argv == [sys.executable, "-m", "orchestrator.main", mode, target,
-                            "--completion-file", str(invocation / "completion.json"),
-                            "--invocation-id", INVOCATION]
-            assert kwargs == dict(cwd=str(caller), check=False, stdin=subprocess.DEVNULL,
-                                  stdout=kwargs["stdout"], stderr=subprocess.STDOUT)
-            kwargs["stdout"].write(b"configured Claude child output\n")
-            (invocation / "completion.json").write_text(json.dumps({
-                "invocation_id": INVOCATION, "outcome": "SUCCESS",
-            }), encoding="utf-8")
-        else:
-            calls.append("send")
-            assert argv == ["codex", "queue", "--thread", THREAD, "--message", "SUCCESS"]
-            assert kwargs == dict(timeout=30, check=True, stdin=subprocess.DEVNULL,
-                                  stdout=sys.stdout, stderr=subprocess.STDOUT)
+        calls.append("child")
+        assert argv == [sys.executable, "-m", "orchestrator.main", mode, target,
+                        "--completion-file", str(invocation / "completion.json"),
+                        "--invocation-id", INVOCATION]
+        assert kwargs == dict(cwd=str(caller), check=False, stdin=subprocess.DEVNULL,
+                              stdout=kwargs["stdout"], stderr=subprocess.STDOUT)
+        kwargs["stdout"].write(b"configured Claude child output\n")
+        (invocation / "completion.json").write_text(json.dumps({
+            "invocation_id": INVOCATION, "outcome": "SUCCESS",
+        }), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0)
+
+    def courier_run(argv, **kwargs):
+        check_context()
+        calls.append("send")
+        assert argv == ["codex", "queue", "--thread", THREAD, "--message", "SUCCESS"]
+        assert kwargs == dict(timeout=30, check=True, stdin=subprocess.DEVNULL,
+                              stdout=sys.stdout, stderr=subprocess.STDOUT)
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(launcher, "subprocess", SimpleNamespace(
         Popen=popen, run=run, DEVNULL=subprocess.DEVNULL, STDOUT=subprocess.STDOUT,
         SubprocessError=subprocess.SubprocessError,
+    ))
+    monkeypatch.setattr(courier_module, "subprocess", SimpleNamespace(
+        run=courier_run, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE,
+        STDOUT=subprocess.STDOUT, SubprocessError=subprocess.SubprocessError,
+        TimeoutExpired=subprocess.TimeoutExpired,
     ))
     real_launch = launcher._launch
 
@@ -176,17 +184,18 @@ def test_actual_exit_and_exact_proof_decide_single_token(monkeypatch, tmp_path, 
 
     def run(argv, **kwargs):
         calls.append(argv)
-        if len(calls) == 1:
-            assert argv == [sys.executable, "-m", "orchestrator.main", "implement", target,
-                            "--completion-file", str(proof_path), "--invocation-id", INVOCATION]
-            assert kwargs == dict(cwd=os.getcwd(), check=False, stdin=subprocess.DEVNULL,
-                                  stdout=kwargs["stdout"], stderr=subprocess.STDOUT)
-            assert kwargs["stdout"].name == str(invocation / "run.log")
-            assert kwargs["stdout"].mode == "wb" and not kwargs["stdout"].closed
-            child_logs.append(kwargs["stdout"])
-            kwargs["stdout"].write(b"SUCCESS FAIL are only console text\n")
-            return subprocess.CompletedProcess(argv, exit_code)
-        assert len(calls) == 2
+        assert argv == [sys.executable, "-m", "orchestrator.main", "implement", target,
+                        "--completion-file", str(proof_path), "--invocation-id", INVOCATION]
+        assert kwargs == dict(cwd=os.getcwd(), check=False, stdin=subprocess.DEVNULL,
+                              stdout=kwargs["stdout"], stderr=subprocess.STDOUT)
+        assert kwargs["stdout"].name == str(invocation / "run.log")
+        assert kwargs["stdout"].mode == "wb" and not kwargs["stdout"].closed
+        child_logs.append(kwargs["stdout"])
+        kwargs["stdout"].write(b"SUCCESS FAIL are only console text\n")
+        return subprocess.CompletedProcess(argv, exit_code)
+
+    def courier_run(argv, **kwargs):
+        calls.append(argv)
         assert child_logs[0].closed
         assert (invocation / "run.log").read_bytes() == b"SUCCESS FAIL are only console text\n"
         assert argv == ["codex", "queue", "--thread", THREAD, "--message", expected]
@@ -198,6 +207,11 @@ def test_actual_exit_and_exact_proof_decide_single_token(monkeypatch, tmp_path, 
     monkeypatch.setattr(launcher, "subprocess", SimpleNamespace(
         run=run, DEVNULL=subprocess.DEVNULL, STDOUT=subprocess.STDOUT,
         SubprocessError=subprocess.SubprocessError,
+    ))
+    monkeypatch.setattr(courier_module, "subprocess", SimpleNamespace(
+        run=courier_run, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE,
+        STDOUT=subprocess.STDOUT, SubprocessError=subprocess.SubprocessError,
+        TimeoutExpired=subprocess.TimeoutExpired,
     ))
     launcher._wait("implement", target, THREAD, INVOCATION, invocation)
     assert len(calls) == 2

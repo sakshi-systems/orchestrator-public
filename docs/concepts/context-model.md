@@ -6,12 +6,12 @@ The pipeline passes the agent a minimum: the task's contract line and the path t
 
 - **The planner** — the task's title and description (the whole contract line) plus the line `Roadmap: <path> (line N)`; on a revision, the current plan and the plan review inline.
 - **The plan reviewer** — the plan inline; a fresh session on every attempt.
-- **The code reviewer** — the plan inline, the implementer's answer and the previous review; it sees all changes itself, with `git diff HEAD`, and runs in the planner's own session and inherits all of its exploration.
-- **The implementer** — the plan inline, plus, on its first message, the line `Roadmap: <path> (line N)` — optional context for what is already done, what comes next, and where a neighbouring task's scope begins, which it is not forced to read; on a fix iteration, the review inline; it holds one session through the whole fix cycle.
+- **The reviewer** — the plan inline, the implementer's answer and the previous review, and the changes, which reach it as [Invoking a role](../features/agent-runtime.md#invoking-a-role) states; it runs in a session of its own, never the planner's, fresh per task and continued across the task's fix iterations, so it knows the plan from its message and none of the planner's exploration.
+- **The implementer** — the plan inline, or under planning off the task's spec laid as the plan, plus, on its first message, the line `Roadmap: <path> (line N)` — optional context for what is already done, what comes next, and where a neighbouring task's scope begins, which it is not forced to read; on a fix iteration, the review inline; it holds one session through the whole fix cycle.
 
-Every message is self-contained: no runtime depends on reaching a path in the run's tree, and an agent that runs in it may still read what the message names ([Invoking a role](../features/agent-runtime.md#invoking-a-role)).
+Every message is self-contained: an agent that runs in the run's tree may read what it names, and an agent that does not, such as a Hermes instance or a head, needs no path ([Invoking a role](../features/agent-runtime.md#invoking-a-role)).
 
-Neighboring tasks, spec notes, and architecture documents are not injected into the prompt.
+Neighboring tasks and architecture documents are not injected into the prompt, and neither is a spec note, except under planning off, where the task's spec is the plan the implementer receives ([Planning is a stage a project can switch off](../pipeline.md#planning-is-a-stage-a-project-can-switch-off)).
 
 ## The edges context is raised along
 
@@ -21,7 +21,7 @@ Effective context is assembled by walking links:
 - **`ARCHITECTURE.md`, `RULES.md`** — mandatory reading per the planner prompts' Step 0.
 - **The `Spec:` tag in the contract line** — the path to the task's spec note; a note links to adjacent notes, and the agent follows those links. Spec notes live under `specs/` (the current name) or `notes/` (legacy) — the orchestrator does not care, the agent follows the literal path from the `Spec:` tag. The web of notes is the primary carrier of cross-task links.
 - **The roadmap at the passed path** — reading its own line, the agent sees neighboring tasks, the phase header, and its `Governing spec:`; the reviewer checks changes against the roadmap per instruction.
-- **The session within a task** — the code reviewer inherits the planning context, the implementer accumulates the context of its own fixes.
+- **The session within a task** — the reviewer accumulates the context of its own reviews and inherits none of the planner's; the implementer accumulates the context of its own fixes.
 
 ## A tree instead of a graph
 

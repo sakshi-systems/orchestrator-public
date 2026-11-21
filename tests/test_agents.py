@@ -11,10 +11,12 @@ from pathlib import Path
 import pytest
 
 from orchestrator import claude_cli, process_control, state
+from orchestrator.implementer_result import WorkingTreeResult
 from orchestrator.agents import (
+    CodeReviewer,
     Implementer,
     PlanReviewer,
-    PlannerReviewer,
+    Planner,
     TestRunner,
     _load_prompt,
 )
@@ -31,13 +33,20 @@ from orchestrator.protocol import (
     _write_session,
     _write_sessions,
 )
-from orchestrator.ports import AgentRole, RoleSetting
+from orchestrator.ports import AgentRole, IterationState, RoleSetting
 from tests.fakes import FakeAgentBackend
+
+_ITERATION = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
 
 
 # ---------------------------------------------------------------------------
 # Task 1: match within the last-5-line window
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _factory_dir(tmp_path):
+    (tmp_path / ".ai-factory").mkdir(exist_ok=True)
+
 
 
 def test_signal_on_last_line():
@@ -108,7 +117,7 @@ def test_empty_text_returns_false():
 
 def test_extract_test_command_backtick_wrapped(tmp_path):
     """Should return the command without backticks when the command line is wrapped in single backticks."""
-    p = tmp_path / "plan.md"
+    p = tmp_path / ".ai-factory" / "plan.md"
     p.write_text("## Test Command\n`uv run pytest tests/ -v`")
     assert TestRunner._extract_test_command(p) == "uv run pytest tests/ -v"
 
@@ -120,7 +129,7 @@ def test_extract_test_command_backtick_wrapped(tmp_path):
 
 def test_extract_test_command_bare(tmp_path):
     """Should return the command string as-is when the command line has no backticks."""
-    p = tmp_path / "plan.md"
+    p = tmp_path / ".ai-factory" / "plan.md"
     p.write_text("## Test Command\nuv run pytest tests/ -v")
     assert TestRunner._extract_test_command(p) == "uv run pytest tests/ -v"
 
@@ -132,7 +141,7 @@ def test_extract_test_command_bare(tmp_path):
 
 def test_extract_test_command_blank_lines(tmp_path):
     """Should return the first non-empty non-heading line when blank lines follow the heading."""
-    p = tmp_path / "plan.md"
+    p = tmp_path / ".ai-factory" / "plan.md"
     p.write_text("## Test Command\n\n\nuv run pytest -v")
     assert TestRunner._extract_test_command(p) == "uv run pytest -v"
 
@@ -144,7 +153,7 @@ def test_extract_test_command_blank_lines(tmp_path):
 
 def test_extract_test_command_no_heading(tmp_path):
     """Should return None when the plan has no Test Command heading."""
-    p = tmp_path / "plan.md"
+    p = tmp_path / ".ai-factory" / "plan.md"
     p.write_text("# Some Plan\n## Other Section\nrun this")
     assert TestRunner._extract_test_command(p) is None
 
@@ -156,7 +165,7 @@ def test_extract_test_command_no_heading(tmp_path):
 
 def test_extract_test_command_empty_section(tmp_path):
     """Should return None when the Test Command section is blank up to the next heading."""
-    p = tmp_path / "plan.md"
+    p = tmp_path / ".ai-factory" / "plan.md"
     p.write_text("## Test Command\n\n## Next Section\nuv run pytest")
     assert TestRunner._extract_test_command(p) is None
 
@@ -354,14 +363,14 @@ def test_run_usage_probe_launches_resolved_cli(monkeypatch):
 
 def test_read_sessions_missing_file_returns_empty_dict(tmp_path):
     """Should return {} when the sidecar file does not exist."""
-    plan_path = tmp_path / "01-foo-plan.md"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
     assert _read_sessions(plan_path) == {}
 
 
 def test_read_sessions_valid_json_roundtrips(tmp_path):
     """Should return the parsed dict when the sidecar contains valid JSON."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     sidecar.write_text(json.dumps({"planner": "sid-123", "step": "planned"}))
     assert _read_sessions(plan_path) == {"planner": "sid-123", "step": "planned"}
 
@@ -373,8 +382,8 @@ def _halt_lines(exc_info):
 def test_read_sessions_malformed_json_halts_and_keeps_evidence(tmp_path):
     """Should halt, not return {}, when the sidecar holds malformed JSON — and leave
     the sidecar bytes untouched so the evidence survives."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     original = b"{not valid json"
     sidecar.write_bytes(original)
     with pytest.raises(HaltError) as exc_info:
@@ -388,8 +397,8 @@ def test_read_sessions_malformed_json_halts_and_keeps_evidence(tmp_path):
 @pytest.mark.parametrize("content", ["[]", '"text"', "null", "42"])
 def test_read_sessions_non_object_json_halts(tmp_path, content):
     """Should halt when the sidecar parses as JSON that is not an object."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     sidecar.write_bytes(content.encode())
     with pytest.raises(HaltError) as exc_info:
         _read_sessions(plan_path)
@@ -399,8 +408,8 @@ def test_read_sessions_non_object_json_halts(tmp_path, content):
 
 def test_read_sessions_invalid_utf8_halts(tmp_path):
     """Should halt when the sidecar bytes are not valid UTF-8."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     sidecar.write_bytes(b'{"step": "\xff"}')
     with pytest.raises(HaltError) as exc_info:
         _read_sessions(plan_path)
@@ -409,7 +418,7 @@ def test_read_sessions_invalid_utf8_halts(tmp_path):
 
 def test_read_sessions_unreadable_sidecar_halts(tmp_path):
     """Should halt, not return {}, when the sidecar path exists but cannot be read."""
-    plan_path = tmp_path / "01-foo-plan.md"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
     plan_path.with_suffix(".json").mkdir()
     with pytest.raises(HaltError) as exc_info:
         _read_sessions(plan_path)
@@ -419,8 +428,8 @@ def test_read_sessions_unreadable_sidecar_halts(tmp_path):
 def test_read_sessions_read_failure_is_not_absence(tmp_path, monkeypatch):
     """Should halt when the read itself fails, even if exists() reports False —
     an injected read failure is not mistaken for an absent sidecar."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     sidecar.write_text(json.dumps({"step": "planned"}))
     real_exists = Path.exists
     real_read_bytes = Path.read_bytes
@@ -443,8 +452,8 @@ def test_read_sessions_read_failure_is_not_absence(tmp_path, monkeypatch):
 
 def test_read_sessions_preserves_unknown_nested_values(tmp_path):
     """Should return unknown keys and nested JSON values unchanged."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     record = {
         "step": "planned:1",
         "extra": {"nested": [1, {"a": None}], "n": 3.5, "flag": True},
@@ -474,17 +483,17 @@ def test_read_sessions_derives_sidecar_path_via_with_suffix(tmp_path):
 
 def test_write_session_creates_fresh_sidecar_with_only_new_key(tmp_path):
     """Should create a fresh sidecar containing only the new key when none exists yet."""
-    plan_path = tmp_path / "01-foo-plan.md"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
     _write_session(plan_path, "planner", "sid-abc")
-    sidecar = tmp_path / "01-foo-plan.json"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     assert sidecar.exists()
     assert json.loads(sidecar.read_text()) == {"planner": "sid-abc"}
 
 
 def test_write_session_merges_without_clobbering_other_keys(tmp_path):
     """Should merge the new key into an existing sidecar without clobbering other keys."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     sidecar.write_text(json.dumps({"planner": "sid-abc", "step": "planned"}))
     _write_session(plan_path, "implementer", "sid-xyz")
     assert json.loads(sidecar.read_text()) == {
@@ -496,8 +505,8 @@ def test_write_session_merges_without_clobbering_other_keys(tmp_path):
 
 def test_write_session_overwrites_existing_key(tmp_path):
     """Should overwrite the value of an existing key when writing the same key again."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     sidecar.write_text(json.dumps({"planner": "sid-old"}))
     _write_session(plan_path, "planner", "sid-new")
     assert json.loads(sidecar.read_text()) == {"planner": "sid-new"}
@@ -529,8 +538,8 @@ def test_write_session_corruption_preserves_original_evidence(tmp_path, replace_
     lose the session identities it held on the next write. The write halts
     instead of replacing the original with a one-key record.
     """
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     original = b"{not valid json"
     sidecar.write_bytes(original)
     with pytest.raises(HaltError):
@@ -542,8 +551,8 @@ def test_write_session_corruption_preserves_original_evidence(tmp_path, replace_
 
 def test_write_session_non_object_preserves_original(tmp_path, replace_spy):
     """Should halt and keep the original bytes when the sidecar is not a JSON object."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     original = b"[1, 2]"
     sidecar.write_bytes(original)
     with pytest.raises(HaltError):
@@ -555,8 +564,8 @@ def test_write_session_non_object_preserves_original(tmp_path, replace_spy):
 
 def test_write_session_read_failure_preserves_original(tmp_path, monkeypatch, replace_spy):
     """Should halt and keep the original bytes when the existing sidecar cannot be read."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     original = json.dumps({"planner": "sid-old"}).encode()
     sidecar.write_bytes(original)
     real_read_bytes = Path.read_bytes
@@ -578,8 +587,8 @@ def test_write_session_read_failure_preserves_original(tmp_path, monkeypatch, re
 @pytest.mark.parametrize("batch", [False, True])
 def test_write_session_replace_failure_halts_and_keeps_original(tmp_path, monkeypatch, batch):
     """Should halt, keep the original sidecar and leave no temp file when the replace fails."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     original = json.dumps({"planner": "sid-old"}).encode()
     sidecar.write_bytes(original)
 
@@ -598,7 +607,7 @@ def test_write_session_replace_failure_halts_and_keeps_original(tmp_path, monkey
 
 
 def test_batch_replacement_contains_complete_boundary_and_preserves_metadata(tmp_path, monkeypatch):
-    plan = tmp_path / "01-work.md"
+    plan = tmp_path / ".ai-factory" / "01-work.md"
     sidecar = plan.with_suffix(".json")
     record = {"planner": "old", "implementer": "impl", "plan-reviewer-1": "audit",
               "elapsed": "007", "optional": {"nested": [None, True, {"number": 2.5}]}}
@@ -623,8 +632,8 @@ def test_batch_replacement_contains_complete_boundary_and_preserves_metadata(tmp
 
 def test_write_session_retains_unknown_nested_values(tmp_path, replace_spy):
     """Should change only the requested key, retaining unknown keys and nested values."""
-    plan_path = tmp_path / "01-foo-plan.md"
-    sidecar = tmp_path / "01-foo-plan.json"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
+    sidecar = tmp_path / ".ai-factory" / "01-foo-plan.json"
     record = {
         "planner": "sid-old",
         "step": "planned:1",
@@ -639,7 +648,7 @@ def test_write_session_retains_unknown_nested_values(tmp_path, replace_spy):
 def test_write_session_leaves_no_tmp_file_behind(tmp_path):
     """Should write via a temp file and atomically replace it, leaving no .tmp file
     behind after a successful write."""
-    plan_path = tmp_path / "01-foo-plan.md"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
     _write_session(plan_path, "planner", "sid-abc")
     tmp_sidecar = plan_path.with_suffix(".json.tmp")
     sidecar = plan_path.with_suffix(".json")
@@ -650,7 +659,7 @@ def test_write_session_leaves_no_tmp_file_behind(tmp_path):
 def test_write_session_content_is_rereadable_via_read_sessions(tmp_path):
     """Should produce sidecar content that is re-readable via _read_sessions —
     the two functions agree on path derivation and format."""
-    plan_path = tmp_path / "01-foo-plan.md"
+    plan_path = tmp_path / ".ai-factory" / "01-foo-plan.md"
     _write_session(plan_path, "planner", "sid-abc")
     _write_session(plan_path, "implementer", "sid-xyz")
     assert _read_sessions(plan_path) == {"planner": "sid-abc", "implementer": "sid-xyz"}
@@ -987,9 +996,9 @@ ESCALATION_ARTIFACT = "Some notes\n\n## Escalation\nMissing decision: pick A or 
 def test_plan_escalation_raises_and_writes_sidecar(tmp_path):
     """plan() raises EscalationError and the sidecar ends with step=escalated plus the
     escalation summary naming the plan file when the planner's answer ends with ESCALATION."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     backend = FakeAgentBackend(on_call=lambda call: ESCALATION_ARTIFACT, sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = Planner(tmp_path, backend)
 
     with pytest.raises(EscalationError):
         pr.plan("Task title", "Task description", plan_path)
@@ -1004,14 +1013,14 @@ def test_review_escalation_raises_before_review_pass_check(tmp_path, monkeypatch
     """review() raises EscalationError and writes the sidecar when the reviewer's
     answer ends with ESCALATION, without falling through to the REVIEW_PASS check.
     The answer is recorded at the review path before the raise."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
-    review_path = tmp_path / "01-slug-review-1.md"
+    review_path = tmp_path / ".ai-factory" / "01-slug-review-1.md"
     backend = FakeAgentBackend(on_call=lambda call: ESCALATION_ARTIFACT, sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = CodeReviewer(tmp_path, backend)
 
     with pytest.raises(EscalationError):
-        pr.review(plan_path, review_path)
+        pr.review(plan_path, review_path, iteration_state=_ITERATION)
 
     assert review_path.read_text() == ESCALATION_ARTIFACT
     sessions = json.loads(plan_path.with_suffix(".json").read_text())
@@ -1023,9 +1032,9 @@ def test_review_plan_escalation_raises_and_writes_sidecar(tmp_path):
     """review_plan() raises EscalationError and writes the sidecar when the reviewer's
     answer ends with ESCALATION, without falling through to the PLAN_REVIEW_PASS check.
     The answer is recorded at the review path before the raise."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
-    review_path = tmp_path / "01-slug-plan-review-1.md"
+    review_path = tmp_path / ".ai-factory" / "01-slug-plan-review-1.md"
     backend = FakeAgentBackend(on_call=lambda call: ESCALATION_ARTIFACT, sid="sid-1")
     reviewer = PlanReviewer(tmp_path, backend)
 
@@ -1042,11 +1051,11 @@ def test_implement_escalation_raises_and_writes_sidecar(tmp_path):
     """implement() raises EscalationError and writes the sidecar when the implementer's
     answer ends with ESCALATION. The answer lands at the answer path and the sidecar's
     escalation records that file."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
-    answer_path = tmp_path / "01-slug-implementer-1.md"
+    answer_path = tmp_path / ".ai-factory" / "01-slug-implementer-1.md"
     backend = FakeAgentBackend(on_call=lambda call: ESCALATION_ARTIFACT, sid="sid-1")
-    impl = Implementer(tmp_path, backend)
+    impl = Implementer(tmp_path, backend, result=WorkingTreeResult())
 
     with pytest.raises(EscalationError):
         impl.implement(plan_path, answer_path)
@@ -1065,13 +1074,13 @@ def test_implement_escalation_raises_and_writes_sidecar(tmp_path):
 def test_review_regression_no_escalation_returns_bool(tmp_path, monkeypatch):
     """An answer ending with REVIEW_PASS and no ESCALATION line returns True, with
     no raise, and lands verbatim at the review path."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
-    review_path = tmp_path / "01-slug-review-1.md"
+    review_path = tmp_path / ".ai-factory" / "01-slug-review-1.md"
     backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = CodeReviewer(tmp_path, backend)
 
-    assert pr.review(plan_path, review_path) is True
+    assert pr.review(plan_path, review_path, iteration_state=_ITERATION) is True
 
     assert review_path.read_text() == "All good\n\nREVIEW_PASS"
     sessions = json.loads(plan_path.with_suffix(".json").read_text())
@@ -1083,9 +1092,9 @@ def test_review_plan_regression_no_escalation_returns_bool(tmp_path):
     """An answer ending with PLAN_REVIEW_PASS and no ESCALATION line returns True, with
     no raise, and lands verbatim at the review path. The sidecar holds only the
     reviewer's session id, with no 'step' and no 'escalation'."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
-    review_path = tmp_path / "01-slug-plan-review-1.md"
+    review_path = tmp_path / ".ai-factory" / "01-slug-plan-review-1.md"
     backend = FakeAgentBackend(on_call=lambda call: "All good\n\nPLAN_REVIEW_PASS", sid="sid-1")
     reviewer = PlanReviewer(tmp_path, backend)
 
@@ -1101,19 +1110,19 @@ def test_review_plan_regression_no_escalation_returns_bool(tmp_path):
 
 
 def test_review_blank_answer_raises_empty_answer_error(tmp_path, monkeypatch):
-    """PlannerReviewer.review raises EmptyAnswerError, not a False verdict, when the
-    reviewer's answer is blank. The planner write still happens, no review file is
+    """CodeReviewer.review raises EmptyAnswerError, not a False verdict, when the
+    reviewer's answer is blank. The code-reviewer write still happens, no review file is
     written, and `step` stays at its value before the turn, so a resumed run
     repeats the review."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
     plan_path.with_suffix(".json").write_text(json.dumps({"runtime": "claude", "step": "implemented:1"}))
-    review_path = tmp_path / "01-slug-review-1.md"
+    review_path = tmp_path / ".ai-factory" / "01-slug-review-1.md"
     backend = FakeAgentBackend(on_call=lambda call: "  \n", sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = CodeReviewer(tmp_path, backend)
 
     with pytest.raises(EmptyAnswerError) as exc_info:
-        pr.review(plan_path, review_path)
+        pr.review(plan_path, review_path, iteration_state=_ITERATION)
 
     lines = str(exc_info.value).splitlines()
     assert lines[0] == "Agent returned an empty answer"
@@ -1121,7 +1130,7 @@ def test_review_blank_answer_raises_empty_answer_error(tmp_path, monkeypatch):
 
     assert not review_path.exists()
     assert json.loads(plan_path.with_suffix(".json").read_text()) == {
-        "runtime": "claude", "step": "implemented:1", "planner": "sid-1",
+        "runtime": "claude", "step": "implemented:1", "code-reviewer": "sid-1",
     }
 
 
@@ -1129,9 +1138,9 @@ def test_review_plan_blank_answer_raises_empty_answer_error(tmp_path):
     """PlanReviewer.review_plan raises EmptyAnswerError, not a False verdict, when the
     agent's answer is blank. The session id is written even though no review exists,
     no review file is written, and no 'step' is written."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
-    review_path = tmp_path / "01-slug-plan-review-1.md"
+    review_path = tmp_path / ".ai-factory" / "01-slug-plan-review-1.md"
     backend = FakeAgentBackend(on_call=lambda call: "  \n\t\n", sid="sid-1")
     reviewer = PlanReviewer(tmp_path, backend)
 
@@ -1159,7 +1168,7 @@ def _artifact_writing_backend(plan_review_text: str = "ok\n\nPLAN_REVIEW_PASS",
     def _write(call):
         if call.role is AgentRole.PLAN_REVIEWER:
             return plan_review_text
-        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+        if call.role is AgentRole.CODE_REVIEWER:
             return review_text
         return "# Plan"
 
@@ -1167,21 +1176,27 @@ def _artifact_writing_backend(plan_review_text: str = "ok\n\nPLAN_REVIEW_PASS",
 
 
 def test_review_message_carries_plan_answer_and_no_previous_review_or_diff(tmp_path):
-    """A first review tells the reviewer to see the changes itself, carries no diff
-    section, and holds the plan and the implementer's answer under their headings
-    with no path of the run's tree."""
-    plan_path = tmp_path / "01-slug.md"
+    """A first review carries no diff section, holds the plan and the implementer's
+    answer under their headings with no path of the run's tree, and names the base
+    and the iteration's commit on the run's ref."""
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan: The work")
-    review_path = tmp_path / "01-slug-review-1.md"
-    answer_path = tmp_path / "01-slug-implementer-1.md"
+    answer_path = tmp_path / ".ai-factory" / "01-slug-implementer-1.md"
     answer_path.write_text("Did the work.\nDEVIATION: said x / showed y / did z")
+    review_path = tmp_path / ".ai-factory" / "01-slug-review-1.md"
     backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = CodeReviewer(tmp_path, backend)
+    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
 
-    assert pr.review(plan_path, review_path, implementer_answer_path=answer_path) is True
+    assert pr.review(plan_path, review_path, implementer_answer_path=answer_path, iteration_state=iteration) is True
 
     prompt = backend.calls[0].prompt
-    assert "Run `git diff HEAD` and `git status` to see ALL changes." in prompt
+    assert (
+        f"Run `git diff {iteration.base} {iteration.commit}` to see ALL changes: "
+        f"the base is `{iteration.base}`, the iteration's commit is `{iteration.commit}` "
+        f"on the ref `{iteration.ref}`."
+    ) in prompt
+    assert "git diff HEAD" not in prompt
     assert "## Diff against the base" not in prompt
     assert "## Plan\n\n# Plan: The work" in prompt
     assert "## The implementer's answer\n\nDid the work.\nDEVIATION: said x / showed y / did z" in prompt
@@ -1196,15 +1211,16 @@ def test_re_review_message_keeps_the_quoted_obligations_and_carries_the_previous
     """A re-review message carries the previous review's text under its heading,
     tells the reviewer to see the changes itself, carries no diff section and
     keeps the re-review obligations byte-identical."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
-    review_1 = tmp_path / "01-slug-review-1.md"
+    review_1 = tmp_path / ".ai-factory" / "01-slug-review-1.md"
     review_1.write_text("Finding one.")
-    review_2 = tmp_path / "01-slug-review-2.md"
+    review_2 = tmp_path / ".ai-factory" / "01-slug-review-2.md"
     backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = CodeReviewer(tmp_path, backend)
+    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
 
-    assert pr.review(plan_path, review_2, prev_review_path=review_1) is True
+    assert pr.review(plan_path, review_2, prev_review_path=review_1, iteration_state=iteration) is True
 
     prompt = backend.calls[0].prompt
     assert "This is a RE-REVIEW after fixes were applied to address the previous review under `## The previous review`." in prompt
@@ -1217,7 +1233,12 @@ def test_re_review_message_keeps_the_quoted_obligations_and_carries_the_previous
     assert "Then run the normal full review for new issues:" in prompt
     assert "Return your full review (per-finding verdicts plus any new issues) as your answer." in prompt
     assert "## The previous review\n\nFinding one." in prompt
-    assert "Run `git diff HEAD` and `git status` to see ALL changes." in prompt
+    assert (
+        f"Run `git diff {iteration.base} {iteration.commit}` to see ALL changes: "
+        f"the base is `{iteration.base}`, the iteration's commit is `{iteration.commit}` "
+        f"on the ref `{iteration.ref}`."
+    ) in prompt
+    assert "git diff HEAD" not in prompt
     assert "## Diff against the base" not in prompt
     assert str(review_1) not in prompt and str(review_2) not in prompt
 
@@ -1226,12 +1247,12 @@ def test_plan_messages_carry_the_task_and_the_revision_context(tmp_path):
     """The first planning message carries the task and asks for the plan as the answer;
     a revision message carries the current plan's and the review's text under their
     headings and names no path of either."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan: The work")
-    review_path = tmp_path / "01-slug-plan-review-1.md"
+    review_path = tmp_path / ".ai-factory" / "01-slug-plan-review-1.md"
     review_path.write_text("Missing step for X.")
     backend = FakeAgentBackend(on_call=lambda call: "# Plan: The work", sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = Planner(tmp_path, backend)
 
     pr.plan("Task title", "Task description", plan_path)
     first = backend.calls[0].prompt
@@ -1250,9 +1271,9 @@ def test_plan_messages_carry_the_task_and_the_revision_context(tmp_path):
 
 
 def test_plan_answer_lands_verbatim_at_plan_path(tmp_path):
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     backend = FakeAgentBackend(on_call=lambda call: "# Plan: Fresh\n\nbody\n", sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = Planner(tmp_path, backend)
 
     pr.plan("Task title", "Task description", plan_path)
 
@@ -1264,7 +1285,7 @@ def test_artifacts_round_trip_through_one_utf_8_reader(tmp_path, monkeypatch):
     _read_artifact under a default text encoding that is not UTF-8, modelled by patching
     io.text_encoding so a missing encoding resolves to latin-1 — pathlib routes a missing
     encoding through it, so the modelled locale reaches Path.read_text and not the read."""
-    path = tmp_path / "01-slug-plan-review-1.md"
+    path = tmp_path / ".ai-factory" / "01-slug-plan-review-1.md"
     text = "Ревью — résumé ✓\n"
     _write_artifact(path, text)
 
@@ -1278,12 +1299,12 @@ def test_prompt_building_reads_artifacts_as_utf_8_whatever_the_locale(tmp_path, 
     """A revision planning message carries a non-ASCII plan's and plan review's exact text
     under a default text encoding that is not UTF-8, the artifacts having been written by
     _write_artifact."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     _write_artifact(plan_path, "# План: работа ✓")
-    review_path = tmp_path / "01-slug-plan-review-1.md"
+    review_path = tmp_path / ".ai-factory" / "01-slug-plan-review-1.md"
     _write_artifact(review_path, "Проблемы —缺少一步。")
     backend = FakeAgentBackend(on_call=lambda call: "# План: работа ✓", sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = Planner(tmp_path, backend)
 
     monkeypatch.setattr(io, "text_encoding", lambda enc, *a, **k: "latin-1" if enc is None else enc)
     pr.plan("Task title", "Task description", plan_path, plan_review_path=review_path)
@@ -1296,11 +1317,11 @@ def test_prompt_building_reads_artifacts_as_utf_8_whatever_the_locale(tmp_path, 
 def test_plan_blank_answer_halts_and_leaves_the_round_recorded(tmp_path):
     """A blank planner answer raises EmptyAnswerError, leaves an existing plan exactly
     as it was and leaves step at planning:N, so a resumed run repeats the round."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan: The old plan")
     plan_path.with_suffix(".json").write_text(json.dumps({"runtime": "claude", "step": "planning:2"}))
     backend = FakeAgentBackend(on_call=lambda call: " \n", sid="sid-1")
-    pr = PlannerReviewer(tmp_path, backend)
+    pr = Planner(tmp_path, backend)
 
     with pytest.raises(EmptyAnswerError) as exc_info:
         pr.plan("Task title", "Task description", plan_path)
@@ -1318,9 +1339,9 @@ def test_review_plan_message_carries_the_plan_text_and_names_no_path(tmp_path):
     """The reviewer's message carries the plan's text under a ## Plan heading, keeps the
     Check-for sentence byte-identical, and names neither the plan's path nor the
     review's path."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan: Add the door\n\n1. Do it.\n")
-    review_path = tmp_path / "01-slug-plan-review-1.md"
+    review_path = tmp_path / ".ai-factory" / "01-slug-plan-review-1.md"
     backend = _artifact_writing_backend()
     reviewer = PlanReviewer(tmp_path, backend)
 
@@ -1337,49 +1358,58 @@ def test_review_plan_message_carries_the_plan_text_and_names_no_path(tmp_path):
     assert str(review_path) not in prompt
 
 
-def test_planner_reviewer_passes_complete_instructions_and_continues_session(tmp_path, monkeypatch):
-    """Every PlannerReviewer call carries the complete planner + reviewer + escalation
-    instructions, resumed ones included; the session id handed in is the one returned last."""
+def test_planner_and_code_reviewer_pass_complete_instructions_in_their_own_sessions(tmp_path, monkeypatch):
+    """Every Planner call carries the complete planner + escalation instructions and
+    every CodeReviewer call the reviewer + escalation ones, resumed ones included;
+    each role continues the session id it was handed and never the other's."""
     backend = _artifact_writing_backend()
-    pr = PlannerReviewer(tmp_path, backend)
-    plan_path = tmp_path / "01-slug.md"
-    review_1 = tmp_path / "01-slug-review-1.md"
-    review_2 = tmp_path / "01-slug-review-2.md"
+    planner = Planner(tmp_path, backend)
+    code_reviewer = CodeReviewer(tmp_path, backend)
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
+    review_1 = tmp_path / ".ai-factory" / "01-slug-review-1.md"
+    review_2 = tmp_path / ".ai-factory" / "01-slug-review-2.md"
 
-    pr.plan("Title", "Description", plan_path)
-    assert pr.review(plan_path, review_1) is True
-    assert pr.review(plan_path, review_2, prev_review_path=review_1) is True
+    planner.plan("Title", "Description", plan_path)
+    planner.plan("Title", "Description", plan_path)
+    assert code_reviewer.review(plan_path, review_1, iteration_state=_ITERATION) is True
+    assert code_reviewer.review(plan_path, review_2, prev_review_path=review_1, iteration_state=_ITERATION) is True
 
-    assert len(backend.calls) == 3
-    for call in backend.calls:
-        assert call.role is AgentRole.PLANNER_REVIEWER
-        assert call.instructions == pr.system_prompt
-        assert call.cwd == str(tmp_path)
-        for name in ("planner", "reviewer", "escalation"):
+    assert len(backend.calls) == 4
+    for call in backend.calls[:2]:
+        assert call.role is AgentRole.PLANNER
+        assert call.instructions == planner.system_prompt
+        for name in ("planner", "escalation"):
             assert _load_prompt(name) in call.instructions
-    assert backend.calls[0].session_id is None
-    assert backend.calls[1].session_id == backend.returned[0]
-    assert backend.calls[2].session_id == backend.returned[1]
+    for call in backend.calls[2:]:
+        assert call.role is AgentRole.CODE_REVIEWER
+        assert call.instructions == code_reviewer.system_prompt
+        for name in ("reviewer", "escalation"):
+            assert _load_prompt(name) in call.instructions
+    for call in backend.calls:
+        assert call.cwd == str(tmp_path)
+    assert [c.session_id for c in backend.calls] == [
+        None, backend.returned[0], None, backend.returned[2],
+    ]
 
 
-def test_planner_reviewer_test_planner_prompt_reaches_instructions(tmp_path):
+def test_planner_test_planner_prompt_reaches_instructions(tmp_path):
     backend = _artifact_writing_backend()
-    pr = PlannerReviewer(tmp_path, backend, planner_prompt_name="test-planner")
+    planner = Planner(tmp_path, backend, planner_prompt_name="test-planner")
 
-    pr.plan("Title", "Description", tmp_path / "01-slug.md")
+    planner.plan("Title", "Description", tmp_path / ".ai-factory" / "01-slug.md")
 
     assert _load_prompt("test-planner") in backend.calls[0].instructions
 
 
 def test_implementer_fixes_continue_session_with_complete_instructions(tmp_path):
     backend = FakeAgentBackend()
-    impl = Implementer(tmp_path, backend)
-    plan_path = tmp_path / "01-slug.md"
+    impl = Implementer(tmp_path, backend, result=WorkingTreeResult())
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan: The work")
-    feedback = tmp_path / "01-slug-review-1.md"
+    feedback = tmp_path / ".ai-factory" / "01-slug-review-1.md"
     feedback.write_text("Fix the edge case.")
-    answer_1 = tmp_path / "01-slug-implementer-1.md"
-    answer_2 = tmp_path / "01-slug-implementer-2.md"
+    answer_1 = tmp_path / ".ai-factory" / "01-slug-implementer-1.md"
+    answer_2 = tmp_path / ".ai-factory" / "01-slug-implementer-2.md"
 
     impl.implement(plan_path, answer_1)
     impl.implement(plan_path, answer_2, feedback_path=feedback)
@@ -1406,12 +1436,12 @@ def test_implementer_blank_answer_raises_empty_answer_error(tmp_path):
     """implement() raises EmptyAnswerError when the implementer's answer is blank.
     No answer file is written; the sidecar keeps the implementer's id and `step`
     stays at its value before the turn, so a resumed run calls the implementer again."""
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
     plan_path.with_suffix(".json").write_text(json.dumps({"runtime": "claude", "step": "plan_reviewed"}))
-    answer_path = tmp_path / "01-slug-implementer-1.md"
+    answer_path = tmp_path / ".ai-factory" / "01-slug-implementer-1.md"
     backend = FakeAgentBackend(on_call=lambda call: " \n", sid="sid-1")
-    impl = Implementer(tmp_path, backend)
+    impl = Implementer(tmp_path, backend, result=WorkingTreeResult())
 
     with pytest.raises(EmptyAnswerError) as exc_info:
         impl.implement(plan_path, answer_path)
@@ -1427,13 +1457,13 @@ def test_implementer_blank_answer_raises_empty_answer_error(tmp_path):
 
 def test_implementer_continuing_session_without_feedback_sends_plan_prompt(tmp_path):
     backend = FakeAgentBackend()
-    impl = Implementer(tmp_path, backend)
-    plan_path = tmp_path / "01-slug.md"
+    impl = Implementer(tmp_path, backend, result=WorkingTreeResult())
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan: The work")
     roadmap_path = tmp_path / "roadmap.md"
 
-    impl.implement(plan_path, tmp_path / "01-slug-implementer-1.md", roadmap_path=roadmap_path, line_number=4)
-    impl.implement(plan_path, tmp_path / "01-slug-implementer-2.md", feedback_path=None, roadmap_path=roadmap_path, line_number=4)
+    impl.implement(plan_path, tmp_path / ".ai-factory" / "01-slug-implementer-1.md", roadmap_path=roadmap_path, line_number=4)
+    impl.implement(plan_path, tmp_path / ".ai-factory" / "01-slug-implementer-2.md", feedback_path=None, roadmap_path=roadmap_path, line_number=4)
 
     first, second = backend.calls
     assert second.session_id == backend.returned[0]
@@ -1453,14 +1483,14 @@ def test_implementer_continuing_session_without_feedback_sends_plan_prompt(tmp_p
 
 def test_implementer_fresh_session_with_feedback_path_sends_plan_prompt(tmp_path):
     backend = FakeAgentBackend()
-    impl = Implementer(tmp_path, backend)
-    plan_path = tmp_path / "01-slug.md"
+    impl = Implementer(tmp_path, backend, result=WorkingTreeResult())
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan: The work")
     roadmap_path = tmp_path / "roadmap.md"
-    feedback = tmp_path / "01-slug-review-1.md"
+    feedback = tmp_path / ".ai-factory" / "01-slug-review-1.md"
     feedback.write_text("Findings.")
 
-    impl.implement(plan_path, tmp_path / "01-slug-implementer-1.md", feedback_path=feedback, roadmap_path=roadmap_path, line_number=4)
+    impl.implement(plan_path, tmp_path / ".ai-factory" / "01-slug-implementer-1.md", feedback_path=feedback, roadmap_path=roadmap_path, line_number=4)
 
     call = backend.calls[0]
     assert call.session_id is None
@@ -1480,12 +1510,12 @@ def test_implementer_fresh_session_with_feedback_path_sends_plan_prompt(tmp_path
 
 def test_plan_review_attempts_inherit_no_session(tmp_path):
     backend = _artifact_writing_backend()
-    plan_path = tmp_path / "01-slug.md"
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan")
 
     for attempt in (1, 2):
         reviewer = PlanReviewer(tmp_path, backend)
-        review_path = tmp_path / f"01-slug-plan-review-{attempt}.md"
+        review_path = tmp_path / ".ai-factory" / f"01-slug-plan-review-{attempt}.md"
         assert reviewer.review_plan(plan_path, review_path, attempt) is True
 
     assert len(backend.calls) == 2
@@ -1504,9 +1534,10 @@ def test_plan_review_attempts_inherit_no_session(tmp_path):
 
 
 _EXPECTED_POLICY = {
-    AgentRole.PLANNER_REVIEWER: ("opus", "high", ["Read", "Write", "Glob", "Grep", "Bash"]),
+    AgentRole.PLANNER: ("opus", "high", ["Read", "Write", "Glob", "Grep", "Bash"]),
     AgentRole.PLAN_REVIEWER: ("opus", "high", ["Read", "Write", "Glob", "Grep", "Bash"]),
     AgentRole.IMPLEMENTER: ("sonnet", "high", ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]),
+    AgentRole.CODE_REVIEWER: ("opus", "high", ["Read", "Write", "Glob", "Grep", "Bash"]),
 }
 
 
@@ -1607,7 +1638,7 @@ def test_claude_backend_settings_are_read_only_and_detached_from_input(monkeypat
 
     agents["implementer"]["model"] = "later"
     agents["implementer"]["effort"] = "later-effort"
-    agents["planner_reviewer"] = {"model": "later-planner"}
+    agents["planner"] = {"model": "later-planner"}
     assert backend.role_settings == expected
     for role in AgentRole:
         backend.run(role=role, prompt="p", cwd="c", instructions="FULL")
@@ -1622,7 +1653,7 @@ def test_claude_backend_policy_does_not_depend_on_instruction_text(monkeypatch):
     monkeypatch.setattr(claude_cli, "_CLAUDE_BIN", "/usr/local/bin/claude")
     monkeypatch.setattr(claude_cli, "_run_claude", lambda **kw: seen.append(kw) or ("out", "sid"))
 
-    ClaudeAgentBackend().run(role=AgentRole.PLANNER_REVIEWER, prompt="p", cwd="c", instructions="SAME")
+    ClaudeAgentBackend().run(role=AgentRole.PLANNER, prompt="p", cwd="c", instructions="SAME")
     ClaudeAgentBackend().run(role=AgentRole.IMPLEMENTER, prompt="p", cwd="c", instructions="SAME")
 
     assert seen[0]["model"] != seen[1]["model"]
@@ -1665,3 +1696,40 @@ def test_claude_backend_preflight_resolves_only_when_unset(monkeypatch):
     monkeypatch.setattr(claude_cli, "_resolve_claude", _missing)
     with pytest.raises(FileNotFoundError):
         ClaudeAgentBackend()
+
+
+def test_each_role_passes_the_exchange_its_artifact_gives(tmp_path):
+    factory = tmp_path / ".ai-factory"
+    plans = factory / "plans" / "john-doe"
+    plans.mkdir(parents=True)
+    (factory / "plan-reviews" / "john-doe").mkdir(parents=True)
+    (factory / "reviews" / "john-doe").mkdir(parents=True)
+    plan_path = plans / "01-slug.md"
+    plan_path.write_text("# Plan")
+    answer_path = factory / "reviews" / "john-doe" / "01-slug-implementer-1.md"
+    answer_path.write_text("Did the work.")
+    plan_review_path = factory / "plan-reviews" / "john-doe" / "01-slug-plan-review-1.md"
+    plan_review_path.write_text("Review notes")
+    review_1 = factory / "reviews" / "john-doe" / "01-slug-review-1.md"
+    review_1.write_text("Finding one.")
+    review_2 = factory / "reviews" / "john-doe" / "01-slug-review-2.md"
+    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
+    backend = FakeAgentBackend(on_call=lambda call: {
+        AgentRole.PLANNER: "# Plan\n\n## Test Command\n`true`\n",
+    }.get(call.role, "REVIEW_PASS\n" if call.role is not AgentRole.IMPLEMENTER else "Did the work.\n"))
+
+    Planner(tmp_path, backend).plan("T", "D", plan_path)
+    assert backend.calls[-1].exchange == "plans/john-doe/01-slug"
+
+    Planner(tmp_path, backend).plan("T", "D", plan_path, plan_review_path=plan_review_path)
+    assert backend.calls[-1].exchange == "plan-reviews/john-doe/01-slug-plan-review-1"
+
+    PlanReviewer(tmp_path, backend).review_plan(plan_path, plan_review_path, 1)
+    assert backend.calls[-1].exchange == "plan-reviews/john-doe/01-slug-plan-review-1"
+
+    CodeReviewer(tmp_path, backend).review(plan_path, review_2, prev_review_path=review_1,
+                                           iteration_state=iteration)
+    assert backend.calls[-1].exchange == "reviews/john-doe/01-slug-review-2"
+
+    Implementer(tmp_path, backend, result=WorkingTreeResult()).implement(plan_path, answer_path)
+    assert backend.calls[-1].exchange is None  # the implementer passes none

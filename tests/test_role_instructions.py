@@ -7,13 +7,17 @@ from pathlib import Path
 import pytest
 
 from orchestrator import agents
-from orchestrator.agents import Implementer, PlanReviewer, PlannerReviewer, _load_prompt
-from orchestrator.ports import AgentRole
+from orchestrator.agents import CodeReviewer, Implementer, PlanReviewer, Planner, _load_prompt
+from orchestrator.implementer_result import WorkingTreeResult
+from orchestrator.ports import AgentRole, IterationState
 from orchestrator.protocol import _read_sessions
 from tests.fakes import BackendCall, FakeAgentBackend
 
 _PROMPT_NAMES = ("execution", "planner", "test-planner", "reviewer", "implementer", "escalation")
 
+
+
+_ITERATION = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
 
 def _canary(name: str) -> str:
     return f"<<canary:{name}>>"
@@ -35,6 +39,11 @@ def project_dir(tmp_path):
     path.mkdir()
     return path
 
+@pytest.fixture(autouse=True)
+def _factory_dir(project_dir):
+    (project_dir / ".ai-factory").mkdir(exist_ok=True)
+
+
 
 def _assert_composition(instructions: str, expected: list[str]) -> None:
     """The execution canary once, then exactly the expected role canaries once each, in order."""
@@ -55,74 +64,93 @@ def _artifact_backend() -> FakeAgentBackend:
             return None
         if call.role is AgentRole.PLAN_REVIEWER:
             return "ok\n\nPLAN_REVIEW_PASS"
-        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+        if call.role is AgentRole.CODE_REVIEWER:
             return "ok\n\nREVIEW_PASS"
         return "# Plan"
 
     return FakeAgentBackend(on_call=on_call)
 
 
-def test_planner_reviewer_carries_full_composition_across_plan_revision_review_and_re_review(
+def test_planner_carries_planner_composition_across_plan_and_revision(
     canary_prompts, project_dir, tmp_path
 ):
     backend = _artifact_backend()
-    role = PlannerReviewer(project_dir, backend)
-    plan = tmp_path / "plan.md"
-    plan_review = tmp_path / "plan-review-1.md"
+    role = Planner(project_dir, backend)
+    plan = project_dir / ".ai-factory" / "plan.md"
+    plan_review = project_dir / ".ai-factory" / "plan-review-1.md"
     plan_review.write_text("findings")
-    review_1 = tmp_path / "x-review-1.md"
-    review_2 = tmp_path / "x-review-2.md"
 
     role.plan("Title", "Description", plan)
     role.plan("Title", "Description", plan, plan_review_path=plan_review)
-    role.review(plan, review_1)
-    role.review(plan, review_2, prev_review_path=review_1)
 
-    assert len(backend.calls) == 4
+    assert len(backend.calls) == 2
     for call in backend.calls:
-        assert call.role is AgentRole.PLANNER_REVIEWER
+        assert call.role is AgentRole.PLANNER
         assert call.cwd == str(project_dir)
-        _assert_composition(call.instructions, ["planner", "reviewer", "escalation"])
-    assert [c.session_id for c in backend.calls] == [None, *backend.returned[:3]]
+        _assert_composition(call.instructions, ["planner", "escalation"])
+    assert [c.session_id for c in backend.calls] == [None, backend.returned[0]]
 
-    plan_call, revision_call, review_call, re_review_call = backend.calls
+    plan_call, revision_call = backend.calls
     assert "**Title**" in plan_call.prompt and "Description" in plan_call.prompt
     assert str(plan) not in plan_call.prompt
     assert "## Plan\n\n# Plan" in revision_call.prompt
     assert "## Plan review\n\nfindings" in revision_call.prompt
     assert str(plan) not in revision_call.prompt and str(plan_review) not in revision_call.prompt
-    assert str(review_1) not in review_call.prompt and str(review_2) not in review_call.prompt
-    assert str(review_2) not in re_review_call.prompt and str(review_1) not in re_review_call.prompt
-    assert "## The previous review" in re_review_call.prompt
 
 
-def test_test_planner_variant_replaces_planner_fragment_and_continues_session(
+def test_code_reviewer_carries_reviewer_composition_across_review_and_re_review(
     canary_prompts, project_dir, tmp_path
 ):
     backend = _artifact_backend()
-    role = PlannerReviewer(project_dir, backend, planner_prompt_name="test-planner")
-    plan = tmp_path / "plan.md"
-    review = tmp_path / "x-review-1.md"
+    role = CodeReviewer(project_dir, backend)
+    plan = project_dir / ".ai-factory" / "plan.md"
+    plan.write_text("# Plan")
+    review_1 = project_dir / ".ai-factory" / "x-review-1.md"
+    review_2 = project_dir / ".ai-factory" / "x-review-2.md"
 
-    role.plan("Title", "Description", plan)
-    role.review(plan, review)
+    role.review(plan, review_1, iteration_state=_ITERATION)
+    role.review(plan, review_2, prev_review_path=review_1, iteration_state=_ITERATION)
+
+    assert len(backend.calls) == 2
+    for call in backend.calls:
+        assert call.role is AgentRole.CODE_REVIEWER
+        assert call.cwd == str(project_dir)
+        _assert_composition(call.instructions, ["reviewer", "escalation"])
+    assert [c.session_id for c in backend.calls] == [None, backend.returned[0]]
+    assert str(review_1) not in backend.calls[0].prompt and str(review_2) not in backend.calls[0].prompt
+    assert str(review_2) not in backend.calls[1].prompt and str(review_1) not in backend.calls[1].prompt
+    assert "## The previous review" in backend.calls[1].prompt
+
+
+def test_test_planner_variant_replaces_planner_fragment_and_review_opens_its_own_session(
+    canary_prompts, project_dir, tmp_path
+):
+    backend = _artifact_backend()
+    planner = Planner(project_dir, backend, planner_prompt_name="test-planner")
+    reviewer = CodeReviewer(project_dir, backend)
+    plan = project_dir / ".ai-factory" / "plan.md"
+    review = project_dir / ".ai-factory" / "x-review-1.md"
+
+    planner.plan("Title", "Description", plan)
+    reviewer.review(plan, review, iteration_state=_ITERATION)
 
     plan_call, review_call = backend.calls
-    for call in backend.calls:
-        _assert_composition(call.instructions, ["test-planner", "reviewer", "escalation"])
+    _assert_composition(plan_call.instructions, ["test-planner", "escalation"])
+    _assert_composition(review_call.instructions, ["reviewer", "escalation"])
     assert plan_call.session_id is None
-    assert review_call.session_id == backend.returned[0]
+    assert review_call.session_id is None
+    assert plan_call.role is AgentRole.PLANNER and review_call.role is AgentRole.CODE_REVIEWER
 
 
 def test_plan_reviews_are_independent_fresh_sessions_with_reviewer_composition(
     canary_prompts, project_dir, tmp_path
 ):
     backend = _artifact_backend()
-    plan = tmp_path / "plan.md"
+    plan = project_dir / ".ai-factory" / "plan.md"
     plan.write_text("# Plan")
 
     for attempt in (1, 2):
-        PlanReviewer(project_dir, backend).review_plan(plan, tmp_path / f"pr-{attempt}.md", attempt)
+        PlanReviewer(project_dir, backend).review_plan(plan, project_dir / ".ai-factory" / f"pr-{attempt}.md", attempt)
 
     assert len(backend.calls) == 2
     for call in backend.calls:
@@ -139,8 +167,8 @@ def test_implementer_initial_call_and_fix_share_composition_and_continue_session
     canary_prompts, project_dir, tmp_path
 ):
     backend = _artifact_backend()
-    role = Implementer(project_dir, backend)
-    plan = tmp_path / "plan.md"
+    role = Implementer(project_dir, backend, result=WorkingTreeResult())
+    plan = project_dir / ".ai-factory" / "plan.md"
     plan.write_text("# Plan")
     feedback = tmp_path / "feedback.md"
     feedback.write_text("address the findings")
@@ -163,14 +191,14 @@ def test_implementer_initial_call_and_fix_share_composition_and_continue_session
 
 def test_re_review_assignment_requires_current_file_evidence(project_dir, tmp_path):
     backend = _artifact_backend()
-    role = PlannerReviewer(project_dir, backend)
-    plan = tmp_path / "plan.md"
+    role = CodeReviewer(project_dir, backend)
+    plan = project_dir / ".ai-factory" / "plan.md"
     plan.write_text("# Plan")
-    review_1 = tmp_path / "x-review-1.md"
-    review_2 = tmp_path / "x-review-2.md"
+    review_1 = project_dir / ".ai-factory" / "x-review-1.md"
+    review_2 = project_dir / ".ai-factory" / "x-review-2.md"
 
-    role.review(plan, review_1)
-    role.review(plan, review_2, prev_review_path=review_1)
+    role.review(plan, review_1, iteration_state=_ITERATION)
+    role.review(plan, review_2, prev_review_path=review_1, iteration_state=_ITERATION)
     prompt = backend.calls[-1].prompt
 
     assert "as it is now" in prompt
@@ -186,18 +214,18 @@ def test_packaged_execution_home_reaches_every_role_before_its_own_fragment(proj
     execution = _load_prompt("execution")
     assert execution.strip()
     backend = _artifact_backend()
-    plan = tmp_path / "plan.md"
-    review = tmp_path / "x-review-1.md"
+    plan = project_dir / ".ai-factory" / "plan.md"
+    review = project_dir / ".ai-factory" / "x-review-1.md"
 
-    planner = PlannerReviewer(project_dir, backend)
+    planner = Planner(project_dir, backend)
     planner.plan("Title", "Description", plan)
-    planner.review(plan, review)
-    PlanReviewer(project_dir, backend).review_plan(plan, tmp_path / "pr-1.md", 1)
-    Implementer(project_dir, backend).implement(plan, tmp_path / "impl-1.md")
+    CodeReviewer(project_dir, backend).review(plan, review, iteration_state=_ITERATION)
+    PlanReviewer(project_dir, backend).review_plan(plan, project_dir / ".ai-factory" / "pr-1.md", 1)
+    Implementer(project_dir, backend, result=WorkingTreeResult()).implement(plan, tmp_path / "impl-1.md")
 
     own_fragment = {
         0: "planner",
-        1: "planner",
+        1: "reviewer",
         2: "reviewer",
         3: "implementer",
     }

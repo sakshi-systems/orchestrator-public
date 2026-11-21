@@ -11,6 +11,7 @@ from typing import Any
 
 from .config import AGENT_RUNTIMES
 from .errors import EmptyAnswerError, HaltError
+from .ports import AgentRole
 
 PLAN_REVIEW_PASS = "PLAN_REVIEW_PASS"
 
@@ -87,13 +88,42 @@ def _load_sidecar(p: Path) -> dict[str, Any]:
     return data
 
 
+def _is_role_runtime_entry(entry: object) -> bool:
+    """True for a role's entry: a local runtime, Hermes with the instance's
+    name, or a head with its address."""
+    if not isinstance(entry, dict):
+        return False
+    runtime = entry.get("runtime")
+    if runtime == "hermes":
+        return isinstance(entry.get("instance"), str) and bool(entry["instance"].strip())
+    if runtime == "head":
+        head = entry.get("head")
+        return (isinstance(head, dict) and set(head) == {"repository", "owner", "folder"}
+                and all(isinstance(head[name], str) and head[name]
+                        for name in ("repository", "owner", "folder")))
+    return isinstance(runtime, str) and runtime in AGENT_RUNTIMES
+
+
+def _is_role_runtime_record(value: object) -> bool:
+    """True for the run's owner record: an entry per role of the four, each naming a known runtime.
+
+    A role the record leaves out is valid — resume reads that role as taking its
+    effective entry. The legacy single-string owner is accepted beside this form.
+    """
+    if not isinstance(value, dict):
+        return False
+    if not set(value) <= {role.value for role in AgentRole}:
+        return False
+    return all(_is_role_runtime_entry(entry) for entry in value.values())
+
+
 def _validate_record(data: dict[str, Any], path: Path) -> None:
     """Check known values without normalizing identities or optional metadata."""
     for key, value in data.items():
         valid = True
         if key == "runtime":
-            valid = isinstance(value, str) and value in AGENT_RUNTIMES
-        elif key in ("planner", "implementer") or re.fullmatch(r"plan-reviewer-[0-9]+", key):
+            valid = (isinstance(value, str) and value in AGENT_RUNTIMES) or _is_role_runtime_record(value)
+        elif key in ("planner", "implementer", "code-reviewer") or re.fullmatch(r"plan-reviewer-[0-9]+", key):
             valid = isinstance(value, str) and bool(value.strip())
         elif key == "elapsed":
             valid = isinstance(value, str) and bool(value) and value.isascii() and value.isdecimal()
@@ -117,7 +147,7 @@ def _write_session(plan_path: Path, key: str, value: str) -> None:
     _write_sessions(plan_path, {key: value})
 
 
-def _write_sessions(plan_path: Path, updates: dict[str, str]) -> None:
+def _write_sessions(plan_path: Path, updates: dict[str, Any]) -> None:
     """Merge keys into the existing sidecar record via a temporary file and an
     atomic replace. Invalid existing data or an I/O failure halts without
     replacing the original."""
