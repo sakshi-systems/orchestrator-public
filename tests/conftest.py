@@ -2,9 +2,11 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from orchestrator import courier as courier_module
 from orchestrator.git_runner import REPOSITORY_LOCATION_VARIABLES
 
 
@@ -26,6 +28,49 @@ def _no_repository_location_variables(
     its effect."""
     for name in REPOSITORY_LOCATION_VARIABLES:
         monkeypatch.delenv(name, raising=False)
+
+
+class bounded_sleep:
+    """A sleep stand-in that fails the test after a fixed number of calls, so a
+    wait that never ends fails instead of hanging. Every test that runs a
+    HeadAgentBackend's wait gives the backend one of these."""
+
+    def __init__(self, limit: int = 5) -> None:
+        self.limit = limit
+        self.calls = 0
+
+    def __call__(self, seconds: float) -> None:
+        self.calls += 1
+        if self.calls > self.limit:
+            raise AssertionError("the wait never found its answer")
+
+
+@pytest.fixture(autouse=True)
+def _exchanges_nowhere(tmp_path, monkeypatch):
+    """No test touches the real exchange root: the placement is aimed at a
+    directory of the test's own."""
+    from orchestrator import exchange as exchange_module
+    monkeypatch.setattr(exchange_module, "_ROOT", tmp_path / "test-exchanges")
+
+
+@pytest.fixture(autouse=True)
+def _courier_sends_nowhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reaches a real codex or claude: the courier's subprocess is a
+    stand-in whose run raises, keeping the module's constants and exception
+    types.  A test that sends without its own stand-in fails instead of
+    calling the executable; a test that sets its own replaces it."""
+    def _refuse(*args, **kwargs):
+        raise AssertionError("a test sent without its own subprocess stand-in")
+
+    monkeypatch.setattr(courier_module, "subprocess", SimpleNamespace(
+        run=_refuse,
+        DEVNULL=subprocess.DEVNULL,
+        PIPE=subprocess.PIPE,
+        STDOUT=subprocess.STDOUT,
+        SubprocessError=subprocess.SubprocessError,
+        TimeoutExpired=subprocess.TimeoutExpired,
+        CompletedProcess=subprocess.CompletedProcess,
+    ))
 
 
 @pytest.fixture(autouse=True)

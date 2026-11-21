@@ -1,8 +1,8 @@
 # Phase sessions and token cost
 
-`enable_phase_sessions` controls whether the `PlannerReviewer` identity carries over between tasks within one roadmap phase. Its default lives in [Configuration](../reference/configuration.md#settings-keys).
+`enable_phase_sessions` controls whether the planner's identity carries over between tasks within one roadmap phase. Its default lives in [Configuration](../reference/configuration.md#settings-keys).
 
-The orchestrator groups tasks into phases: any `##` or `###` heading in the roadmap marks a boundary. When enabled, each next task in the same phase receives the preceding planner identity for continuation through the selected runtime. The identity resets at phase boundaries. When disabled, no planner identity is carried between tasks.
+The orchestrator groups tasks into phases: any `##` or `###` heading in the roadmap marks a boundary. When enabled, each next task in the same phase receives the preceding planner identity for continuation through the selected runtime. The identity resets at phase boundaries. When disabled, no planner identity is carried between tasks. The code reviewer's session, fresh per task, is never carried from one task to the next, and with planning off there is no planner identity to carry.
 
 Cross-task carryover exists only in the current process's memory. Restart does not recover it from earlier task records; a task's own saved identity and absence-only phase fallback follow [Resume — Planning intent and saved identities](resume.md#planning-intent-and-saved-identities). Native instruction retention follows [Agent runtime](agent-runtime.md#invoking-a-role).
 

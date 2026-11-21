@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .locator import is_path_text, is_single_component
 from .ports import AgentRole
 
 
@@ -26,10 +27,25 @@ class OrchestratorConfig:
     claude_agents: dict[str, dict[str, str]] = field(default_factory=dict)
     codex_agents: dict[str, dict[str, str]] = field(default_factory=dict)
     plan_review_iterations: int | None = None
-    task_reviewer: str = "run"
+    roles: dict[str, dict[str, str]] = field(default_factory=dict)
+    hermes_instances: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 AGENT_RUNTIMES = ("claude", "codex")
+
+
+def role_runtimes(runtime: str, roles: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, dict[str, str]]:
+    """The effective runtime of each of the run's four roles, as a record keyed by role.
+
+    A role the `roles` object names takes that runtime; every role it leaves out
+    takes the run's `runtime`. Each entry names the role's runtime — the shape
+    the sidecar's `runtime` record holds.
+    """
+    block = roles if roles is not None else {}
+    return {
+        role.value: dict(block.get(role.value, {"runtime": runtime}))
+        for role in AgentRole
+    }
 
 
 def _validate_agent_block(key: str, block: object, path: Path) -> dict[str, dict[str, str]]:
@@ -55,13 +71,122 @@ def _validate_agent_block(key: str, block: object, path: Path) -> dict[str, dict
     return block
 
 
-def load_config(project_dir: Path | None = None, *, task_reviewers: Mapping[str, object]) -> OrchestratorConfig:
+def _validate_roles(block: object, path: Path, hermes_instances: Mapping[str, object]) -> dict[str, dict[str, str]]:
+    """Validate the effective `roles` object without adding defaults or changing values."""
+    if not isinstance(block, dict):
+        raise SystemExit(f"Invalid 'roles' in {path}: {block!r} (must be an object)")
+
+    roles = {role.value for role in AgentRole}
+    for role, value in block.items():
+        if role not in roles:
+            raise SystemExit(f"Invalid 'roles' role {role!r} in {path}: {value!r} (unknown role)")
+        if not isinstance(value, dict):
+            raise SystemExit(f"Invalid 'roles' role {role!r} in {path}: {value!r} (must be an object)")
+        for name, field_value in value.items():
+            runtime = value.get("runtime")
+            if runtime == "hermes":
+                allowed = {"runtime", "instance"}
+            elif runtime == "head":
+                allowed = {"runtime", "head"}
+            else:
+                allowed = {"runtime"}
+            if name not in allowed:
+                raise SystemExit(
+                    f"Invalid 'roles' role {role!r} field {name!r} in {path}: {field_value!r} (unknown field)"
+                )
+        runtime = value.get("runtime")
+        if not isinstance(runtime, str) or not runtime:
+            raise SystemExit(
+                f"Invalid 'roles' role {role!r} field 'runtime' in {path}: {runtime!r} (must be a non-empty string)"
+            )
+        if runtime == "head":
+            if role == "implementer":
+                raise SystemExit(f"Invalid 'roles' role 'implementer' in {path}: a head cannot take the implementer")
+            head = value.get("head")
+            if not isinstance(head, dict) or set(head) != {"repository", "owner", "folder"}:
+                raise SystemExit(
+                    f"Invalid 'roles' role {role!r} field 'head' in {path}: {head!r} "
+                    "(must hold exactly 'repository', 'owner' and 'folder')"
+                )
+            for field in ("repository", "owner", "folder"):
+                if not isinstance(head[field], str) or not head[field]:
+                    raise SystemExit(
+                        f"Invalid 'roles' role {role!r} field 'head' in {path}: "
+                        f"{field} must be a nonempty string"
+                    )
+            if not Path(head["repository"]).is_absolute():
+                raise SystemExit(
+                    f"Invalid 'roles' role {role!r} field 'head' in {path}: "
+                    f"repository must be an absolute path"
+                )
+            if not is_path_text(head["repository"]):
+                raise SystemExit(
+                    f"Invalid 'roles' role {role!r} field 'head' in {path}: "
+                    f"repository must be a path the filesystem can name"
+                )
+            for field in ("owner", "folder"):
+                if not is_single_component(head[field]):
+                    raise SystemExit(
+                        f"Invalid 'roles' role {role!r} field 'head' in {path}: "
+                        f"{field} must be a single path component"
+                    )
+            continue
+        if runtime == "hermes":
+            instance = value.get("instance")
+            if not isinstance(instance, str) or not instance:
+                raise SystemExit(
+                    f"Invalid 'roles' role {role!r} field 'instance' in {path}: {instance!r} (must be a non-empty string)"
+                )
+            if instance not in hermes_instances:
+                raise SystemExit(
+                    f"Invalid 'roles' role {role!r} in {path}: {instance!r} (not a name 'hermes_instances' holds)"
+                )
+            continue
+        if runtime not in AGENT_RUNTIMES:
+            raise SystemExit(
+                f"Invalid 'roles' role {role!r} field 'runtime' in {path}: {runtime!r} (must be 'claude' or 'codex')"
+            )
+    return block
+
+
+_HERMES_INSTANCE_FIELDS = ("server", "port", "key_file")
+
+
+def _validate_hermes_instances(block: object, path: Path) -> dict[str, dict[str, object]]:
+    """Validate the machine's instance map; the key material is never read here."""
+    if not isinstance(block, dict):
+        raise SystemExit(f"Invalid 'hermes_instances' in {path}: {block!r} (must be an object)")
+    for name, entry in block.items():
+        if not isinstance(name, str) or not name:
+            raise SystemExit(
+                f"Invalid 'hermes_instances' name {name!r} in {path}: {entry!r} (must be a non-empty string)"
+            )
+        if not isinstance(entry, dict) or set(entry) != set(_HERMES_INSTANCE_FIELDS):
+            raise SystemExit(
+                f"Invalid 'hermes_instances' instance {name!r} in {path}: {entry!r} "
+                "(must hold exactly 'server', 'port' and 'key_file')"
+            )
+        for field in ("server", "key_file"):
+            if not isinstance(entry[field], str) or not entry[field]:
+                raise SystemExit(
+                    f"Invalid 'hermes_instances' instance {name!r} field {field!r} in {path}: "
+                    f"{entry[field]!r} (must be a non-empty string)"
+                )
+        port = entry["port"]
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise SystemExit(
+                f"Invalid 'hermes_instances' instance {name!r} field 'port' in {path}: "
+                f"{port!r} (must be an integer from 1 to 65535)"
+            )
+    return block
+
+
+def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
     """Load and validate config from orchestrator.json in the project root (or ORCHESTRATOR_CONFIG override).
 
     When `project_dir` is given and `<project_dir>/.ai-factory/orchestrator.json` exists, its keys are
     shallow-merged onto the base config (project keys win, absent keys inherit the base value). Absence of
-    the override leaves the result byte-identical to calling this with no argument. `task_reviewers` names
-    the accepted task-reviewer spellings; the names are handed in by the caller that owns the kinds.
+    the override leaves the result byte-identical to calling this with no argument.
     """
     default = Path(__file__).parent.parent / "orchestrator.json"
     path = Path(os.environ.get("ORCHESTRATOR_CONFIG", str(default)))
@@ -108,6 +233,14 @@ def load_config(project_dir: Path | None = None, *, task_reviewers: Mapping[str,
     if not isinstance(runtime, str) or runtime not in AGENT_RUNTIMES:
         raise SystemExit(f"Invalid 'runtime' in {_supplying('runtime')}: {runtime!r} (must be 'claude' or 'codex')")
 
+    if "hermes_instances" in override:
+        raise SystemExit(
+            f"Invalid 'hermes_instances' in {override_path}: {override['hermes_instances']!r} "
+            "(the base file supplies the instance map, never a project overlay)"
+        )
+    hermes_instances = _validate_hermes_instances(data.get("hermes_instances", {}), path)
+    roles = _validate_roles(data.get("roles", {}), _supplying("roles"), hermes_instances)
+
     plan_review_iterations = None
     if "plan_review_iterations" in data:
         value = data["plan_review_iterations"]
@@ -118,11 +251,10 @@ def load_config(project_dir: Path | None = None, *, task_reviewers: Mapping[str,
             )
         plan_review_iterations = value
 
-    task_reviewer = data.get("task_reviewer", "run")
-    if not isinstance(task_reviewer, str) or task_reviewer not in task_reviewers:
+    if "task_reviewer" in data:
         raise SystemExit(
             f"Invalid 'task_reviewer' in {_supplying('task_reviewer')}: "
-            f"{task_reviewer!r} (must be {' or '.join(repr(name) for name in task_reviewers)})"
+            f"the setting is retired; name who reviews a task as the runtime of 'roles.code_reviewer'"
         )
 
     agent_blocks = {}
@@ -156,6 +288,8 @@ def load_config(project_dir: Path | None = None, *, task_reviewers: Mapping[str,
         usage_threshold_5h=float(data["usage_threshold_5h"]),
         usage_threshold_weekly=float(data["usage_threshold_weekly"]),
         enable_phase_sessions=enable_phase_sessions,
+        roles=roles,
+        hermes_instances=hermes_instances,
         telegram_bot_token=data.get("telegram_bot_token") or None,
         telegram_chat_id=data.get("telegram_chat_id") or None,
         telegram_alerts=data.get("telegram_alerts") or [],
@@ -164,5 +298,4 @@ def load_config(project_dir: Path | None = None, *, task_reviewers: Mapping[str,
         claude_agents=agent_blocks["claude_agents"],
         codex_agents=agent_blocks["codex_agents"],
         plan_review_iterations=plan_review_iterations,
-        task_reviewer=task_reviewer,
     )

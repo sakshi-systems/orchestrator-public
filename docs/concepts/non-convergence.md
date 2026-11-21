@@ -20,7 +20,7 @@ A deadlock an agent can name outright does not have to wait for this resolution:
 
 ## Pattern 3: a persistent session's stale verdict
 
-`PlannerReviewer.review()` holds one session for the whole code review: the same session that wrote the plan reviews both the first round and every round after it. Left unchecked, this creates its own failure mode — the reviewer anchors on its own verdict from a past round and carries a finding forward as "carried over / unaddressed" into the new review file, even if the implementer has already fixed the code: the model trusts its session's memory of the file's content rather than rereading it.
+The code reviewer holds one session for the whole code review of a task, its own and never the planner's: it reviews both the first round and every round after it in that session, across the task's fix iterations. Left unchecked, this creates its own failure mode — the reviewer anchors on its own verdict from a past round and carries a finding forward as "carried over / unaddressed" into the new review file, even if the implementer has already fixed the code: the model trusts its session's memory of the file's content rather than rereading it.
 
 Outwardly this is indistinguishable from pattern 2 — the same finding repeats round after round — but the nature is different: the blocker is not semantic, the finding is already closed in the code, the reviewer simply did not check the file's current state.
 

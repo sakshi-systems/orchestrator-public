@@ -6,19 +6,19 @@ After an interruption, the orchestrator selects the task's existing record and c
 
 ## Resume prerequisites
 
-The caller prepares the selected runtime's executable, authentication, target working directory, project guidance and access to the original same-runtime session storage. Runtime selection follows [Agent runtime](agent-runtime.md#runtime-selection); changing the selected runtime is a rare, externally prepared operation.
+The caller prepares the executable, authentication, target working directory, project guidance and access to the original same-runtime session storage of each local runtime that a role takes, and the reach of each Hermes instance and each head a role names. Runtime selection follows [Agent runtime](agent-runtime.md#runtime-selection); changing the runtime of a role that holds a saved identity is a rare, externally prepared operation.
 
-Record ownership follows [What the sidecar holds](#what-the-sidecar-holds). For resumable records, a mismatch with the selected runtime halts before session identities are restored, artifact fallback is applied or the record is modified. Terminal handling follows [Plan selection](#plan-selection). Session identities are not converted or reconstructed, and an unusable continuation does not silently create a fresh session.
+Record ownership follows [What the sidecar holds](#what-the-sidecar-holds). For resumable records, a role that would continue an identity under a different runtime, instance or head address than the one recorded halts, naming the role, before session identities are restored, artifact fallback is applied or the record is modified. Terminal handling follows [Plan selection](#plan-selection). Session identities are not converted or reconstructed, and an unusable continuation does not silently create a fresh session.
 
 A deliberate fresh pipeline requires caller preparation. Resume does not automatically delete artifacts or migrate sessions to make a runtime switch possible.
 
 ## What the sidecar holds
 
-The JSON sidecar shares the plan's exact stem: `.ai-factory/plans/{NN}-{slug}.json`. Named roadmaps use their existing artifact segment under [Named roadmaps](named-roadmaps.md). The record holds runtime ownership, the current boundary, saved session identities, accumulated elapsed time and any [escalation account](escalation.md).
+The JSON sidecar shares the plan's exact stem: `.ai-factory/plans/{NN}-{slug}.json`. Named roadmaps use their existing artifact segment under [Named roadmaps](named-roadmaps.md). The record holds each role's runtime beside its identity, the current boundary, saved session identities, accumulated elapsed time and any [escalation account](escalation.md).
 
-`runtime` records the effective run configuration's selected [agent runtime](agent-runtime.md#agent-runtime), not the enclosing architect's identity, runtime or environment. When present, it is an exact recognized selector from [Configuration](../reference/configuration.md#settings-keys). Absence means legacy Claude; a provided unknown or malformed owner halts.
+`runtime` records the [agent runtime](agent-runtime.md#agent-runtime) that the effective run configuration names for each role of the run, with the Hermes instance or the head's address where a role has one, not the enclosing architect's identity, runtime or environment. When present, each is an exact recognized selector from [Configuration](../reference/configuration.md#settings-keys). Absence means legacy Claude; a provided unknown or malformed owner halts. A role with no identity yet takes the runtime the settings name.
 
-`planner` and `implementer` hold the continuing task identities. `plan-reviewer-<N>` holds the independent reviewer identity for the attempt named by its plan-review artifact. It is recorded as soon as that reviewer returns, even without a review artifact, and is audit-only: resume never uses it. Code review continues the planner's identity and needs no separate key.
+`planner`, `implementer` and `code-reviewer` hold the continuing task identities, each the identity of that role's own session; the code reviewer is fresh per task and continues across the task's fix iterations, and never continues the `planner` identity. `plan-reviewer-<N>` holds the independent plan reviewer identity for the attempt named by its plan-review artifact. It is recorded as soon as that reviewer returns, even without a review artifact, and is audit-only: resume never uses it. A role taken by a head holds no identity of the run's: the record holds the head's address beside the role's runtime.
 
 Known session-identity fields, when present, are nonblank strings retained without trimming. Invalid presence halts rather than permitting a fallback. `elapsed`, when present, is a nonnegative decimal-seconds string using ASCII digits. Unknown optional keys are preserved.
 
@@ -36,6 +36,8 @@ Before every initial or revised planner invocation, the orchestrator atomically 
 
 Every initial, resumed or revised planning assignment carries the current task title and description, the supplied roadmap location and the grammar the planner's answer takes. Review feedback is included inline only when its artifact exists. Missing feedback does not reset the recorded round, invent findings or erase or replace a known session identity. Pending planning above round 1 still receives this complete task context when neither a saved task identity nor a phase identity exists. This assignment delivery does not replace native instruction policy or reconstruct a session.
 
+With planning off, the laying of the task's spec is the planner's round: it passes through `planning:1` to `planned:1`, and a crash between the two repeats the laying ([Planning is a stage a project can switch off](../pipeline.md#planning-is-a-stage-a-project-can-switch-off)).
+
 A successful planner return advances the boundary to `planned:N`. Returned role identities retain their normal persistence and escalation handling. An identity that the runtime never returns and the orchestrator never persists has no recovery guarantee.
 
 ## `step` values
@@ -48,15 +50,17 @@ The `:N` suffix is an ASCII decimal integer greater than zero. Leading zeroes ma
 | `planned:N` | Round N's plan is ready; no verdict yet | Reviews the plan at attempt N; with plan review off, starts implementation at iteration 1 |
 | `plan_review_failed:N` | Round N's plan review failed | Plans round N + 1 |
 | `plan_reviewed` | The plan passed review | Starts implementation at iteration 1 |
-| `implemented:N` | Round N's code is ready; no verdict yet | Runs the verification of the run's kind at iteration N; where the head reviews, closes the task as [Closing a record](#closing-a-record) says |
+| `implemented:N` | Round N's code is ready; no verdict yet | Runs the verification of the run's kind at iteration N, as [Closing a record](#closing-a-record) says; where the reviewer is a head, a deposit already made for iteration N is read before the head is called again |
 | `review_failed:N` | Round N's code review failed | Implements iteration N + 1 |
 | `test_run_failed:N` | Round N's test run failed in test mode | Implements iteration N + 1 |
 | `escalated` | An unresolved decision stops the task | Stops immediately without restoring session identities |
 | `done` | The record is closed by successful completion | Excludes the record from continuation selection |
 
+A rollback of a task to an earlier step deletes that task's head exchange files (the files), because the run cannot tell a rollback to the same step from a crash in the middle of a wait and would read a deposit made for the earlier work as the answer of the call it repeats. The rollback rows of `task-rescue` delete them, and a rollback made by hand does the same.
+
 ### Attempt limits
 
-Explicit state and the resolved next call are validated against their budget before role invocation or progress rewrite. This covers initial and revised planning, plan review, implementation and verification. The budget is `max_iterations`, except for the plan family, planning rounds and plan review, where `plan_review_iterations` is set: it bounds them, planning always allowed its first round, so that a record at `planned:1` meets the empty plan-review loop at `0`; a halt names the setting whose budget was passed and that setting's own value. An over-budget indexed state cannot evade the check through artifact fallback; malformed indexed counters halt rather than falling back.
+Explicit state and the resolved next call are validated against their budget before role invocation or progress rewrite. This covers initial and revised planning, plan review, implementation and verification. The budget is `max_iterations`, except for the plan family, planning rounds and plan review, where `plan_review_iterations` is set: it bounds them, planning always allowed its first round, so that a record at `planned:1` meets the empty plan-review loop at `0`; with planning off nothing reads `plan_review_iterations`; a halt names the setting whose budget was passed and that setting's own value. An over-budget indexed state cannot evade the check through artifact fallback; malformed indexed counters halt rather than falling back.
 
 A resume past the configured attempt budget is the existing [halt](../concepts/fault-handling.md#the-known-faults). A live review cycle that spends its budget without a pass remains a work failure under [Outcomes](../concepts/outcomes.md). Terminal escalation and done retain their meanings.
 
@@ -89,6 +93,6 @@ A tagged record with a missing or unknown step halts. A non-string step or malfo
 
 ## Closing a record
 
-Normal successful verification marks the roadmap task done, records `done`, then commits through the existing pipeline. Where the head reviews, a finished implementation takes that place: once the project is found changed outside `.ai-factory/` against its tree as it stood when the implementer's turn began, the task closes the same way; otherwise the implement step fails and the run stops on the task, with its record left at the boundary before the implementer, so a later run calls the implementer again, continuing its session with the plan. A resume at `implemented:N` runs in a new process with no such tree to compare against, so it closes the task unchecked.
+Normal successful verification marks the roadmap task done, records `done`, then commits through the existing pipeline. The review of iteration N decides the task, whoever reviews: a pass closes it, and findings send the implementer to iteration N + 1. A review always follows the implementer's turn, and a turn that changed nothing reaches the reviewer with an empty diff ([Who reviews a task](../pipeline.md#who-reviews-a-task)).
 
 No planner return closes a record without a plan: an empty planner answer halts like the empty answer of any role, and the resumed run repeats the planning round. A task whose work already holds goes through plan and review like any other, and its review sees an empty diff.

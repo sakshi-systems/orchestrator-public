@@ -1,6 +1,6 @@
 [project]
 name = "orchestrator"
-version = "0.5.0"
+version = "0.6.0"
 description = "Generic AI agent orchestrator — plans, implements, and reviews tasks from a roadmap"
 requires-python = ">=3.11"
 dependencies = []
@@ -17,6 +17,7 @@ dev = [
 [project.scripts]
 orchestrator = "orchestrator.main:cli"
 orchestrator-launch = "orchestrator.launcher:cli"
+orchestrator-answer = "orchestrator.answer:cli"
 sakshi = "orchestrator.sakshi:cli"
 
 [tool.pytest.ini_options]

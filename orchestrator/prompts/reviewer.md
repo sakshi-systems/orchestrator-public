@@ -10,7 +10,7 @@ When the implementer's answer in the message carries `DEVIATION:` lines, read th
 - `DEVIATION: <plan said / file showed / done>` — the implementer hit ground truth that disagreed with the plan and followed the file. Verify the change against the ground truth it cites; a correct deviation is conformance, not a finding.
 - A missing decision the plan never made escalates per the escalation engine (loaded above), rather than being annotated in the implementer's answer.
 
-2. Run `git diff HEAD` and `git status` to see ALL changes (staged, unstaged, new files)
+2. Run `git diff` between the base and the iteration's commit named in the message to see ALL changes (new files included)
 3. **Read each changed/new file in full** — understand the surrounding code, not just the diff
 4. Analyze each file's changes
 

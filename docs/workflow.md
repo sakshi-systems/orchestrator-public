@@ -25,7 +25,7 @@ Once the roadmap is ready:
 uv run orchestrator implement /path/to/project
 ```
 
-The orchestrator processes tasks one at a time: plan → plan review → implementation → code review → commit. Each task is marked `[x]` after it completes.
+The orchestrator processes tasks one at a time: plan → plan review → implementation → code review → commit, the stages a project sets ([Pipeline](pipeline.md#planning-is-a-stage-a-project-can-switch-off)). Each task is marked `[x]` after it completes.
 
 If the reviewer's signature does not appear within the iteration limit, the orchestrator stops with artifacts left on disk — what that means and how to work through it is described in [non-convergence.md](concepts/non-convergence.md).
 

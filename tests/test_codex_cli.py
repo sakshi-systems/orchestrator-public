@@ -461,9 +461,10 @@ class TestCodexChildLifetime:
 # ---------------------------------------------------------------------------
 
 _ROLE_MODELS = [
-    (AgentRole.PLANNER_REVIEWER, "gpt-6.1-sol"),
+    (AgentRole.PLANNER, "gpt-6.1-sol"),
     (AgentRole.PLAN_REVIEWER, "gpt-6.1-sol"),
     (AgentRole.IMPLEMENTER, "gpt-6.1-sol"),
+    (AgentRole.CODE_REVIEWER, "gpt-6.1-sol"),
 ]
 
 
@@ -854,9 +855,10 @@ class TestCodexCompletion:
         the plan's sidecar records the reviewer's session, no review file is written
         and _write_artifact halts with EmptyAnswerError."""
         child_env.child([_thread_started(CREATED_UUID), _turn_completed()])
-        plan_path = tmp_path / "01-slug.md"
+        (tmp_path / ".ai-factory").mkdir(exist_ok=True)
+        plan_path = tmp_path / ".ai-factory" / "01-slug.md"
         plan_path.write_text("# Plan: Add the door\n")
-        review_path = tmp_path / "01-slug-plan-review-1.md"
+        review_path = tmp_path / ".ai-factory" / "01-slug-plan-review-1.md"
         reviewer = PlanReviewer(tmp_path, CodexAgentBackend())
 
         with pytest.raises(EmptyAnswerError) as exc_info:

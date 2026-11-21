@@ -12,10 +12,11 @@ import pytest
 from orchestrator.errors import HaltError
 from orchestrator.protocol import _read_sessions, _write_artifact, _write_session, _write_sessions
 from orchestrator import pipeline
-from orchestrator.agents import PlannerReviewer, _load_prompt
-from orchestrator.config import OrchestratorConfig
+from orchestrator.agents import Planner, _load_prompt
+from orchestrator.config import OrchestratorConfig, role_runtimes
 from orchestrator.errors import EscalationError
 from orchestrator.layout import _artifact_subdir, _tests_sibling
+from orchestrator.implementer_result import WorkingTreeResult
 from orchestrator.pipeline import IMPLEMENT_MODE, TEST_MODE, _artifact_dir, _next_number, process_task
 from orchestrator.ports import AgentRole
 from orchestrator.roadmap import parse_roadmap
@@ -23,10 +24,25 @@ from tests.fakes import FakeAgentBackend
 
 
 INVALID_FIELDS = [
-    ("runtime", value) for value in (None, "", "CLAUDE", " codex", "other", 1, [])
+    ("runtime", value) for value in (
+        None, "", "CLAUDE", " codex", "other", 1, [],
+        {"planner": {"runtime": "claude"}, "architect": {"runtime": "claude"}},
+        {"planner": "claude"},
+        {"planner": {}},
+        {"planner": {"runtime": "other"}},
+        {"planner": {"runtime": 1}},
+        {"planner": {"runtime": "hermes"}},
+        {"planner": {"runtime": "hermes", "instance": 5}},
+        {"planner": {"runtime": "hermes", "instance": ""}},
+        {"planner": {"runtime": "head"}},
+        {"planner": {"runtime": "head", "head": {}}},
+        {"planner": {"runtime": "head", "head": {"repository": "/r", "owner": "m"}}},
+        {"planner": {"runtime": "head", "head": {"repository": "", "owner": "m", "folder": "f"}}},
+        {"planner": {"runtime": "head", "head": {"repository": "/r", "owner": 3, "folder": "f"}}},
+    )
 ] + [
     (key, value)
-    for key in ("planner", "implementer", "plan-reviewer-2")
+    for key in ("planner", "implementer", "code-reviewer", "plan-reviewer-2")
     for value in (None, "", " \t\n", 0, {}, [])
 ] + [
     ("elapsed", value) for value in (None, 0, "", "-1", "+1", "1.0", " 1", "١", "²")
@@ -76,11 +92,21 @@ def test_invalid_update_never_reaches_temp_or_replace(tmp_path, monkeypatch, key
 
 
 @pytest.mark.parametrize("elapsed", ["0", "00", "123"])
-def test_valid_record_keeps_opaque_identities_and_optional_json(tmp_path, elapsed):
+@pytest.mark.parametrize("owner", [
+    "codex",
+    {role.value: {"runtime": "codex"} for role in AgentRole},
+    {"planner": {"runtime": "codex"}, "code_reviewer": {"runtime": "codex"}},
+    {
+        "planner": {"runtime": "hermes", "instance": "main"},
+        "code_reviewer": {"runtime": "hermes", "instance": "second"},
+    },
+])
+def test_valid_record_keeps_opaque_identities_and_optional_json(tmp_path, elapsed, owner):
     plan = tmp_path / "01-work.md"
     data = {
-        "runtime": "codex", "planner": "  opaque planner\n", "implementer": "not-a-uuid",
-        "plan-reviewer-2": " audit ", "elapsed": elapsed, "step": "unknown boundary",
+        "runtime": owner, "planner": "  opaque planner\n", "implementer": "not-a-uuid",
+        "code-reviewer": " opaque reviewer ", "plan-reviewer-2": " audit ", "elapsed": elapsed,
+        "step": "unknown boundary",
         "optional": {"nested": [None, 1, True]},
     }
     plan.with_suffix(".json").write_text(json.dumps(data))
@@ -99,6 +125,20 @@ def flow(tmp_path, monkeypatch):
         run=lambda *args, **kwargs: subprocess.CompletedProcess(args, 0),
     ))
     monkeypatch.setattr(pipeline.state, "tasks_done", 0)
+    # The iteration's commit is real git: the flow's directory is a repository
+    # of its own, with an identity set.
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(tmp_path), check=True)
+    (tmp_path / ".gitkeep").write_text("")
+    subprocess.run(["git", "add", ".gitkeep"], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=str(tmp_path), check=True)
+
+    # The run's ref pushes to a real origin: a bare repository beside the flow.
+    origin = tmp_path.parent / f"{tmp_path.name}-origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=str(tmp_path), check=True)
+    subprocess.run(["git", "push", "-q", "origin", "HEAD:refs/heads/main"], cwd=str(tmp_path), check=True)
 
     def prepare(*, runtime="claude", named=False, test_mode=False, prefix="1"):
         base = TEST_MODE if test_mode else IMPLEMENT_MODE
@@ -143,7 +183,7 @@ def _backend(flow):
             return None
         if call.role is AgentRole.PLAN_REVIEWER:
             return "PLAN_REVIEW_PASS"
-        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" in call.prompt:
+        if call.role is AgentRole.CODE_REVIEWER:
             return "REVIEW_PASS"
         return "# Plan\n\n## Test Command\n`true`\n"
     return FakeAgentBackend(on_call=write)
@@ -151,22 +191,23 @@ def _backend(flow):
 
 def _run(flow, backend, *, phase=None):
     return process_task(flow.project, flow.task, _next_number(flow.plan.parent), flow.config,
-                        flow.mode, phase_session_id=phase, backend=backend)
+                        flow.mode, phase_session_id=phase, backend=backend, implementer_result=WorkingTreeResult())
 
 
 def _snapshot(flow):
     return {str(p.relative_to(flow.project)): p.read_bytes()
-            for p in flow.project.rglob("*") if p.is_file()}
+            for p in flow.project.rglob("*")
+            if p.is_file() and ".git" not in p.relative_to(flow.project).parts}
 
 
 def _assert_planner_assignment(call, flow):
-    assert call.role is AgentRole.PLANNER_REVIEWER
+    assert call.role is AgentRole.PLANNER
     assert flow.task.title in call.prompt
     assert flow.task.description in call.prompt
     assert f"Roadmap: {flow.roadmap} (line {flow.task.line_number + 1})" in call.prompt
     assert "Return the plan as your answer." in call.prompt
     assert str(flow.plan) not in call.prompt
-    names = ("execution", flow.mode.planner_prompt_name, "reviewer", "escalation")
+    names = ("execution", flow.mode.planner_prompt_name, "escalation")
     fragments = [_load_prompt(name) for name in names]
     assert all(call.instructions.count(fragment) == 1 for fragment in fragments)
     positions = [call.instructions.index(fragment) for fragment in fragments]
@@ -215,13 +256,13 @@ def test_legacy_adoption_exposes_complete_valid_boundary_before_first_role(flow,
 
     def inspect(call):
         data = _read_sessions(f.plan)
-        assert data == {**record, "runtime": "claude", "step": expected}
+        assert data == {**record, "runtime": role_runtimes("claude"), "step": expected}
         raise RuntimeError("observed first role")
 
     backend = FakeAgentBackend(on_call=inspect)
     with pytest.raises(RuntimeError, match="observed first role"):
         _run(f, backend)
-    assert replacements[0] == (f.plan.with_suffix(".json"), {**record, "runtime": "claude", "step": expected})
+    assert replacements[0] == (f.plan.with_suffix(".json"), {**record, "runtime": role_runtimes("claude"), "step": expected})
     assert len(replacements) == 1
 
 
@@ -248,7 +289,7 @@ def test_legacy_inference_and_stale_boundaries_normalize_atomically_before_calls
 
     def inspect(call):
         data = _read_sessions(f.plan)
-        assert data == {**record, "runtime": "claude", "step": expected}
+        assert data == {**record, "runtime": role_runtimes("claude"), "step": expected}
         if expected.startswith("planning:"):
             _assert_planner_assignment(call, f)
             assert call.session_id == record["planner"]
@@ -262,7 +303,7 @@ def test_legacy_inference_and_stale_boundaries_normalize_atomically_before_calls
         _run(f, FakeAgentBackend(on_call=inspect), phase="competing phase")
     records = [data for _, data in replacements]
     retained = raw == "plan_review_failed:01"
-    assert records[0] == {**record, "runtime": "claude", "step": raw if retained else expected}
+    assert records[0] == {**record, "runtime": role_runtimes("claude"), "step": raw if retained else expected}
     assert records[-1]["step"] == expected
     assert all(data["optional"] == record["optional"] and data["elapsed"] == "007" for data in records)
 
@@ -281,15 +322,15 @@ def test_tagged_artifact_fallback_replaces_stale_boundary_before_role(flow, repl
         _review(f, passed=review)
 
     def inspect(call):
-        assert _read_sessions(f.plan) == {**record, "step": expected}
+        assert _read_sessions(f.plan) == {**record, "runtime": role_runtimes(runtime), "step": expected}
         raise RuntimeError("observed tagged fallback")
 
     with pytest.raises(RuntimeError, match="observed tagged fallback"):
         _run(f, FakeAgentBackend(on_call=inspect))
-    assert replacements == [(f.plan.with_suffix(".json"), {**record, "step": expected})]
+    assert replacements == [(f.plan.with_suffix(".json"), {**record, "runtime": role_runtimes(runtime), "step": expected})]
 
 
-@pytest.mark.parametrize("passed,role", [(True, AgentRole.IMPLEMENTER), (False, AgentRole.PLANNER_REVIEWER)])
+@pytest.mark.parametrize("passed,role", [(True, AgentRole.IMPLEMENTER), (False, AgentRole.PLANNER)])
 def test_resume_reads_a_non_ascii_plan_review_as_written(flow, monkeypatch, passed, role):
     """A resume signal read of a non-ASCII plan review decides the boundary under a default
     text encoding that is not UTF-8: a passing review resumes at the implementer with the
@@ -382,7 +423,7 @@ def test_matching_owner_restores_only_continuing_ids_by_presence(flow, runtime, 
     _run(f, backend, phase=phase)
     impl, review = backend.calls
     assert impl.role is AgentRole.IMPLEMENTER and impl.session_id == saved_impl
-    assert review.role is AgentRole.PLANNER_REVIEWER and review.session_id == expected
+    assert review.role is AgentRole.CODE_REVIEWER and review.session_id is None
     assert all(call.session_id != "audit-only" for call in backend.calls)
     updated = _read_sessions(f.plan)
     assert updated["plan-reviewer-1"] == "audit-only"
@@ -400,8 +441,49 @@ def test_owner_mismatch_precedes_restore_and_artifact_fallback(flow, runtime, ow
     _review(f)
     backend = _backend(f)
     before = _snapshot(f)
-    with pytest.raises(HaltError, match="runtime does not match"):
+    with pytest.raises(HaltError, match="runtime does not match") as caught:
         _run(f, backend, phase="phase")
+    lines = str(caught.value).splitlines()
+    recorded = owner if owner is not None else "claude"
+    assert lines[1] == str(f.plan.with_suffix(".json"))
+    assert lines[2:] == [
+        f"Role: {role}; recorded: {{'runtime': '{recorded}'}}; selected: {{'runtime': '{runtime}'}}"
+        for role in ("planner", "plan_reviewer", "implementer", "code_reviewer")
+    ]
+    assert backend.calls == []
+    assert _snapshot(f) == before
+
+
+def test_a_role_absent_from_the_owner_record_takes_the_effective_entry(flow):
+    """A record whose owner object leaves roles out resumes with no halt: each absent
+    role reads as taking the run's runtime, and the run's writes keep the record valid."""
+    f = flow()
+    _seed(f, {"runtime": {"planner": {"runtime": "claude"}}, "step": "planned:1", "planner": "saved"})
+    _review(f)
+    backend = _backend(f)
+
+    _run(f, backend)
+
+    assert _read_sessions(f.plan)["step"] == "done"
+
+
+def test_an_instance_mismatch_halts_naming_the_role(flow):
+    """A role that would continue an identity under another Hermes instance halts
+    before any call, the message naming the role and both instances."""
+    f = flow()
+    f.config.roles = {"planner": {"runtime": "hermes", "instance": "this-one"}}
+    _seed(f, {"runtime": {"planner": {"runtime": "hermes", "instance": "other-one"}},
+              "step": "planned:1", "planner": "saved"})
+    _review(f)
+    backend = _backend(f)
+    before = _snapshot(f)
+
+    with pytest.raises(HaltError, match="runtime does not match") as caught:
+        _run(f, backend)
+
+    message = str(caught.value)
+    assert "Role: planner" in message
+    assert "'instance': 'other-one'" in message and "'instance': 'this-one'" in message
     assert backend.calls == []
     assert _snapshot(f) == before
 
@@ -444,9 +526,9 @@ def test_pending_round_two_replays_rooted_assignment_and_incoming_identity(flow,
             assert disk["step"] == "planned:2"
             assert int(disk["elapsed"]) >= 7
             assert call.session_id is None
-        elif call.role is AgentRole.PLANNER_REVIEWER:
+        elif call.role is AgentRole.PLANNER:
             expected_id = saved_id if saved_id is not None else phase
-            assert disk["runtime"] == runtime and disk["step"] == "planning:2"
+            assert disk["runtime"] == role_runtimes(runtime) and disk["step"] == "planning:2"
             assert disk.get("planner") == expected_id
             assert disk["elapsed"] == "007"
             assert call.session_id == expected_id
@@ -471,7 +553,7 @@ def test_pending_round_two_replays_rooted_assignment_and_incoming_identity(flow,
     assert review.role is AgentRole.PLAN_REVIEWER and review.session_id is None
     assert (f.prd / f"{f.plan.stem}-plan-review-2.md").read_text() == "PLAN_REVIEW_PASS"
     assert implement.session_id == "saved implementer"
-    assert verify.session_id == backend.returned[0]
+    assert verify.role is AgentRole.CODE_REVIEWER and verify.session_id is None
     assert _read_sessions(f.plan)["step"] == "done"
 
 
@@ -573,7 +655,8 @@ def test_flow_preserves_selected_prefix_for_every_artifact_and_isolates_segments
         assert [call.role for call in backend.calls] == [AgentRole.PLAN_REVIEWER, AgentRole.IMPLEMENTER]
     else:
         assert expected_output.read_text() == "REVIEW_PASS"
-        assert backend.calls[-1].session_id == "selected-planner"
+        assert backend.calls[-1].role is AgentRole.CODE_REVIEWER
+        assert backend.calls[-1].session_id is None
     assert _read_sessions(f.plan)["step"] == "done"
     implementer_answers = _artifact_dir(f.project, f.mode, "reviews")
     assert (implementer_answers / f"{f.plan.stem}-implementer-1.md").read_text() == "fake output"
@@ -640,12 +723,12 @@ def test_every_planning_call_records_current_identity_and_success_advances_befor
 
     def inspect(call):
         nonlocal planning_calls, review_calls
-        if call.role is AgentRole.PLANNER_REVIEWER and "Review the CODE CHANGES" not in call.prompt:
+        if call.role is AgentRole.PLANNER:
             planning_calls += 1
-            expected_id = " phase identity " if planning_calls == 1 else "planner_reviewer-sid-1"
+            expected_id = " phase identity " if planning_calls == 1 else "planner-sid-1"
             assert call.session_id == expected_id
             data = _read_sessions(f.plan)
-            assert data["runtime"] == runtime
+            assert data["runtime"] == role_runtimes(runtime)
             assert data["step"] == f"planning:{planning_calls}"
             assert data["planner"] == expected_id
             _assert_planner_assignment(call, f)
@@ -655,7 +738,7 @@ def test_every_planning_call_records_current_identity_and_success_advances_befor
             review_calls += 1
             data = _read_sessions(f.plan)
             assert data["step"] == f"planned:{review_calls}"
-            assert data["planner"] == f"planner_reviewer-sid-{1 if review_calls == 1 else 3}"
+            assert data["planner"] == f"planner-sid-{1 if review_calls == 1 else 3}"
             assert call.session_id is None
             if review_calls == 1:
                 return "Revise the actual plan"
@@ -667,8 +750,8 @@ def test_every_planning_call_records_current_identity_and_success_advances_befor
     assert observed[1]["plan-reviewer-1"] == "plan_reviewer-sid-2"
     assert _read_sessions(f.plan)["step"] == "done"
     pending = [record for _, record in replacements if record["step"].startswith("planning:")]
-    assert pending[0] == {"runtime": runtime, "step": "planning:1", "planner": " phase identity "}
-    assert any(record["step"] == "planning:2" and record["planner"] == "planner_reviewer-sid-1" for record in pending)
+    assert pending[0] == {"runtime": role_runtimes(runtime), "step": "planning:1", "planner": " phase identity "}
+    assert any(record["step"] == "planning:2" and record["planner"] == "planner-sid-1" for record in pending)
 
 
 @pytest.mark.parametrize("runtime", ["claude", "codex"])
@@ -704,7 +787,7 @@ def test_failed_planning_restarts_exact_group_round_and_known_incoming_identity(
         _assert_planner_assignment(call, f)
         assert call.session_id == incoming
         disk = _read_sessions(f.plan)
-        expected = {**data, "runtime": runtime, "step": f"planning:{round_number}"}
+        expected = {**data, "runtime": role_runtimes(runtime), "step": f"planning:{round_number}"}
         if incoming is not None:
             expected["planner"] = incoming
         assert disk == expected
@@ -737,7 +820,7 @@ def test_failed_planning_restarts_exact_group_round_and_known_incoming_identity(
         elif call.role is AgentRole.PLAN_REVIEWER:
             assert call.session_id is None
             assert _read_sessions(f.plan)["step"] == f"planned:{round_number}"
-            assert _read_sessions(f.plan)["planner"] == "planner_reviewer-sid-1"
+            assert _read_sessions(f.plan)["planner"] == "planner-sid-1"
         return delegate(call)
 
     replay.on_call = inspect_replay
@@ -749,7 +832,8 @@ def test_failed_planning_restarts_exact_group_round_and_known_incoming_identity(
     assert not f.plan.with_name(f"02-{f.task.slug}.json").exists()
     final = _read_sessions(f.plan)
     assert final["step"] == "done"
-    assert final["planner"] == ("planner_reviewer-sid-1" if test_mode else "planner_reviewer-sid-4")
+    assert final["planner"] == "planner-sid-1"
+    assert ("code-reviewer" in final) is (not test_mode)
     if data:
         assert final["optional"] == data["optional"]
         assert final["plan-reviewer-1"] == data["plan-reviewer-1"]
@@ -786,7 +870,7 @@ def test_failed_inline_revision_restarts_pending_round_with_latest_successful_id
         disk = _read_sessions(f.plan)
         if call.role is AgentRole.PLAN_REVIEWER:
             assert disk["step"] == f"planned:{initial_round}"
-            assert disk["planner"] == "planner_reviewer-sid-1"
+            assert disk["planner"] == "planner-sid-1"
             assert call.session_id is None
             return "Actual findings that require revision"
         _assert_planner_assignment(call, f)
@@ -795,10 +879,10 @@ def test_failed_inline_revision_restarts_pending_round_with_latest_successful_id
             assert call.session_id == ("saved before planning" if data else "first phase identity")
             assert disk["step"] == f"planning:{initial_round}"
             return delegate(call)
-        assert call.session_id == "planner_reviewer-sid-1"
-        assert disk["planner"] == "planner_reviewer-sid-1"
+        assert call.session_id == "planner-sid-1"
+        assert disk["planner"] == "planner-sid-1"
         assert disk["step"] == f"planning:{pending_round}"
-        assert disk["runtime"] == runtime
+        assert disk["runtime"] == role_runtimes(runtime)
         assert disk[f"plan-reviewer-{initial_round}"] == "plan_reviewer-sid-2"
         assert f"## Plan review\n\n{previous.read_text()}" in call.prompt
         if data:
@@ -828,7 +912,7 @@ def test_failed_inline_revision_restarts_pending_round_with_latest_successful_id
     def inspect_replay(call):
         if len(replay.calls) == 1:
             _assert_planner_assignment(call, f)
-            assert call.session_id == "planner_reviewer-sid-1"
+            assert call.session_id == "planner-sid-1"
             assert _read_sessions(f.plan) == pending_records[0]
             assert f"## Plan review\n\n{previous.read_text()}" in call.prompt
             assert future.exists() is plausible
@@ -847,7 +931,7 @@ def test_failed_inline_revision_restarts_pending_round_with_latest_successful_id
     assert _read_sessions(f.plan)["planner"] == "new successful replay identity"
     assert previous.read_text() == "Actual findings that require revision"
     assert not f.plan.with_name(f"02-{f.task.slug}.json").exists()
-    assert any(record["step"] == f"planning:{pending_round}" and record["planner"] == "planner_reviewer-sid-1"
+    assert any(record["step"] == f"planning:{pending_round}" and record["planner"] == "planner-sid-1"
                for _, record in replacements)
 
 
@@ -856,8 +940,8 @@ def test_planning_assignment_includes_supplied_roadmap_without_display_line(flow
     f = flow()
     review = _review(f) if feedback else f.prd / "missing-review.md"
     backend = FakeAgentBackend()
-    PlannerReviewer(f.project, backend).plan(f.task.title, f.task.description, f.plan,
-                                            plan_review_path=review, roadmap_path=f.roadmap)
+    Planner(f.project, backend).plan(f.task.title, f.task.description, f.plan,
+                                     plan_review_path=review, roadmap_path=f.roadmap)
     prompt = backend.calls[0].prompt
     assert f"Roadmap: {f.roadmap}\n" in prompt
     assert f.task.title in prompt and f.task.description in prompt
@@ -876,7 +960,9 @@ def test_tagged_completed_missing_review_can_infer_in_budget_dispatch(flow, runt
     assert backend.calls[0].role is AgentRole.PLAN_REVIEWER
     assert backend.calls[0].session_id is None
     assert (f.prd / f"{f.plan.stem}-plan-review-1.md").read_text() == "PLAN_REVIEW_PASS"
-    assert backend.calls[-1].session_id == "saved"
+    assert backend.calls[-1].role is AgentRole.CODE_REVIEWER
+    assert backend.calls[-1].session_id is None
+    assert _read_sessions(f.plan)["planner"] == "saved"
 
 
 def test_legacy_inferred_over_budget_stops_before_backend_and_sidecar_creation(flow):
@@ -946,7 +1032,51 @@ def test_plan_review_budget_zero_flows_planner_to_implementer_without_review(flo
     _run(f, backend)
 
     assert [call.role for call in backend.calls] == [
-        AgentRole.PLANNER_REVIEWER, AgentRole.IMPLEMENTER, AgentRole.PLANNER_REVIEWER,
+        AgentRole.PLANNER, AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER,
     ]
     assert list(f.prd.glob("*-plan-review-*.md")) == []
     assert _read_sessions(f.plan)["step"] == "done"
+
+
+_HEAD_ENTRY = {"runtime": "head", "head": {
+    "repository": "/repos/the-project", "owner": "max", "folder": "r-d",
+}}
+
+
+def test_a_head_entry_in_the_owner_record_is_accepted(flow):
+    f = flow()
+    f.config.roles = {
+        "planner": {"runtime": "head", "head": dict(_HEAD_ENTRY["head"])},
+        "plan_reviewer": {"runtime": "claude"},
+        "implementer": {"runtime": "claude"},
+        "code_reviewer": {"runtime": "claude"},
+    }
+    from orchestrator.config import role_runtimes
+    _seed(f, {"step": "planned:1", "planner": "saved",
+              "runtime": role_runtimes(f.config.runtime, f.config.roles)})
+    _review(f)
+
+    _run(f, _backend(f))
+
+    assert f.plan.with_suffix(".json").exists()  # no halt: the record's head entry reads
+
+
+def test_a_resume_whose_role_s_head_address_differs_halts_naming_the_role(flow):
+    f = flow()
+    f.config.roles = {
+        "planner": {"runtime": "head", "head": dict(_HEAD_ENTRY["head"])},
+        "plan_reviewer": {"runtime": "claude"},
+        "implementer": {"runtime": "claude"},
+        "code_reviewer": {"runtime": "claude"},
+    }
+    recorded = dict(_HEAD_ENTRY)
+    recorded["head"] = {"repository": "/repos/another", "owner": "max", "folder": "r-d"}
+    _seed(f, {"step": "planned:1", "planner": "saved", "runtime": {"planner": recorded}})
+    _review(f)
+    before = _snapshot(f)
+
+    with pytest.raises(HaltError, match="runtime does not match") as caught:
+        _run(f, _backend(f))
+
+    assert "planner" in str(caught.value)
+    assert _snapshot(f) == before

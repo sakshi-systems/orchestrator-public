@@ -17,9 +17,10 @@ from pathlib import Path
 import pytest
 
 import signal
+import subprocess
 
 from orchestrator import git_runner
-from orchestrator.git_runner import GitError, run_git
+from orchestrator.git_runner import GitError, run_git, run_git_sync
 
 from tests.conftest import GitStand, git_in
 
@@ -492,3 +493,55 @@ def test_member_pid_raises_when_nothing_is_written(
     with pytest.raises(AssertionError) as raised:
         asyncio.run(scenario())
     assert str(raised.value) == f"no pid was written to {pid_file}"
+
+
+def test_run_git_sync_raises_for_a_call_past_its_bound(
+        git_stand: GitStand,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(git_runner, "SYNC_GIT_TIMEOUT", 0.5)
+    monkeypatch.setenv("GIT_SSH_COMMAND", "sh -c 'sleep 30'")
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_git_sync(["ls-remote", "ssh://nowhere/repo.git"],
+                     cwd=git_stand.checkout)
+
+
+def test_run_git_sync_returns_a_failed_process_without_raising(
+        git_stand: GitStand) -> None:
+    completed = run_git_sync(["rev-parse", "--verify", "refs/heads/absent"],
+                             cwd=git_stand.checkout)
+
+    assert completed.returncode != 0
+    assert isinstance(completed.stderr, str)
+    assert completed.stderr  # a call that writes to standard error on every machine
+
+
+def test_run_git_sync_reads_the_repository_in_cwd_not_an_ambient_one(
+        git_stand: GitStand, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    other = tmp_path / "other"
+    git_in(tmp_path, "clone", str(git_stand.origin), str(other))
+    (other / "file.txt").write_text("another repository's work\n", encoding="utf-8")
+    git_in(other, "add", "-A")
+    git_in(other, "commit", "-q", "-m", "the other repository's commit")
+
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git" / "index"))
+
+    resolved = run_git_sync(["rev-parse", "HEAD"], cwd=git_stand.checkout)
+
+    assert resolved.returncode == 0
+    assert resolved.stdout.strip() == git_stand.main_commit
+
+
+def test_run_git_sync_treats_a_named_pathspec_as_a_literal_path(
+        git_stand: GitStand) -> None:
+    (git_stand.checkout / "plain.txt").write_text("plain\n", encoding="utf-8")
+    (git_stand.checkout / "*.txt").write_text("the literal one\n", encoding="utf-8")
+    run_git_sync(["add", "--", "plain.txt", "*.txt"], cwd=git_stand.checkout)
+
+    listed = run_git_sync(["ls-files", "--", "*.txt"], cwd=git_stand.checkout)
+
+    assert listed.returncode == 0
+    assert listed.stdout.splitlines() == ["*.txt"]

@@ -26,30 +26,34 @@ ORCHESTRATOR_CONFIG=/path/to/my-config.json uv run orchestrator implement /path/
 | Key | Default | Meaning |
 |---|---|---|
 | `max_iterations` | `3` | The iteration limit for code review and the test run, and for plan review unless `plan_review_iterations` is set — an integer of at least 1, checked at startup with a diagnostic that names the file that supplies it. See [pipeline.md](../pipeline.md). |
-| `plan_review_iterations` | absent | The number of plan reviews a plan gets, a non-negative integer. Absent, plan review takes `max_iterations`; `0` turns plan review off. See [The plan-review budget](../pipeline.md#the-plan-review-budget). |
-| `task_reviewer` | `"run"` | Who reviews a task in implement mode: `"run"`, the run's reviewer, or `"head"`, the head that ordered the task, so a task ends with the implementer's turn. Test mode's real test run is unaffected. See [Who reviews a task](../pipeline.md#who-reviews-a-task). |
-| `usage_threshold_5h` | `90` | Threshold, a finite number, for a reported five-hour window of the selected runtime. See [usage-limits.md](../features/usage-limits.md). |
-| `usage_threshold_weekly` | `95` | Threshold, a finite number, for a reported weekly window of the selected runtime. See [usage-limits.md](../features/usage-limits.md). |
-| `enable_phase_sessions` | `false` | Whether the `PlannerReviewer` session carries over between tasks within a phase, a JSON boolean. See [phase-sessions.md](../features/phase-sessions.md). |
+| `plan_review_iterations` | absent | The number of plan reviews a plan gets, a non-negative integer. Absent, plan review takes `max_iterations`; `0` turns plan review off. Not read when `planning` is `false`. See [The plan-review budget](../pipeline.md#the-plan-review-budget). |
+| `planning` | `true` | Whether the run plans, a JSON boolean. `false` lays the task's spec at the plan's path in place of a plan and turns plan review off with it. See [Planning is a stage a project can switch off](../pipeline.md#planning-is-a-stage-a-project-can-switch-off). |
+| `usage_threshold_5h` | `90` | Threshold, a finite number, for a reported five-hour window of each local runtime a role takes. See [usage-limits.md](../features/usage-limits.md). |
+| `usage_threshold_weekly` | `95` | Threshold, a finite number, for a reported weekly window of each local runtime a role takes. See [usage-limits.md](../features/usage-limits.md). |
+| `enable_phase_sessions` | `false` | Whether the planner's session carries over between tasks within a phase, a JSON boolean. See [phase-sessions.md](../features/phase-sessions.md). |
 | `roadmap_path` | absent | Which roadmap the orchestrator reads. See [named-roadmaps.md](../features/named-roadmaps.md). |
-| `runtime` | `claude` | Optional runtime selector: exactly `claude` or `codex`. See [Runtime selection](../features/agent-runtime.md#runtime-selection). |
+| `runtime` | `claude` | Optional runtime selector: exactly `claude` or `codex`. It is the default for every role of the run. See [Runtime selection](../features/agent-runtime.md#runtime-selection). |
+| `roles` | absent | The runtime of each role of the run that does not take the default: an object keyed by role. See [A role's runtime](#a-roles-runtime). |
+| `hermes_instances` | absent | The map of Hermes instances a role may name, in the base file only. See [Hermes instances](#hermes-instances). |
 | `claude_agents` | per role, below | Model and effort of each role when the runtime is `claude`: an object keyed by role. See [Agent defaults](#agent-defaults). |
 | `codex_agents` | per role, below | Model and effort of each role when the runtime is `codex`: an object keyed by role. See [Agent defaults](#agent-defaults). |
 
 The required keys of the base are validated after the merge and never converted: `max_iterations` is an integer, not a boolean, of at least 1; `usage_threshold_5h` and `usage_threshold_weekly` are finite numbers, integer or fractional, not booleans, `null` or strings, so `NaN` and `Infinity` are errors, and no range is required of them; `enable_phase_sessions` is a JSON boolean and nothing else, so `"false"`, `0` and `1` are errors. A quoted number is a string and is rejected. A violation exits naming the key, the value, the requirement and the file that supplies it, the base or the overlay.
 
-`plan_review_iterations` and `task_reviewer` are validated after the merge too. Only an absent key takes its default; for `plan_review_iterations` a negative number, a boolean, a non-integer, a string or `null` is a configuration error, and for `task_reviewer` anything but `"run"` or `"head"` is, each naming the file that supplies the value. At its start the run prints, after the agent lines, `Task reviewer: <run | head | test run>` and `Plan review iterations: <the effective number>`, the setting when `plan_review_iterations` is set and `max_iterations` otherwise; a run on the defaults prints them too.
+`plan_review_iterations` and `planning` are validated after the merge too. Only an absent key takes its default; for `plan_review_iterations` a negative number, a boolean, a non-integer, a string or `null` is a configuration error, and for `planning` anything but a JSON boolean is, each naming the file that supplies the value.
 
-`runtime` is validated after the existing base/overlay merge. Only an absent key uses its default; an empty string, `null`, a non-string or any other value is a configuration error. The visible startup label is `Agent runtime:`. Under it the run prints one line per role, in the order `planner_reviewer`, `plan_reviewer`, `implementer`, of the form `<role key>: <model> (<effort>)` with two leading spaces, giving the values the run uses.
+`task_reviewer` is not a setting: who reviews a task is the runtime of the `code_reviewer` role. A merged configuration that carries the key is a configuration error naming the file that supplies it and pointing to `roles.code_reviewer`.
+
+`runtime` is validated after the existing base/overlay merge. Only an absent key uses its default; an empty string, `null`, a non-string or any other value is a configuration error. The visible startup label is `Agent runtime:`. Under it the run prints one line per role of the run, in the order `planner`, `plan_reviewer`, `implementer`, `code_reviewer`, with two leading spaces: the role's runtime with the model and effort the run uses for a role on Claude or Codex, the instance for a role on Hermes and the address for a role on a head. Who reviews a task is the `code_reviewer` line. After the role lines the run prints `Planning: on|off`, and, when planning is on, `Plan review iterations: <the effective number>`, the setting when `plan_review_iterations` is set and `max_iterations` otherwise; a run on the defaults prints them too.
 
 ## Agent defaults
 
-A role's model and effort are settings, one block per runtime: `claude_agents` and `codex_agents`. Each is an object keyed by role — `planner_reviewer`, `plan_reviewer` and `implementer` — whose value holds `model` and `effort`. The tables below are the defaults; a role left out of a block takes its default. The runtime stays the one `runtime` key, and the block of the runtime that is not selected stays in the file, unused. Their application belongs to [Agent runtime](../features/agent-runtime.md#runtime-selection); session policies belong to [Pipeline](../pipeline.md#agent-sessions).
+A role's model and effort are settings, one block per runtime: `claude_agents` and `codex_agents`, applying to the roles that run on Claude or Codex; a role on Hermes or on a head carries none. Each is an object keyed by the run's role, the same four as [`roles`](#a-roles-runtime) — `planner`, `plan_reviewer`, `implementer` and `code_reviewer` — whose value holds `model` and `effort`. A role reads its own entry in the block of its own runtime, the code reviewer under planning off included. The tables below are the defaults; a role left out of a block takes its default. The block of a runtime that no role takes stays in the file, unused. Their application belongs to [Agent runtime](../features/agent-runtime.md#runtime-selection); session policies belong to [Pipeline](../pipeline.md#agent-sessions).
 
 ```json
 {
   "claude_agents": { "implementer": { "model": "sonnet", "effort": "high" } },
-  "codex_agents": { "planner_reviewer": { "model": "gpt-6.1-sol", "effort": "high" } }
+  "codex_agents": { "planner": { "model": "gpt-6.1-sol", "effort": "high" } }
 }
 ```
 
@@ -59,15 +63,16 @@ Claude defaults:
 
 | Role | Key | Model | Effort |
 |---|---|---|---|
-| PlannerReviewer | `planner_reviewer` | `opus` | `high` |
+| Planner | `planner` | `opus` | `high` |
 | PlanReviewer | `plan_reviewer` | `opus` | `high` |
 | Implementer | `implementer` | `sonnet` | `high` |
+| CodeReviewer | `code_reviewer` | `opus` | `high` |
 
 The Claude native allowed-tool lists are fixed adapter values, not part of the setting:
 
 | Role | Native allowed-tool list |
 |---|---|
-| PlannerReviewer | `Read`, `Write`, `Glob`, `Grep`, `Bash` |
+| Planner, CodeReviewer | `Read`, `Write`, `Glob`, `Grep`, `Bash` |
 | PlanReviewer | `Read`, `Write`, `Glob`, `Grep`, `Bash` |
 | Implementer | `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep` |
 
@@ -77,9 +82,30 @@ Codex defaults; native command and diagnostic values live in [Codex runtime](cod
 
 | Role | Key | Model | Effort |
 |---|---|---|---|
-| PlannerReviewer | `planner_reviewer` | `gpt-6.1-sol` | `high` |
+| Planner | `planner` | `gpt-6.1-sol` | `high` |
 | PlanReviewer | `plan_reviewer` | `gpt-6.1-sol` | `high` |
 | Implementer | `implementer` | `gpt-6.1-sol` | `high` |
+| CodeReviewer | `code_reviewer` | `gpt-6.1-sol` | `high` |
+
+## A role's runtime
+
+`roles` is an object keyed by the run's role — `planner`, `plan_reviewer`, `implementer` and `code_reviewer` — whose value names the role's runtime. A role the object leaves out takes `runtime`.
+
+| Value | Meaning |
+|---|---|
+| `{"runtime": "claude"}` or `{"runtime": "codex"}` | The role runs on that local runtime. |
+| `{"runtime": "hermes", "instance": <name>}` | The role is taken by the named Hermes instance, which takes every role, the implementer only where git tracks the project's `.ai-factory` (Hermes takes any role inside the run, the refusal). |
+| `{"runtime": "head", "head": {"repository": <path>, "owner": <slug>, "folder": <NN>}}` | The role is taken by the head at that address, which takes every role but the implementer (A head takes a role of the run). |
+
+`roles` is validated after the merge, like `runtime`: an unknown role name, a value that is not an object, a runtime other than the four, a Hermes role without an `instance` or one that `hermes_instances` does not hold, a head role without a complete address, a head whose `repository` the filesystem cannot name (a NUL character, or text that does not encode to the filesystem's encoding), a head named for the implementer and a Hermes implementer where git does not track the project's `.ai-factory` (the refusal) are each a configuration error naming the file that supplies the value. A role that names another runtime in the overlay replaces `roles` wholesale, as every key does.
+
+A head's address lives where the role is named, in the project's overlay, `<project>/.ai-factory/orchestrator.json`. Whether the overlay is tracked is the project's own `.gitignore` choice, and the `repository` path is a path on this machine. When the run starts it reads the address of each head a role names, and one the locator cannot read halts the run before any task (A head takes a role of the run).
+
+The pre-task usage check runs for each local runtime, Claude and Codex, that any role of the run takes; a Hermes instance and a head carry none ([Usage limits](../features/usage-limits.md#selected-pre-task-check)).
+
+## Hermes instances
+
+`hermes_instances` is an object in the machine's base `orchestrator.json`, and only there: a project's overlay that carries it is a configuration error. It maps an instance's name to `{"server", "port", "key_file"}`, the server to reach, its port and the path of the file holding the key that opens his API. The key stays in its file and is never printed or copied. The file holds one key: surrounding whitespace and a trailing line break are ignored, and a file with no key, with whitespace, a line break or another control character inside the key, or with a character outside latin-1 is a configuration fault that names the file and never the key, raised before any request. The values are the stand's and are written in no repository.
 
 ## Per-project overlay
 
