@@ -12,7 +12,7 @@ The same stoppage falls into one of these two categories by a single criterion: 
 
 ## Invariants
 
-1. **The attempt budget is finite.** The review cycle — plan and code — has a fixed iteration limit. Exhausting it without a PASS signal is a failure, a verdict on the work, notified red as `task-fail`. There is no other way to "fail" a task; a review always follows the implementer's turn ([Who reviews a task](../pipeline.md#who-reviews-a-task)).
+1. **The attempt budget is finite.** The review cycle — plan and code — has a fixed iteration limit. Exhausting it without a PASS signal is a failure, a verdict on the work, notified red as `task-fail`. There is no other way to "fail" a task; a verification always follows the implementer's turn, the review in implement mode and the test run in test mode ([Who reviews a task](../pipeline.md#who-reviews-a-task)).
 2. **Failure, halt, and escalation are signalled differently to the operator.** The outcome is visible from the operator notification colour, not merely from the fact that the run ended. The colour-to-event binding, and how to enable notifications, live in [configuration.md](../reference/configuration.md).
 3. **Transient faults are absorbed.** Recoverable failures — an API overload, a brief network error — are not surfaced immediately: the call is retried a bounded number of times. Only a persistent fault surfaces outward as a halt.
 4. **Any halt is resumable.** An interrupted run — for any reason — leaves state on disk sufficient for the next run to continue from the last completed phase, not from the start of the task. Resume mechanics are described in [resume.md](../features/resume.md).

@@ -70,6 +70,17 @@ class IterationState(NamedTuple):
     ref: str
 
 
+class PlannerProtocol(Protocol):
+    """The plan stage's port: write the task's plan file at `plan_path`.
+
+    `session_id` is `None` where the implementation holds none.
+    """
+
+    session_id: str | None
+
+    def plan(self, task_title: str, task_description: str, plan_path: Path, plan_review_path: Path | None = None, roadmap_path: Path | None = None, line_number: int | None = None) -> None: ...
+
+
 class VerifierProtocol(Protocol):
     """Given the plan and output path, write the verify artifact and report pass or fail by its completion signal."""
 

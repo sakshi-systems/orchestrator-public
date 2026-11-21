@@ -983,3 +983,36 @@ def test_load_config_plan_review_iterations_absent_is_none(tmp_path, monkeypatch
     """Should read None when the key is absent from both files."""
     _write_config(tmp_path, monkeypatch)
     assert load_config().plan_review_iterations is None
+
+
+# planning: a JSON boolean, absent true
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None, []])
+@pytest.mark.parametrize("source", ["base", "overlay"])
+def test_load_config_planning_type_violations_raise_system_exit(tmp_path, monkeypatch, value, source):
+    """Should reject a string, a number, null and a list naming the key and the supplying file."""
+    _assert_required_key_rejected(tmp_path, monkeypatch, "planning", value, "must be a boolean", source)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_load_config_planning_bools_load_as_read(tmp_path, monkeypatch, value):
+    """Should hold true and false as given."""
+    _write_config(tmp_path, monkeypatch, {"planning": value})
+    assert load_config().planning is value
+
+
+def test_load_config_planning_absent_is_true(tmp_path, monkeypatch):
+    """Should read true when the key is absent from both files."""
+    _write_config(tmp_path, monkeypatch)
+    assert load_config().planning is True
+
+
+@pytest.mark.parametrize("base,overlay,expected", [(True, False, False), (False, True, True)])
+def test_load_config_planning_overlay_wins(tmp_path, monkeypatch, base, overlay, expected):
+    """The overlay's value wins over the base's."""
+    _write_config(tmp_path, monkeypatch, {"planning": base})
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_override(project_dir, {"planning": overlay})
+    assert load_config(project_dir).planning is expected

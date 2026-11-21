@@ -225,9 +225,12 @@ def test_a_deposit_that_cannot_be_written_is_refused_in_one_line(tmp_path, monke
         raise PermissionError(13, "Permission denied")
 
     monkeypatch.setattr(answer, "deposit", _refuse)
-    code = _cli(monkeypatch, capsys, [str(tmp_path / "deposits" / "x.answer")], b"the answer")
+    directory = tmp_path / "deposits"
+    directory.mkdir()
+    code = _cli(monkeypatch, capsys, [str(directory / "x.answer")], b"the answer")
 
     assert code == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert len(captured.err.strip().splitlines()) == 1
+    assert "Permission denied" in captured.err

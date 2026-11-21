@@ -3,22 +3,30 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable, NamedTuple
 
 from .agents import REVIEW_VERIFY, TEST_RUN_VERIFY, CodeReviewer, Implementer, Planner, PlanReviewer
-from .config import OrchestratorConfig, role_runtimes
+from .config import _ALL_ROLES, OrchestratorConfig, role_runtimes
 from .errors import EscalationError, PipelineStopError
 from .exchange import remove_task
+from .git_runner import run_git_sync
+from .implementer_result import ref_name_of
 from .iteration_ref import make_iteration_commit, push_iteration_ref, remove_iteration_refs
 from .notify import Outcome, report
-from .ports import AgentBackendProtocol, ImplementerResultProtocol, VerifyKind
+from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, PlannerProtocol, VerifyKind
 from .protocol import _read_artifact, _read_sessions, _write_session, _write_sessions
 from .resume import _attempt_budget, _check_attempt, _detect_step, _interpret_step, _validate_sidecar_step, plan_review_budget
 from .roadmap import mark_done, parse_roadmap
 from .runtime import _run_summary
 from . import state
+
+
+def _make_llm_planner(project_dir: Path, backend: AgentBackendProtocol, prompt_name: str) -> PlannerProtocol:
+    """The plan stage with a planner: plan in a session of its own."""
+    return Planner(project_dir, backend, planner_prompt_name=prompt_name)
 
 
 class Mode(NamedTuple):
@@ -28,6 +36,8 @@ class Mode(NamedTuple):
     planner_prompt_name: str
     verify: VerifyKind
     artifact_subdir: str | None = None  # per-roadmap artifact dir segment; None = flat (default pair)
+    make_planner: Callable[[Path, AgentBackendProtocol, str], PlannerProtocol] = _make_llm_planner
+    roles: tuple[AgentRole, ...] = _ALL_ROLES
 
 
 IMPLEMENT_MODE = Mode(
@@ -64,22 +74,40 @@ def _artifact_dir(project_dir: Path, mode: Mode, dirname: str) -> Path:
     return base / mode.artifact_subdir if mode.artifact_subdir else base
 
 
+def _raise_git_failure(result: subprocess.CompletedProcess) -> None:
+    """Fail a scrubbed git call the way ``check=True`` failed: the captured
+    standard error, when the call holds one, goes to the console first, as
+    git wrote it — a call left uncaptured has already put it there directly —
+    then the completed process raises its ``CalledProcessError`` — the
+    command, the status and the captured output aboard."""
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    result.check_returncode()
+
+
 def _git_commit(project_dir: Path, task_title: str) -> None:
     """Stage all changes and commit after a completed task."""
-    subprocess.run(["git", "add", "-A"], cwd=project_dir, check=True)
+    _raise_git_failure(run_git_sync(["add", "-A"], cwd=project_dir))
     # Check if there's anything to commit
-    result = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"], cwd=project_dir,
-    )
+    result = run_git_sync(["diff", "--cached", "--quiet"], cwd=project_dir)
     if result.returncode == 0:
         print(">>> Nothing to commit, skipping.")
         return
-    subprocess.run(["git", "commit", "-m", task_title], cwd=project_dir, check=True)
+    # The commit runs the target project's own hooks, so its duration is
+    # theirs: it takes no bound.  It reads none of git's output either,
+    # so the two streams stay uncaptured — a hook's background job then
+    # holds no pipe the commit waits for.
+    _raise_git_failure(run_git_sync(
+        ["commit", "-m", task_title], cwd=project_dir, timeout=None,
+        capture=False,
+    ))
     print(f">>> COMMITTED: {task_title}")
 
-    push_result = subprocess.run(
-        ["git", "push", "-u", "origin", "HEAD"], cwd=project_dir,
-    )
+    try:
+        push_result = run_git_sync(["push", "-u", "origin", "HEAD"], cwd=project_dir)
+    except subprocess.TimeoutExpired:
+        print(">>> WARNING: git push failed, continuing anyway.")
+        return
     if push_result.returncode != 0:
         print(">>> WARNING: git push failed, continuing anyway.")
 
@@ -95,7 +123,7 @@ def _record_planning(plan_path: Path, runtimes: dict[str, dict[str, str]], attem
 def process_task(project_dir: Path, task, task_index: int, config: OrchestratorConfig, mode: Mode = IMPLEMENT_MODE, phase_session_id: str | None = None, *, backend: AgentBackendProtocol, implementer_result: ImplementerResultProtocol) -> str | None:
     """Plan → implement → verify loop for a single task (verify = review, or a real test run in test mode)."""
     max_iterations = config.max_iterations
-    runtimes = role_runtimes(config.runtime, config.roles)
+    runtimes = role_runtimes(config.runtime, config.roles, mode.roles)
     plans_dir = _artifact_dir(project_dir, mode, "plans")
     output_dir = _artifact_dir(project_dir, mode, mode.verify.output_dirname)
     plan_reviews_dir = _artifact_dir(project_dir, mode, "plan-reviews")
@@ -115,7 +143,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     step, counter, plan_path = _detect_step(
         seq, task.slug, plan_path, plan_reviews_dir, output_dir, mode.verify,
         max_iterations=max_iterations, runtimes=runtimes,
-        plan_review_iterations=config.plan_review_iterations,
+        plan_review_iterations=config.plan_review_iterations, planning=config.planning,
     )
     seq = plan_path.stem.split("-", 1)[0]
 
@@ -133,7 +161,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     if step == "escalated":
         raise EscalationError(sessions.get("escalation", "(no escalation detail recorded)"))
 
-    _check_attempt(step, counter, *_attempt_budget(step, max_iterations, config.plan_review_iterations))
+    _check_attempt(step, counter, *_attempt_budget(step, max_iterations, config.plan_review_iterations, config.planning))
 
     raw_boundary = sessions.get("step", "")
     valid_boundary = _interpret_step(raw_boundary, mode.verify) is not None and _validate_sidecar_step(
@@ -150,7 +178,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         _write_sessions(plan_path, {"runtime": runtimes, "step": boundary})
 
     # Create agents
-    planner = Planner(project_dir, backend, planner_prompt_name=mode.planner_prompt_name)
+    planner = mode.make_planner(project_dir, backend, mode.planner_prompt_name)
     code_reviewer = CodeReviewer(project_dir, backend)
     implementer = Implementer(
         project_dir, backend,
@@ -197,7 +225,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
                     f"Last review: {plan_review_path}\n\n{_read_artifact(plan_review_path)}"
                 )
 
-            _check_attempt("plan", attempt + 1, *_attempt_budget("plan", max_iterations, config.plan_review_iterations))
+            _check_attempt("plan", attempt + 1, *_attempt_budget("plan", max_iterations, config.plan_review_iterations, config.planning))
             print(">>> Plan has issues — revising plan...")
             _write_session(plan_path, "step", f"plan_review_failed:{attempt}")
             _record_planning(plan_path, runtimes, attempt + 1, planner.session_id)
@@ -223,8 +251,8 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
             _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
 
         print(f"\n>>> {mode.verify.running_header} (iteration {iteration})...")
-        subprocess.run(["git", "add", "-A"], cwd=project_dir, check=True)
-        iteration_state = make_iteration_commit(project_dir, plan_path.stem, iteration)
+        _raise_git_failure(run_git_sync(["add", "-A"], cwd=project_dir))
+        iteration_state = make_iteration_commit(project_dir, ref_name_of(project_dir, plan_path), iteration)
         push_iteration_ref(project_dir, iteration_state)
         out_path = output_dir / f"{seq}-{task.slug}{mode.verify.output_suffix.format(n=iteration)}"
         prev_out_path = None

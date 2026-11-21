@@ -106,6 +106,23 @@ def test_a_hermes_role_carries_no_role_settings():
     assert all(settings[role] == local.role_settings[role] for role in settings)
 
 
+def test_role_settings_hold_the_roles_the_record_holds():
+    """A record of two roles yields the two roles' settings, however the flow narrowed it."""
+    claude = FakeAgentBackend()
+    codex = FakeAgentBackend(sid="codex-sid")
+    runtimes = role_runtimes(
+        "claude", {"code_reviewer": {"runtime": "codex"}},
+        (AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER),
+    )
+    backend = RoleRoutedBackend({"claude": claude, "codex": codex}, runtimes)
+
+    settings = backend.role_settings
+
+    assert list(settings) == [AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER]
+    assert settings[AgentRole.IMPLEMENTER] == claude.role_settings[AgentRole.IMPLEMENTER]
+    assert settings[AgentRole.CODE_REVIEWER] == codex.role_settings[AgentRole.CODE_REVIEWER]
+
+
 def test_the_routed_backend_forwards_the_exchange_and_the_key_recipe_names_a_head():
     from orchestrator.role_backend import RoleRoutedBackend, backend_key
 

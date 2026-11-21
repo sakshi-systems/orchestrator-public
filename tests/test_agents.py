@@ -17,6 +17,7 @@ from orchestrator.agents import (
     Implementer,
     PlanReviewer,
     Planner,
+    SpecLayer,
     TestRunner,
     _load_prompt,
 )
@@ -1733,3 +1734,208 @@ def test_each_role_passes_the_exchange_its_artifact_gives(tmp_path):
 
     Implementer(tmp_path, backend, result=WorkingTreeResult()).implement(plan_path, answer_path)
     assert backend.calls[-1].exchange is None  # the implementer passes none
+
+
+# ---------------------------------------------------------------------------
+# SpecLayer: the plan stage without a planner
+# ---------------------------------------------------------------------------
+
+_SPEC_TITLE = "Runtime task"
+_SPEC_TEXT = "# The task's spec\n\nBuild it — über/plain, no trailing newline"
+
+
+def _spec_project(tmp_path: Path, text: str = _SPEC_TEXT) -> Path:
+    spec = tmp_path / ".ai-factory" / "specs" / "01-thing.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_text(text, encoding="utf-8")
+    return spec
+
+
+def _spec_description(relpath: str = ".ai-factory/specs/01-thing.md") -> str:
+    return f"Do the work. Spec: `{relpath}`."
+
+
+def test_spec_layer_lays_the_spec_byte_exact_under_the_plan_heading(tmp_path):
+    """The laid file is the plan's heading, a blank line, then the spec's bytes unchanged."""
+    _spec_project(tmp_path)
+    plan = tmp_path / "plans" / "01-slug.md"
+
+    SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), plan)
+
+    assert plan.read_bytes() == f"# Plan: {_SPEC_TITLE}\n\n{_SPEC_TEXT}".encode("utf-8")
+
+
+def test_spec_layer_lays_a_spec_without_a_trailing_newline_and_non_ascii_text(tmp_path):
+    """A spec's trailing newline, or its lack, and its non-ASCII text are kept."""
+    _spec_project(tmp_path, "spec ends without newline: ünïcödé")
+    plan = tmp_path / "plans" / "01-slug.md"
+
+    SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), plan)
+
+    assert plan.read_bytes() == b"# Plan: Runtime task\n\nspec ends without newline: \xc3\xbcn\xc3\xafc\xc3\xb6d\xc3\xa9"
+
+
+def test_spec_layer_takes_the_last_of_two_tags(tmp_path):
+    """A description with two tags lays the spec the last one names."""
+    first = tmp_path / ".ai-factory" / "specs" / "01-first.md"
+    second = tmp_path / ".ai-factory" / "specs" / "02-second.md"
+    first.parent.mkdir(parents=True)
+    first.write_text("first spec", encoding="utf-8")
+    second.write_text("second spec", encoding="utf-8")
+    plan = tmp_path / "plans" / "01-slug.md"
+    description = (
+        f"Earlier note. Spec: `{first.relative_to(tmp_path).as_posix()}`. "
+        f"Later note. Spec: `{second.relative_to(tmp_path).as_posix()}`."
+    )
+
+    SpecLayer(tmp_path).plan(_SPEC_TITLE, description, plan)
+
+    assert plan.read_text(encoding="utf-8") == f"# Plan: {_SPEC_TITLE}\n\nsecond spec"
+
+
+def test_spec_layer_ignores_the_other_arguments_and_repeats_the_same_bytes(tmp_path):
+    """plan_review_path, roadmap_path and line_number are ignored, and a repeated call leaves the same file."""
+    _spec_project(tmp_path)
+    layer = SpecLayer(tmp_path)
+    plan = tmp_path / "plans" / "01-slug.md"
+
+    layer.plan(_SPEC_TITLE, _spec_description(), plan,
+               plan_review_path=tmp_path / "plan-reviews" / "01.md",
+               roadmap_path=tmp_path / ".ai-factory" / "ROADMAP.md", line_number=7)
+    first = plan.read_bytes()
+    layer.plan(_SPEC_TITLE, _spec_description(), plan,
+               plan_review_path=tmp_path / "plan-reviews" / "02.md",
+               roadmap_path=None, line_number=None)
+
+    assert plan.read_bytes() == first
+    assert layer.session_id is None
+
+
+@pytest.mark.parametrize("description", [
+    "Do the work with no tag at all.",
+    "Do the work. Spec: .ai-factory/specs/01-thing.md. — a tag without backticks is no tag",
+])
+def test_spec_layer_without_a_tag_halts_naming_the_task(tmp_path, description):
+    """A description whose last tag is absent halts; the contract line never stands in."""
+    _spec_project(tmp_path)
+    with pytest.raises(HaltError) as caught:
+        SpecLayer(tmp_path).plan(_SPEC_TITLE, description, tmp_path / "plans" / "01-slug.md")
+    first_line = str(caught.value).splitlines()[0]
+    assert _SPEC_TITLE in first_line
+    assert "no spec" in first_line
+
+
+def test_spec_layer_refuses_a_path_outside_the_factory(tmp_path):
+    """A tag naming a path that does not begin .ai-factory/ halts naming the task and the cause."""
+    with pytest.raises(HaltError) as caught:
+        SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description("specs/01-thing.md"),
+                                 tmp_path / "plans" / "01-slug.md")
+    lines = str(caught.value).splitlines()
+    assert _SPEC_TITLE in lines[0]
+    assert "outside .ai-factory/" in lines[0]
+    assert lines[1] == "specs/01-thing.md"
+
+
+def test_spec_layer_refuses_a_dot_dot_segment(tmp_path):
+    """A tag holding a '..' segment halts naming the task and the cause, even under .ai-factory/."""
+    (tmp_path / "outside.md").write_text("secret", encoding="utf-8")
+    with pytest.raises(HaltError) as caught:
+        SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(".ai-factory/../outside.md"),
+                                 tmp_path / "plans" / "01-slug.md")
+    lines = str(caught.value).splitlines()
+    assert _SPEC_TITLE in lines[0]
+    assert "'..' segment" in lines[0]
+    assert lines[1] == ".ai-factory/../outside.md"
+
+
+def test_spec_layer_refuses_a_missing_file(tmp_path):
+    """A tag whose file does not exist halts naming the task and the cause."""
+    with pytest.raises(HaltError) as caught:
+        SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), tmp_path / "plans" / "01-slug.md")
+    lines = str(caught.value).splitlines()
+    assert _SPEC_TITLE in lines[0]
+    assert "no spec file" in lines[0]
+    assert lines[1] == str(tmp_path / ".ai-factory" / "specs" / "01-thing.md")
+
+
+def test_spec_layer_refuses_a_spec_that_is_not_utf8(tmp_path):
+    """A spec that cannot be read as UTF-8 halts naming the task and the cause."""
+    spec = tmp_path / ".ai-factory" / "specs" / "01-thing.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_bytes(b"# spec\n\xff\xfe not utf-8\n")
+    with pytest.raises(HaltError) as caught:
+        SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), tmp_path / "plans" / "01-slug.md")
+    lines = str(caught.value).splitlines()
+    assert _SPEC_TITLE in lines[0]
+    assert "not UTF-8" in lines[0]
+    assert lines[1] == str(spec)
+
+
+def _spec_bytes_project(tmp_path: Path, data: bytes) -> Path:
+    """Stand the spec file with exact bytes."""
+    spec = tmp_path / ".ai-factory" / "specs" / "01-thing.md"
+    spec.parent.mkdir(parents=True)
+    spec.write_bytes(data)
+    return spec
+
+
+def test_spec_layer_lays_a_spec_with_carriage_returns_byte_exact(tmp_path):
+    """`a\r\nb\rc\r\n` keeps its carriage returns: the spec's bytes are the plan's bytes."""
+    _spec_bytes_project(tmp_path, b"a\r\nb\rc\r\n")
+    plan = tmp_path / "plans" / "01-slug.md"
+
+    SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), plan)
+
+    assert plan.read_bytes() == f"# Plan: {_SPEC_TITLE}\n\n".encode("utf-8") + b"a\r\nb\rc\r\n"
+
+
+def test_spec_layer_lays_a_spec_with_a_byte_order_mark_unchanged(tmp_path):
+    """A byte-order mark is a spec's byte like any other and is kept."""
+    _spec_bytes_project(tmp_path, "﻿spec with a mark\n".encode("utf-8"))
+    plan = tmp_path / "plans" / "01-slug.md"
+
+    SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), plan)
+
+    assert plan.read_bytes() == f"# Plan: {_SPEC_TITLE}\n\n".encode("utf-8") + "﻿spec with a mark\n".encode("utf-8")
+
+
+@pytest.mark.parametrize("content", [b"", b"  \n\t\n", "  \xa0\t\n".encode("utf-8")])
+def test_spec_layer_refuses_an_empty_spec(tmp_path, content):
+    """A spec that is empty or only whitespace halts naming the task, and no plan file is written."""
+    _spec_bytes_project(tmp_path, content)
+    plan = tmp_path / "plans" / "01-slug.md"
+
+    with pytest.raises(HaltError) as caught:
+        SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), plan)
+
+    lines = str(caught.value).splitlines()
+    assert lines[0] == f"The task '{_SPEC_TITLE}' has an empty spec"
+    assert lines[1] == str(tmp_path / ".ai-factory" / "specs" / "01-thing.md")
+    assert not plan.exists()
+
+
+def test_spec_layer_refuses_a_directory_at_the_specs_path(tmp_path):
+    """A directory at the spec's path is a read failure, not a missing file."""
+    (tmp_path / ".ai-factory" / "specs" / "01-thing.md").mkdir(parents=True)
+
+    with pytest.raises(HaltError) as caught:
+        SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), tmp_path / "plans" / "01-slug.md")
+
+    lines = str(caught.value).splitlines()
+    assert lines[0] == f"The task '{_SPEC_TITLE}' has a spec that cannot be read"
+    assert lines[1] == str(tmp_path / ".ai-factory" / "specs" / "01-thing.md")
+
+
+def test_spec_layer_reads_through_a_linked_factory_directory(tmp_path):
+    """.ai-factory may be a link out of the project: the path is read, never resolved."""
+    real = tmp_path / "elsewhere"
+    (real / "specs").mkdir(parents=True)
+    (real / "specs" / "01-thing.md").write_text("spec through the link", encoding="utf-8")
+    factory = tmp_path / ".ai-factory"
+    factory.rmdir()  # the file's autouse _factory_dir stands down for the link
+    factory.symlink_to(real, target_is_directory=True)
+    plan = tmp_path / "plans" / "01-slug.md"
+
+    SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), plan)
+
+    assert plan.read_text(encoding="utf-8") == f"# Plan: {_SPEC_TITLE}\n\nspec through the link"

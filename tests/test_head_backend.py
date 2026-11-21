@@ -110,6 +110,54 @@ def test_the_message_holds_the_turn_the_instructions_the_assignment_and_the_comm
     assert str(paths.answer) in how_to
 
 
+def test_a_space_in_each_path_does_not_split_the_command_line_the_head_runs(tmp_path, monkeypatch):
+    """The message's command line, taken from between the backticks of
+    `## How to answer` and run through `sh -c` as the head would run it,
+    deposits the answer when the answer command's directory and the exchange
+    root each hold a space: both paths reach the head quoted for the shell."""
+    import shlex
+    import subprocess
+
+    from orchestrator import exchange as exchange_module
+    from orchestrator import head_backend as head_backend_module
+
+    bin_directory = tmp_path / "answer bin"
+    bin_directory.mkdir()
+    script = bin_directory / "orchestrator-answer"
+    script.write_text(
+        "#!/bin/sh\n"
+        '[ "$#" -eq 1 ] || { echo "one deposit path, no more" >&2; exit 1; }\n'
+        'cat > "$1"\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(head_backend_module, "answer_command", lambda: script)
+    monkeypatch.setattr(exchange_module, "_ROOT", tmp_path / "exchange root")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    paths = _paths_of(project)
+    sender = Sender(results=[SendResult(sent=False, reason="no agent is reachable")])
+    backend = _backend(project, sender)
+
+    with pytest.raises(HeadNotReachedError):  # the send fails with the message standing
+        _run(backend, project)
+
+    assert str(paths.answer).startswith(str(tmp_path / "exchange root"))  # a space in the root
+    message = paths.message.read_text(encoding="utf-8")
+    how_to = message.split("## How to answer", 1)[1]
+    command_line = how_to.split("`", 2)[1]
+    assert command_line == f"{shlex.quote(str(script))} {shlex.quote(str(paths.answer))}"
+
+    completed = subprocess.run(
+        ["sh", "-c", command_line], input="the head's answer\n",
+        text=True, capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert paths.answer.read_text(encoding="utf-8") == "the head's answer\n"
+
+
 def test_a_send_writes_the_marker_and_a_non_send_raises_the_halt(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

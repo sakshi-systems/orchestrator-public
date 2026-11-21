@@ -64,10 +64,12 @@ class RoleRoutedBackend:
     @property
     def role_settings(self) -> Mapping[AgentRole, RoleSetting]:
         """Each local-runtime role's resolved settings, from the backend of that
-        role's runtime, in role order; a role on Hermes or a head carries none."""
+        role's runtime, over the roles the record holds, in the record's order;
+        a role on Hermes or a head carries none."""
         settings: dict[AgentRole, RoleSetting] = {}
-        for role in AgentRole:
-            if self._runtimes[role.value]["runtime"] in ("hermes", "head"):
+        for name in self._runtimes:
+            role = AgentRole(name)
+            if self._runtimes[name]["runtime"] in ("hermes", "head"):
                 continue
             settings[role] = cast(_RoleSettingsBackend, self._backend_of(role)).role_settings[role]
         return MappingProxyType(settings)

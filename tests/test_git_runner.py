@@ -65,6 +65,30 @@ async def _member_pid(pid_file: Path) -> int:
     raise AssertionError(f"no pid was written to {pid_file}")
 
 
+def _poll_sync(predicate, limit: float = 8.0) -> bool:
+    """The synchronous twin of ``_poll``."""
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.1)
+    return predicate()
+
+
+def _written_pid(pid_file: Path, limit: float = 5.0) -> int:
+    """The synchronous twin of ``_member_pid``: the pid a member wrote
+    once it is running; the wait fails when nothing is written."""
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if pid_file.exists():
+            text = pid_file.read_text(encoding="utf-8")
+            pid = text.strip()
+            if text.endswith("\n") and pid.isdecimal():
+                return int(pid)
+        time.sleep(0.05)
+    raise AssertionError(f"no pid was written to {pid_file}")
+
+
 def test_git_returns_its_output_with_standard_error_merged(
         git_stand: GitStand) -> None:
     async def scenario() -> tuple[str, str]:
@@ -220,8 +244,11 @@ def test_a_call_past_its_timeout_raises_and_leaves_no_member(
 def test_a_member_ignoring_term_is_killed(git_stand: GitStand,
                                           tmp_path: Path) -> None:
     pid_file = tmp_path / "member.pid"
+    # A true empty trap action (the quote dance): the escaped-quotes
+    # spelling reaches the inner shell as a two-character action it
+    # runs and exits on, so the member would die of the TERM itself.
     alias = (f"alias.hang=!sh -c 'echo $$ > {pid_file}; "
-             "trap \"\" 15; sleep 300'")
+             "trap '\\'''\\'' 15; sleep 300'")
 
     async def scenario() -> None:
         with pytest.raises(GitError):
@@ -495,15 +522,122 @@ def test_member_pid_raises_when_nothing_is_written(
     assert str(raised.value) == f"no pid was written to {pid_file}"
 
 
-def test_run_git_sync_raises_for_a_call_past_its_bound(
-        git_stand: GitStand,
+def test_run_git_sync_raises_for_a_call_past_its_bound_and_ends_the_ssh_process_it_started(
+        git_stand: GitStand, tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch) -> None:
+    pid_file = tmp_path / "ssh.pid"
     monkeypatch.setattr(git_runner, "SYNC_GIT_TIMEOUT", 0.5)
-    monkeypatch.setenv("GIT_SSH_COMMAND", "sh -c 'sleep 30'")
+    monkeypatch.setenv("GIT_SSH_COMMAND",
+                       f"sh -c 'echo $$ > {pid_file}; sleep 30'")
 
-    with pytest.raises(subprocess.TimeoutExpired):
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as raised:
         run_git_sync(["ls-remote", "ssh://nowhere/repo.git"],
                      cwd=git_stand.checkout)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 10.0  # the module's bound, not the 120 it holds
+    assert raised.value.timeout == 0.5
+    pid = _written_pid(pid_file)
+    assert _poll_sync(lambda: _gone(pid))
+
+
+def test_a_sync_call_past_its_bound_kills_a_member_ignoring_term(
+        git_stand: GitStand, tmp_path: Path) -> None:
+    pid_file = tmp_path / "member.pid"
+    # The quote dance hands the inner shell a true empty trap action:
+    # ``trap "" 15`` spelled with escaped quotes reaches it as a
+    # two-character action the shell runs and then exits on, so the
+    # member would die of the TERM and no escalation would be seen.
+    alias = (f"alias.hang=!sh -c 'echo $$ > {pid_file}; "
+             "trap '\\'''\\'' 15; sleep 300'")
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_git_sync(["-c", alias, "hang"], cwd=git_stand.checkout,
+                     timeout=1.0)
+
+    pid = _written_pid(pid_file)
+    assert _poll_sync(lambda: _gone(pid))
+
+
+def test_a_sync_call_past_its_bound_ends_a_grandchild_it_started(
+        git_stand: GitStand, tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    alias = (f"alias.hang=!sh -c 'sleep 300 & echo $! > {pid_file}; "
+             "wait'")
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_git_sync(["-c", alias, "hang"], cwd=git_stand.checkout,
+                     timeout=1.0)
+
+    pid = _written_pid(pid_file)
+    assert _poll_sync(lambda: _gone(pid))
+
+
+def test_a_sync_call_past_its_bound_waits_for_no_process_outside_the_group(
+        git_stand: GitStand, tmp_path: Path) -> None:
+    """The ending reaps git and closes its captured pipes without
+    reading them: a hook's helper that left the group under its own
+    session and holds the inherited pipe cannot keep the call open past
+    its bound and the grace — the raise comes at the bound, not at the
+    escapee's lifetime."""
+    member = tmp_path / "member.pid"
+    outside = tmp_path / "outside.pid"
+    escapee = tmp_path / "escapee.py"
+    escapee.write_text(
+        "import os, sys, time\n"
+        "os.setsid()\n"
+        "with open(sys.argv[1], 'w') as handle:\n"
+        "    handle.write(str(os.getpid()) + '\\n')\n"
+        "time.sleep(20)\n",
+        encoding="utf-8")
+    alias = (f"alias.hang=!sh -c 'echo $$ > {member}; "
+             f"python3 {escapee} {outside} & "
+             "trap '\\'''\\'' 15; sleep 300'")
+
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_git_sync(["-c", alias, "hang"], cwd=git_stand.checkout,
+                     timeout=1.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0 + git_runner._KILL_GRACE + 2.0
+    assert _poll_sync(lambda: _gone(_written_pid(member)))
+
+    # The escapee left git's group and outlives the call by design; end
+    # it here so the test leaves nothing behind.
+    try:
+        os.kill(_written_pid(outside), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def test_a_sync_call_takes_its_bound_from_the_call_not_the_module_constant(
+        git_stand: GitStand, tmp_path: Path) -> None:
+    """The module's constant stays at its 120; a member that ends after
+    the call's own bound still raises, so the number the call carries is
+    the bound it runs under."""
+    alias = "alias.slow=!sh -c 'sleep 1.2; echo done'"
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_git_sync(["-c", alias, "slow"], cwd=git_stand.checkout,
+                     timeout=1.0)
+
+
+def test_a_sync_call_with_no_bound_returns_git_s_result(
+        git_stand: GitStand,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """``timeout=None`` waits with no bound: a member that outlives the
+    module's lowered constant still runs to its end and the call
+    returns git's result."""
+    monkeypatch.setattr(git_runner, "SYNC_GIT_TIMEOUT", 0.5)
+    alias = "alias.slow=!sh -c 'sleep 1.2; echo done'"
+
+    completed = run_git_sync(["-c", alias, "slow"], cwd=git_stand.checkout,
+                             timeout=None)
+
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == "done"
 
 
 def test_run_git_sync_returns_a_failed_process_without_raising(

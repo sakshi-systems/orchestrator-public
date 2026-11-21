@@ -27,24 +27,32 @@ class OrchestratorConfig:
     claude_agents: dict[str, dict[str, str]] = field(default_factory=dict)
     codex_agents: dict[str, dict[str, str]] = field(default_factory=dict)
     plan_review_iterations: int | None = None
+    planning: bool = True
     roles: dict[str, dict[str, str]] = field(default_factory=dict)
     hermes_instances: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 AGENT_RUNTIMES = ("claude", "codex")
 
+_ALL_ROLES = tuple(AgentRole)
 
-def role_runtimes(runtime: str, roles: Mapping[str, Mapping[str, str]] | None = None) -> dict[str, dict[str, str]]:
-    """The effective runtime of each of the run's four roles, as a record keyed by role.
 
-    A role the `roles` object names takes that runtime; every role it leaves out
-    takes the run's `runtime`. Each entry names the role's runtime — the shape
-    the sidecar's `runtime` record holds.
+def role_runtimes(
+    runtime: str,
+    roles: Mapping[str, Mapping[str, str]] | None = None,
+    wanted: tuple[AgentRole, ...] = _ALL_ROLES,
+) -> dict[str, dict[str, str]]:
+    """The effective runtime of each role the run has, as a record keyed by role.
+
+    The record holds the roles `wanted` — the roles the run has. A role the
+    `roles` object names takes that runtime; every role it leaves out takes
+    the run's `runtime`. Each entry names the role's runtime — the shape the
+    sidecar's `runtime` record holds.
     """
     block = roles if roles is not None else {}
     return {
         role.value: dict(block.get(role.value, {"runtime": runtime}))
-        for role in AgentRole
+        for role in wanted
     }
 
 
@@ -251,6 +259,15 @@ def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
             )
         plan_review_iterations = value
 
+    planning = True
+    if "planning" in data:
+        planning = data["planning"]
+        if not isinstance(planning, bool):
+            raise SystemExit(
+                f"Invalid 'planning' in {_supplying('planning')}: "
+                f"{planning!r} (must be a boolean)"
+            )
+
     if "task_reviewer" in data:
         raise SystemExit(
             f"Invalid 'task_reviewer' in {_supplying('task_reviewer')}: "
@@ -298,4 +315,5 @@ def load_config(project_dir: Path | None = None) -> OrchestratorConfig:
         claude_agents=agent_blocks["claude_agents"],
         codex_agents=agent_blocks["codex_agents"],
         plan_review_iterations=plan_review_iterations,
+        planning=planning,
     )

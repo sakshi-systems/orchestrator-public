@@ -3,6 +3,7 @@ wait, with no bound, for the answer deposited by the head's own command."""
 
 from __future__ import annotations
 
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -87,7 +88,8 @@ class HeadAgentBackend:
             "",
             "## How to answer",
             "",
-            f"Give the result to the command `{command} {paths.answer}`, whose input is the "
+            f"Give the result to the command "
+            f"`{shlex.quote(str(command))} {shlex.quote(str(paths.answer))}`, whose input is the "
             "result: pipe the result into that command. Your reply in this chat is not read. "
             "Where the instructions call the last message the result, this is it.",
             "",

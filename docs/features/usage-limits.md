@@ -2,7 +2,7 @@
 
 ## Selected pre-task check
 
-Implement and test runs use the pre-task usage policy of each local runtime, Claude and Codex, that any role of the run takes, selected at [assembly](../../orchestrator/main.py); a Hermes instance and a head taking a role carry no usage policy. The shared loop invokes that policy after selecting a pending task and its sequence, before task processing begins. An empty or completed queue performs no quota probe. Task execution follows [Pipeline](../pipeline.md) and the existing [stop semantics](../concepts/fault-handling.md#the-known-faults).
+Implement and test runs use the pre-task usage policy of each local runtime, Claude and Codex, that any role of the run takes, selected at [assembly](../../orchestrator/main.py); a Hermes instance carries no usage policy of its own. A head counts as the runtime its address names: a Claude head adds the Claude check and a Codex head adds the Codex check, because the head's own turn spends that login, and a head that reaches its limit in the middle of a turn never deposits, so that the run waits with no bound; for Claude the courier's one-shot spends it too. The shared loop invokes that policy after selecting a pending task and its sequence, before task processing begins. An empty or completed queue performs no quota probe. Task execution follows [Pipeline](../pipeline.md) and the existing [stop semantics](../concepts/fault-handling.md#the-known-faults).
 
 ## Thresholds
 

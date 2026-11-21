@@ -21,10 +21,18 @@ from tests.conftest import git_in
 ESCALATION_ARTIFACT = "Some notes\n\n## Escalation\nMissing decision: pick A or B.\n\nESCALATION"
 BRANCH = "orchestrator/01-slug"
 REF = f"refs/remotes/origin/{BRANCH}"
+LAID = "refs/orchestrator-laid/01-slug"
 
 def _heads(origin: Path, branch: str) -> str:
     return subprocess.run(
         ["git", "ls-remote", "--heads", str(origin), f"refs/heads/{branch}"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _remote_ref(origin: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "ls-remote", str(origin), ref],
         capture_output=True, text=True,
     ).stdout.strip()
 
@@ -117,16 +125,22 @@ def test_the_channel_names_the_branch_and_how_to_reach_it(stand):
     assert BRANCH in continued and "Continue the branch" in continued and "base commit" not in continued
 
 
+ITERATION_REF = "refs/orchestrator/01-slug"  # an iteration ref origin holds under a name like the branch's
+
+
 def test_prepare_removes_a_leftover_branch_of_an_earlier_attempt(stand):
     git_in(stand.his, "push", str(stand.origin), f"{stand.base}:refs/heads/{BRANCH}")
     assert _heads(stand.origin, BRANCH)
-    git_in(stand.run, "fetch", "origin", BRANCH)  # an earlier attempt's fetch left the tracking ref
-    assert _ref_held(stand.run, REF)
+    git_in(stand.run, "update-ref", LAID, stand.base)  # an earlier attempt's lay left the laid ref
+    assert _ref_held(stand.run, LAID)
+    git_in(stand.his, "push", str(stand.origin), f"{stand.base}:{ITERATION_REF}")  # the run's iteration ref sits beside it
+    assert _remote_ref(stand.origin, ITERATION_REF)
 
     _result(stand).prepare(stand.factory / "plans" / "01-slug.md")
 
     assert _heads(stand.origin, BRANCH) == ""
-    assert not _ref_held(stand.run, REF)  # and its tip is not read as this task's previous lay
+    assert _remote_ref(stand.origin, ITERATION_REF)  # the similar-named iteration ref is not the branch
+    assert not _ref_held(stand.run, LAID)  # and its tip is not read as this task's previous lay
 
 
 def test_prepare_leaves_a_remote_that_holds_no_leftover_alone(stand):
@@ -220,10 +234,10 @@ def test_a_fix_iteration_s_lay_reverts_his_first_changes_through_the_previous_ti
         (his / "a.txt").write_text("first iteration\n")
         (his / "sub" / "s.txt").unlink()
     _push_his_branch(stand, first)
-    assert not _ref_held(stand.run, REF)  # a first lay with no remote-tracking ref lays from the base
+    assert not _ref_held(stand.run, LAID)  # a first lay with no laid ref lays from the base
     _result(stand).lay(stand.factory / "plans" / "01-slug.md")
     assert (stand.run / "a.txt").read_text() == "first iteration\n"
-    assert _ref_held(stand.run, REF)  # the first lay's fetch left the ref the second lay reads
+    assert _ref_held(stand.run, LAID)  # the first lay's advance left the ref the second lay reads
 
     def second(his):
         (his / "a.txt").write_text("second iteration\n")
@@ -238,6 +252,76 @@ def test_a_fix_iteration_s_lay_reverts_his_first_changes_through_the_previous_ti
     assert (stand.run / "a.txt").read_text() == "second iteration\n"
     assert (stand.run / "sub" / "s.txt").read_text() == "base sub\n"  # returned to the base's content
     assert git_in(stand.run, "rev-parse", "HEAD").strip() == stand.base
+
+
+def test_a_lay_that_fails_keeps_the_previous_tip(stand):
+    def first(his):
+        (his / "a.txt").write_text("first iteration\n")
+    _push_his_branch(stand, first)
+    first_tip = git_in(stand.his, "rev-parse", BRANCH).strip()
+    _result(stand).lay(stand.factory / "plans" / "01-slug.md")  # iteration 1's tip is laid
+    assert (stand.run / "a.txt").read_text() == "first iteration\n"
+    assert git_in(stand.run, "rev-parse", LAID).strip() == first_tip
+
+    def second(his):  # iteration 2 returns a.txt to the base's text, on top of iteration 1
+        (his / "a.txt").write_text("base\n")
+    second(stand.his)
+    git_in(stand.his, "add", "-A")
+    git_in(stand.his, "commit", "-m", "the fix returns his change")
+    second_tip = git_in(stand.his, "rev-parse", BRANCH).strip()
+    git_in(stand.his, "push", "origin", BRANCH)
+
+    lock = stand.run / ".git" / "index.lock"
+    lock.write_text("")
+    with pytest.raises(RuntimeError) as caught:
+        _result(stand).lay(stand.factory / "plans" / "01-slug.md")
+    assert str(caught.value).splitlines()[0] == "Hermes implementer branch could not be laid as the working tree"
+    assert (stand.run / "a.txt").read_text() == "first iteration\n"
+    assert git_in(stand.run, "rev-parse", LAID).strip() == first_tip  # the failed lay kept it
+    lock.unlink()
+
+    # The resumed call's base check fetches origin, which moves the tracking ref —
+    # a fetch is no writer of the laid ref, so the retry still sees iteration 1.
+    git_in(stand.run, "fetch", "origin")
+    assert git_in(stand.run, "rev-parse", REF).strip() == second_tip
+
+    _result(stand).lay(stand.factory / "plans" / "01-slug.md")
+
+    assert (stand.run / "a.txt").read_text() == "base\n"  # restored even after the fetch
+    assert git_in(stand.run, "rev-parse", LAID).strip() == second_tip
+
+
+def test_a_lay_that_halts_as_not_from_the_base_leaves_the_laid_ref_where_it_was(stand):
+    def first(his):
+        (his / "a.txt").write_text("first iteration\n")
+    _push_his_branch(stand, first)
+    first_tip = git_in(stand.his, "rev-parse", BRANCH).strip()
+    _result(stand).lay(stand.factory / "plans" / "01-slug.md")
+    assert git_in(stand.run, "rev-parse", LAID).strip() == first_tip
+
+    older = git_in(stand.his, "rev-parse", f"{stand.base}^").strip()
+    git_in(stand.his, "checkout", "-q", "-B", BRANCH, older)
+    (stand.his / "a.txt").write_text("cut from an older commit\n")
+    git_in(stand.his, "add", "-A")
+    git_in(stand.his, "commit", "-m", "his older work")
+    git_in(stand.his, "push", "--force", "origin", BRANCH)
+
+    with pytest.raises(BranchNotFromBaseError):
+        _result(stand).lay(stand.factory / "plans" / "01-slug.md")
+
+    assert git_in(stand.run, "rev-parse", LAID).strip() == first_tip  # kept where the last lay left it
+
+
+def test_a_lay_advances_the_laid_ref_and_writes_no_tracking_ref(stand):
+    def change(his):
+        (his / "a.txt").write_text("his version\n")
+    _push_his_branch(stand, change)
+    his_tip = git_in(stand.his, "rev-parse", BRANCH).strip()
+
+    _result(stand).lay(stand.factory / "plans" / "01-slug.md")
+
+    assert git_in(stand.run, "rev-parse", LAID).strip() == his_tip  # the fetched tip
+    assert not _ref_held(stand.run, REF)  # the lay's fetch wrote no tracking ref
 
 
 def test_a_tip_that_does_not_descend_from_the_base_halts(stand):
@@ -405,7 +489,7 @@ def test_a_single_branch_clone_still_reads_the_previous_tip(stand):
     _result(stand).lay(stand.factory / "plans" / "01-slug.md")
 
     assert (stand.run / "a.txt").read_text() == "first iteration\n"
-    assert _ref_held(stand.run, REF)  # the lay's fetch names its refspec, whatever the clone's says
+    assert _ref_held(stand.run, LAID)  # the lay advanced its own ref, whatever the clone's refspec is
 
     def second(his):
         git_in(his, "checkout", stand.base, "--", "sub/s.txt")
@@ -419,11 +503,10 @@ def test_a_single_branch_clone_still_reads_the_previous_tip(stand):
     assert (stand.run / "sub" / "s.txt").read_text() == "base sub\n"  # returned through the previous tip
 
 
-def test_a_held_lock_on_the_remote_tracking_ref_halts_the_preparation(stand):
-    git_in(stand.his, "push", str(stand.origin), f"{stand.base}:refs/heads/{BRANCH}")
-    git_in(stand.run, "fetch", "origin", BRANCH)
-    assert _ref_held(stand.run, REF)
-    lock = stand.run / ".git" / "refs" / "remotes" / "origin" / "orchestrator" / "01-slug.lock"
+def test_a_held_lock_on_the_laid_ref_halts_the_preparation(stand):
+    git_in(stand.run, "update-ref", LAID, stand.base)
+    assert _ref_held(stand.run, LAID)
+    lock = stand.run / ".git" / "refs" / "orchestrator-laid" / "01-slug.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("")
 
@@ -431,8 +514,8 @@ def test_a_held_lock_on_the_remote_tracking_ref_halts_the_preparation(stand):
         _result(stand).prepare(stand.factory / "plans" / "01-slug.md")
 
     lines = str(caught.value).splitlines()
-    assert lines[0] == "A leftover branch's remote-tracking ref could not be removed"
-    assert lines[1] == BRANCH
+    assert lines[0] == "A leftover branch's laid tip could not be removed"
+    assert lines[1] == LAID
     assert lines[2]
     lock.unlink()
     _result(stand).prepare(stand.factory / "plans" / "01-slug.md")  # a preparation with no ref halts nowhere
@@ -544,4 +627,8 @@ class FakeRecorder:
 
 
 def test_the_branch_name_is_the_plan_s_own_stem(stand):
-    assert branch_of(stand.factory / "plans" / "07-other-task.md") == "orchestrator/07-other-task"
+    assert branch_of(stand.run, stand.factory / "plans" / "07-other-task.md") == "orchestrator/07-other-task"
+    assert (
+        branch_of(stand.run, stand.factory / "plans" / "john-doe" / "07-other-task.md")
+        == "orchestrator/john-doe/07-other-task"
+    )

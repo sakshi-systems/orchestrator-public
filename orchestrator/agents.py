@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from pathlib import Path
 
-from .errors import EscalationError
+from .errors import EscalationError, HaltError
 from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, IterationState, VerifierProtocol, VerifyKind
 from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_artifact, _write_artifact, _write_session
 
@@ -133,6 +134,62 @@ class Planner:
             _write_session(plan_path, "escalation", f"planner: {excerpt} ({plan_path})")
             _write_session(plan_path, "step", "escalated")
             raise EscalationError(f"{plan_path}: {excerpt}")
+
+
+_SPEC_TAG = re.compile(r"Spec: `([^`]+)`")
+
+
+class SpecLayer:
+    """Lay the task's spec as the plan — the plan stage without a planner.
+
+    The spec is read from the project's `.ai-factory/` path without the path
+    ever being resolved, since `.ai-factory` may be a link out of the project,
+    and is laid unchanged under the plan's heading.
+    """
+
+    def __init__(self, project_dir: Path) -> None:
+        self.project_dir = project_dir
+        self.session_id: str | None = None
+
+    def plan(self, task_title: str, task_description: str, plan_path: Path, plan_review_path: Path | None = None, roadmap_path: Path | None = None, line_number: int | None = None) -> None:
+        """Lay the spec the task's description names as the plan file."""
+        tags = _SPEC_TAG.findall(task_description)
+        if not tags:
+            raise HaltError(
+                f"The task '{task_title}' names no spec: its description carries no 'Spec:' tag"
+            )
+        relpath = tags[-1]
+        if not relpath.startswith(".ai-factory/"):
+            raise HaltError(
+                f"The task '{task_title}' names its spec outside .ai-factory/\n{relpath}"
+            )
+        if ".." in relpath.split("/"):
+            raise HaltError(
+                f"The task '{task_title}' names its spec with a '..' segment\n{relpath}"
+            )
+        spec_path = self.project_dir / relpath
+        try:
+            data = spec_path.read_bytes()
+        except FileNotFoundError:
+            raise HaltError(
+                f"The task '{task_title}' has no spec file at its 'Spec:' tag\n{spec_path}"
+            ) from None
+        except OSError as e:
+            raise HaltError(
+                f"The task '{task_title}' has a spec that cannot be read\n{spec_path}\n{e}"
+            ) from None
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HaltError(
+                f"The task '{task_title}' has a spec that is not UTF-8\n{spec_path}"
+            ) from None
+        if not text.strip():
+            raise HaltError(
+                f"The task '{task_title}' has an empty spec\n{spec_path}"
+            )
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_bytes(f"# Plan: {task_title}\n\n".encode("utf-8") + data)
 
 
 class CodeReviewer:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import signal
@@ -13,6 +14,7 @@ from functools import partial
 from pathlib import Path
 from typing import Callable
 
+from .agents import SpecLayer
 from .claude_cli import ClaudeAgentBackend
 from .codex_cli import CodexAgentBackend
 from .config import OrchestratorConfig, load_config, role_runtimes
@@ -72,14 +74,16 @@ def _implementer_result(config: OrchestratorConfig, project_dir: Path, mode: Mod
 
 
 def _print_run_choices(config: OrchestratorConfig) -> None:
-    """Print the plan-review budget as a line of its own, after the agent lines."""
-    print(f"Plan review iterations: {plan_review_budget(config.max_iterations, config.plan_review_iterations)}")
+    """Print the stages the run runs after the agent lines: planning, and the plan-review budget when planning is on."""
+    print(f"Planning: {'on' if config.planning else 'off'}")
+    if config.planning:
+        print(f"Plan review iterations: {plan_review_budget(config.max_iterations, config.plan_review_iterations)}")
 
 
-def _make_runtime(config: OrchestratorConfig, project_dir: Path) -> tuple[AgentBackendProtocol, Callable[[], None]]:
-    """Construct one backend per runtime a role takes and bind the pre-task usage policy."""
+def _make_runtime(config: OrchestratorConfig, project_dir: Path, roles: tuple[AgentRole, ...]) -> tuple[AgentBackendProtocol, Callable[[], None]]:
+    """Construct one backend per runtime a role of the run takes and bind the pre-task usage policy."""
     print(f"Agent runtime: {config.runtime}")
-    runtimes = role_runtimes(config.runtime, config.roles)
+    runtimes = role_runtimes(config.runtime, config.roles, roles)
     taken = {entry["runtime"] for entry in runtimes.values()}
     heads: dict[str, HeadIdentity] = {}
     for entry in runtimes.values():
@@ -120,7 +124,7 @@ def _make_runtime(config: OrchestratorConfig, project_dir: Path) -> tuple[AgentB
         else:
             backends[key] = HeadAgentBackend(heads[key])
     backend = RoleRoutedBackend(backends, runtimes)
-    for role in AgentRole:
+    for role in roles:
         entry = runtimes[role.value]
         if entry["runtime"] == "hermes":
             print(f"  {role.value}: hermes {entry['instance']}")
@@ -152,7 +156,11 @@ def _test_loop(project_dir: Path, config: OrchestratorConfig) -> None:
         print(f"ERROR: No roadmap found at {roadmap_path}")
         sys.exit(1)
     mode = TEST_MODE._replace(roadmap_relpath=relpath, artifact_subdir=_artifact_subdir(relpath))
-    backend, usage_check = _make_runtime(config, project_dir)
+    if not config.planning:
+        # Test mode plans and reviews plans whatever the setting: the run hands
+        # on the stage it runs.
+        config = dataclasses.replace(config, planning=True)
+    backend, usage_check = _make_runtime(config, project_dir, mode.roles)
     implementer_result = _implementer_result(config, project_dir, mode)
     _print_run_choices(config)
     _run_dynamic_loop(
@@ -173,7 +181,15 @@ def _implement_loop(project_dir: Path, config: OrchestratorConfig, planner_promp
     mode = IMPLEMENT_MODE._replace(
         planner_prompt_name=planner_prompt_name, roadmap_relpath=relpath, artifact_subdir=_artifact_subdir(relpath),
     )
-    backend, usage_check = _make_runtime(config, project_dir)
+    if not config.planning:
+        # The planning-off assembly leaves the planner and the plan reviewer
+        # out of the run's roles and runs on a budget of 0.
+        mode = mode._replace(
+            make_planner=lambda project_dir, backend, prompt_name: SpecLayer(project_dir),
+            roles=(AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER),
+        )
+        config = dataclasses.replace(config, plan_review_iterations=0)
+    backend, usage_check = _make_runtime(config, project_dir, mode.roles)
     implementer_result = _implementer_result(config, project_dir, mode)
     _print_run_choices(config)
     _run_dynamic_loop(

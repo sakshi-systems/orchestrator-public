@@ -539,6 +539,64 @@ def test_a_base_commit_no_remote_branch_holds_halts(project, stand, key_file):
     assert stand.requests == []
 
 
+def test_a_base_commit_only_another_remote_holds_halts(project, stand, key_file):
+    (project.root / "elsewhere.txt").write_text("another remote's work\n")
+    git_in(project.root, "add", "-A")
+    git_in(project.root, "commit", "-m", "pushed to upstream only")
+    commit = git_in(project.root, "rev-parse", "HEAD").strip()
+    upstream = project.root.parent / "upstream.git"
+    git_in(project.root.parent, "init", "--bare", "-b", "main", str(upstream))
+    git_in(project.root, "remote", "add", "upstream", str(upstream))
+    git_in(project.root, "push", "upstream", "HEAD:refs/heads/main")
+    backend = _backend(stand, key_file)
+
+    with pytest.raises(BaseNotOnRemoteError) as caught:
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+
+    lines = str(caught.value).splitlines()
+    assert lines[0] == "The base commit is not on the remote"
+    assert lines[1] == commit
+    assert stand.requests == []
+
+
+def test_the_channel_names_a_url_with_credentials_without_them(project):
+    git_in(project.root, "remote", "set-url", "origin", "https://user:token@example.test/r.git")
+    text = hermes_api._channel_text(str(project.root), project.commit)
+    assert "https://example.test/r.git" in text
+    assert "user" not in text
+    assert "token" not in text
+    assert "@" not in text
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.test:8443/r.git",
+    "git@example.test:org/r.git",
+])
+def test_the_channel_names_urls_without_a_scheme_or_credentials_as_they_are(project, url):
+    git_in(project.root, "remote", "set-url", "origin", url)
+    text = hermes_api._channel_text(str(project.root), project.commit)
+    assert url in text
+
+
+@pytest.mark.parametrize("role", list(AgentRole))
+def test_every_role_s_channel_tells_him_where_his_clone_starts_and_to_fetch(
+    project, stand, key_file, role,
+):
+    stand.reply(body=_answer(), session="echoed-session")
+    backend = _backend(stand, key_file)
+
+    backend.run(role=role, prompt="the role's prompt", cwd=str(project.root), instructions="i")
+
+    (request,) = stand.requests
+    user = request.body["messages"][-1]["content"]
+    assert user.startswith("the role's prompt\n\nChannel: ")
+    assert (
+        "A commit or ref this message names is on origin: fetch it before you read it."
+        in user
+    )
+    assert "Read the project in your own clone" not in user
+
+
 def test_a_repository_with_no_origin_halts_at_the_first_call(tmp_path, stand, key_file):
     root = tmp_path / "lonely"
     git_in(tmp_path, "init", "-b", "main", str(root))

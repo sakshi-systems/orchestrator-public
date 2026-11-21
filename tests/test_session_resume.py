@@ -4,6 +4,7 @@ import io
 import json
 import os
 import subprocess
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ import pytest
 from orchestrator.errors import HaltError
 from orchestrator.protocol import _read_sessions, _write_artifact, _write_session, _write_sessions
 from orchestrator import pipeline
-from orchestrator.agents import Planner, _load_prompt
+from orchestrator.agents import Planner, SpecLayer, _load_prompt
 from orchestrator.config import OrchestratorConfig, role_runtimes
 from orchestrator.errors import EscalationError
 from orchestrator.layout import _artifact_subdir, _tests_sibling
@@ -121,12 +122,10 @@ def flow(tmp_path, monkeypatch):
     """Real task parsing and roles; external effects are isolated from the flow."""
     monkeypatch.setattr(pipeline, "_git_commit", lambda *args: None)
     monkeypatch.setattr(pipeline, "report", lambda *args: None)
-    monkeypatch.setattr(pipeline, "subprocess", SimpleNamespace(
-        run=lambda *args, **kwargs: subprocess.CompletedProcess(args, 0),
-    ))
     monkeypatch.setattr(pipeline.state, "tasks_done", 0)
     # The iteration's commit is real git: the flow's directory is a repository
-    # of its own, with an identity set.
+    # of its own, with an identity set — so the in-loop `git add -A` runs there
+    # too, against the real index.
     subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(tmp_path), check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=str(tmp_path), check=True)
@@ -1079,4 +1078,153 @@ def test_a_resume_whose_role_s_head_address_differs_halts_naming_the_role(flow):
         _run(f, _backend(f))
 
     assert "planner" in str(caught.value)
+    assert _snapshot(f) == before
+
+
+# ---------------------------------------------------------------------------
+# Planning off: the spec is the plan, the record passes planning:1 -> planned:1
+# ---------------------------------------------------------------------------
+
+_PLANNING_OFF_SPEC = "# The task's spec\n\nBuild it — über plain, trailing newline\n"
+_PLANNING_OFF_ROLES = (AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER)
+
+
+def _planning_off_flow(flow, *, description=None, spec_text=_PLANNING_OFF_SPEC):
+    """A flow whose mode and configuration are wired as the implement loop wires
+    them under planning false, over a task whose description carries the tag."""
+    f = flow(prefix="01")
+    if spec_text is not None:
+        spec = f.project / ".ai-factory" / "specs" / "01-thing.md"
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text(spec_text, encoding="utf-8")
+    if description is None:
+        description = "Do the work. Spec: `.ai-factory/specs/01-thing.md`."
+    f.roadmap.write_text(f"# Work\n\n- [ ] **Runtime task** — {description}\n")
+    task = parse_roadmap(f.roadmap).tasks[0]
+    mode = f.mode._replace(
+        make_planner=lambda project_dir, backend, prompt_name: SpecLayer(project_dir),
+        roles=_PLANNING_OFF_ROLES,
+    )
+    config = dataclasses.replace(f.config, planning=False, plan_review_iterations=0)
+    return SimpleNamespace(project=f.project, task=task, mode=mode, roadmap=f.roadmap,
+                           plan=f.plan, prd=f.prd, output=f.output, config=config)
+
+
+def test_a_fresh_task_under_planning_off_lays_the_spec_and_calls_two_roles(flow):
+    """planning:1 and planned:1 are recorded, the spec is laid at the plan's path, no
+    planner and no plan reviewer is called, no plan-review file exists, implementation
+    starts at iteration 1 and no phase identity carries."""
+    f = _planning_off_flow(flow)
+    backend = _backend(f)
+    records = []
+    real_replace = os.replace
+
+    def inspect(src, dst):
+        records.append(json.loads(Path(src).read_text()))
+        real_replace(src, dst)
+
+    f.plan.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch_replace = pytest.MonkeyPatch()
+    monkeypatch_replace.setattr("orchestrator.protocol.os.replace", inspect)
+    try:
+        result = _run(f, backend)
+    finally:
+        monkeypatch_replace.undo()
+
+    assert result is None
+    assert [call.role for call in backend.calls] == [AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER]
+    assert f.plan.read_bytes() == f"# Plan: Runtime task\n\n{_PLANNING_OFF_SPEC}".encode("utf-8")
+    assert (f.output / f"{f.plan.stem}-review-1.md").exists()  # the reviewer's artifact
+    assert list(f.prd.iterdir()) == []  # no plan-review file is written
+    steps = [record["step"] for record in records if "step" in record]
+    assert steps[:2] == ["planning:1", "planned:1"]
+    final = _read_sessions(f.plan)
+    assert final["step"] == "done"
+    assert final["runtime"] == role_runtimes("claude", {}, _PLANNING_OFF_ROLES)
+    assert "planner" not in final  # the laying holds no session
+
+
+def test_a_crash_between_the_laying_and_the_record_repeats_the_laying(flow):
+    """A record still at planning:1 lays the spec again, to the same bytes."""
+    f = _planning_off_flow(flow)
+    f.plan.parent.mkdir(parents=True, exist_ok=True)
+    f.plan.write_text("stale bytes from the interrupted round")
+    f.plan.with_suffix(".json").write_text(json.dumps({
+        "runtime": role_runtimes("claude", {}, _PLANNING_OFF_ROLES),
+        "step": "planning:1",
+    }))
+    backend = _backend(f)
+
+    _run(f, backend)
+
+    assert f.plan.read_bytes() == f"# Plan: Runtime task\n\n{_PLANNING_OFF_SPEC}".encode("utf-8")
+    assert [call.role for call in backend.calls] == [AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER]
+    assert _read_sessions(f.plan)["step"] == "done"
+
+
+def test_a_record_at_planned_one_resumes_into_implementation(flow):
+    """planned:1 resumes into implementation at iteration 1; a record past its
+    planning keeps its plan."""
+    f = _planning_off_flow(flow)
+    f.plan.parent.mkdir(parents=True, exist_ok=True)
+    sentinel = "# Plan: Runtime task\n\nthe spec as it was laid\n"
+    f.plan.write_text(sentinel)
+    f.plan.with_suffix(".json").write_text(json.dumps({
+        "runtime": role_runtimes("claude", {}, _PLANNING_OFF_ROLES),
+        "step": "planned:1",
+    }))
+    backend = _backend(f)
+
+    _run(f, backend)
+
+    assert f.plan.read_text() == sentinel
+    assert [call.role for call in backend.calls] == [AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER]
+    assert "the spec as it was laid" in backend.calls[0].prompt  # implementation, iteration 1
+    assert _read_sessions(f.plan)["step"] == "done"
+
+
+def test_a_task_with_no_tag_halts_before_any_role_call(flow):
+    """A description without the tag halts the run with the record at planning:1."""
+    f = _planning_off_flow(flow, description="Do the work with no tag at all.", spec_text=None)
+    backend = _backend(f)
+
+    with pytest.raises(HaltError) as caught:
+        _run(f, backend)
+
+    first_line = str(caught.value).splitlines()[0]
+    assert "Runtime task" in first_line
+    assert "no spec" in first_line
+    assert backend.calls == []
+    assert _read_sessions(f.plan)["step"] == "planning:1"
+
+
+@pytest.mark.parametrize("step,second_line", [
+    ("planning:2", "planning:2 attempt 2 exceeds planning (false)"),
+    ("planned:2", "planned:2 attempt 2 exceeds planning (false)"),
+    ("plan_review_failed:1", "plan attempt 2 exceeds planning (false)"),
+    ("plan_review_failed:2", "plan_review_failed:2 attempt 2 exceeds planning (false)"),
+])
+def test_a_planning_off_record_past_the_first_round_halts_naming_planning(flow, step, second_line):
+    """No round past the first can continue under planning off: the halt names the
+    planning setting, says how to continue, calls no role and writes nothing."""
+    f = _planning_off_flow(flow)
+    f.plan.parent.mkdir(parents=True, exist_ok=True)
+    f.plan.write_text("# Plan: Runtime task\n\nwhatever the round left\n")
+    f.plan.with_suffix(".json").write_text(json.dumps({
+        "runtime": role_runtimes("claude", {}, _PLANNING_OFF_ROLES),
+        "step": step,
+    }))
+    backend = _backend(f)
+    before = _snapshot(f)
+
+    with pytest.raises(HaltError) as caught:
+        _run(f, backend)
+
+    assert str(caught.value) == (
+        "Resume exceeds the attempt budget\n"
+        f"{second_line}\n"
+        "Roll the record back to planning:1, which lays the spec, "
+        "or set planning to true in orchestrator.json to continue."
+    )
+    assert backend.calls == []
     assert _snapshot(f) == before

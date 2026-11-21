@@ -16,7 +16,7 @@ from orchestrator import layout as layout_module
 from orchestrator import main as main_module
 from orchestrator import pipeline as pipeline_module
 from orchestrator import usage as usage_module
-from orchestrator.agents import REVIEW_VERIFY, TEST_RUN_VERIFY
+from orchestrator.agents import REVIEW_VERIFY, TEST_RUN_VERIFY, Planner, SpecLayer
 from orchestrator.errors import EscalationError, HaltError, HeadNotReachedError, PipelineStopError, RateLimitError
 from orchestrator.config import OrchestratorConfig, load_config, role_runtimes
 from orchestrator.layout import _artifact_subdir, _resolve_roadmap_relpath, _tests_sibling
@@ -1034,31 +1034,40 @@ def _config_with_roadmap_path(roadmap_path):
 
 
 def _fake_git_config(email=None, name=None, slug=None, script_returncode=None, script_stderr=""):
-    """Build a subprocess.run stand-in answering `git config user.email`/`user.name`
-    and the user-slug script call (any command not starting with `git`).
+    """Build the two stand-ins `_resolve_roadmap_relpath` needs: one answering
+    the git config reads (`run_git_sync`, a text CompletedProcess) and one
+    answering the user-slug script call (`subprocess.run`).
 
     The script call returns `script_returncode` when set, else the slug with exit 0
     when `slug` is set, else exit 2 (no derivable slug)."""
+    def _config(arguments, *, cwd, timeout=None):
+        key = arguments[-1]
+        value = email if key == "user.email" else name if key == "user.name" else None
+        if value is None:
+            return subprocess.CompletedProcess(["git", *arguments], 1, "", "")
+        return subprocess.CompletedProcess(["git", *arguments], 0, value, "")
+
     class _Result:
         def __init__(self, returncode, stdout, stderr=""):
             self.returncode = returncode
             self.stdout = stdout
             self.stderr = stderr
 
-    def _run(cmd, cwd=None, capture_output=None, text=None):
-        if cmd[0] != "git":
-            if script_returncode is not None:
-                return _Result(script_returncode, "", script_stderr)
-            if slug is not None:
-                return _Result(0, f"{slug}\n")
-            return _Result(2, "", "user-slug.sh: neither user.email nor user.name yields a slug …")
-        key = cmd[-1]
-        value = email if key == "user.email" else name if key == "user.name" else None
-        if value is None:
-            return _Result(1, "")
-        return _Result(0, value)
+    def _script(cmd, cwd=None, capture_output=None, text=None):
+        if script_returncode is not None:
+            return _Result(script_returncode, "", script_stderr)
+        if slug is not None:
+            return _Result(0, f"{slug}\n")
+        return _Result(2, "", "user-slug.sh: neither user.email nor user.name yields a slug …")
 
-    return _run
+    return _config, _script
+
+
+def _patch_git_identity(monkeypatch, **values):
+    """Patch the git config reads and the slug-script call with one stand-in pair."""
+    _config, _script = _fake_git_config(**values)
+    monkeypatch.setattr(layout_module, "run_git_sync", _config)
+    monkeypatch.setattr(layout_module.subprocess, "run", _script)
 
 
 def _install_slug_script(tmp_path, monkeypatch):
@@ -1082,7 +1091,7 @@ def test_resolve_roadmap_relpath_my_present_matching_owner(tmp_path, monkeypatch
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "john-doe.md").write_text("> Owner: john.doe@example.com\n\n- [ ] Task\n")
     _install_slug_script(tmp_path, monkeypatch)
-    monkeypatch.setattr(layout_module.subprocess, "run", _fake_git_config(email="john.doe@example.com", slug="john-doe"))
+    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
 
     config = _config_with_roadmap_path("my")
     assert _resolve_roadmap_relpath(config, tmp_path) == "roadmaps/john-doe.md"
@@ -1094,7 +1103,7 @@ def test_resolve_roadmap_relpath_my_name_derived_owner_matches(tmp_path, monkeyp
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "alice.md").write_text("> Owner: Alice\n\n- [ ] Task\n")
     _install_slug_script(tmp_path, monkeypatch)
-    monkeypatch.setattr(layout_module.subprocess, "run", _fake_git_config(email=None, name="Alice", slug="alice"))
+    _patch_git_identity(monkeypatch, email=None, name="Alice", slug="alice")
 
     config = _config_with_roadmap_path("my")
     assert _resolve_roadmap_relpath(config, tmp_path) == "roadmaps/alice.md"
@@ -1104,7 +1113,7 @@ def test_resolve_roadmap_relpath_my_missing_file_raises_halt(tmp_path, monkeypat
     """Should raise HaltError with a fixed first line and the expected path on a later line
     when the personal roadmap file is missing."""
     _install_slug_script(tmp_path, monkeypatch)
-    monkeypatch.setattr(layout_module.subprocess, "run", _fake_git_config(email="john.doe@example.com", slug="john-doe"))
+    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError) as exc:
@@ -1120,7 +1129,7 @@ def test_resolve_roadmap_relpath_my_owner_mismatch_raises_halt(tmp_path, monkeyp
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "john-doe.md").write_text("> Owner: someone.else@example.org\n\n- [ ] Task\n")
     _install_slug_script(tmp_path, monkeypatch)
-    monkeypatch.setattr(layout_module.subprocess, "run", _fake_git_config(email="john.doe@example.com", slug="john-doe"))
+    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError):
@@ -1134,7 +1143,7 @@ def test_resolve_roadmap_relpath_my_owner_mismatch_halt_has_fixed_first_line(tmp
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "john-doe.md").write_text("> Owner: someone.else@example.org\n\n- [ ] Task\n")
     _install_slug_script(tmp_path, monkeypatch)
-    monkeypatch.setattr(layout_module.subprocess, "run", _fake_git_config(email="john.doe@example.com", slug="john-doe"))
+    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError) as exc:
@@ -1154,7 +1163,7 @@ def test_resolve_roadmap_relpath_my_malformed_first_line_raises_halt(tmp_path, m
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "john-doe.md").write_text("# Not an owner line\n\n- [ ] Task\n")
     _install_slug_script(tmp_path, monkeypatch)
-    monkeypatch.setattr(layout_module.subprocess, "run", _fake_git_config(email="john.doe@example.com", slug="john-doe"))
+    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError):
@@ -1164,7 +1173,7 @@ def test_resolve_roadmap_relpath_my_malformed_first_line_raises_halt(tmp_path, m
 def test_resolve_roadmap_relpath_my_script_exit_2_raises_identity_halt(tmp_path, monkeypatch):
     """Should raise the identity HaltError when the script reports no derivable slug (exit 2)."""
     _install_slug_script(tmp_path, monkeypatch)
-    monkeypatch.setattr(layout_module.subprocess, "run", _fake_git_config(email=None, name=None))
+    _patch_git_identity(monkeypatch, email=None, name=None)
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError) as exc:
@@ -1177,9 +1186,7 @@ def test_resolve_roadmap_relpath_my_missing_script_raises_halt(tmp_path, monkeyp
     """Should halt with a fixed first line and the script path below when the script is not installed."""
     missing = tmp_path / "nowhere" / "user-slug.sh"
     monkeypatch.setattr(layout_module, "_USER_SLUG_SCRIPT", missing)
-    monkeypatch.setattr(
-        layout_module.subprocess, "run", _fake_git_config(email="john.doe@example.com", slug="john-doe"),
-    )
+    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError) as exc:
@@ -1192,12 +1199,10 @@ def test_resolve_roadmap_relpath_my_missing_script_raises_halt(tmp_path, monkeyp
 def test_resolve_roadmap_relpath_my_script_failure_raises_halt(tmp_path, monkeypatch):
     """Should halt with a fixed first line and the script's stderr below on an exit other than 0 or 2."""
     _install_slug_script(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        layout_module.subprocess, "run",
-        _fake_git_config(
-            email="john.doe@example.com", script_returncode=1,
-            script_stderr="user-slug.sh: git is not installed\n",
-        ),
+    _patch_git_identity(
+        monkeypatch,
+        email="john.doe@example.com", script_returncode=1,
+        script_stderr="user-slug.sh: git is not installed\n",
     )
 
     config = _config_with_roadmap_path("my")
@@ -1211,13 +1216,12 @@ def test_resolve_roadmap_relpath_my_script_failure_raises_halt(tmp_path, monkeyp
 def test_resolve_roadmap_relpath_my_script_not_executable_raises_halt(tmp_path, monkeypatch):
     """Should treat an installed script that cannot be executed as a script failure."""
     _install_slug_script(tmp_path, monkeypatch)
-    git_only = _fake_git_config(email="john.doe@example.com")
+    _config, _ = _fake_git_config(email="john.doe@example.com")
 
     def _run(cmd, cwd=None, capture_output=None, text=None):
-        if cmd[0] != "git":
-            raise PermissionError("Permission denied")
-        return git_only(cmd, cwd=cwd, capture_output=capture_output, text=text)
+        raise PermissionError("Permission denied")
 
+    monkeypatch.setattr(layout_module, "run_git_sync", _config)
     monkeypatch.setattr(layout_module.subprocess, "run", _run)
 
     config = _config_with_roadmap_path("my")
@@ -1446,15 +1450,11 @@ def _flow_config() -> OrchestratorConfig:
 
 
 def _neutralize_side_effects(monkeypatch):
-    """Replace the roadmap mark, the commit, the report and the in-loop `git add`."""
+    """Replace the roadmap mark, the commit and the report; the in-loop
+    `git add -A` runs in the project's real repository."""
     monkeypatch.setattr(pipeline_module, "mark_done", lambda *a, **k: None)
     monkeypatch.setattr(pipeline_module, "_git_commit", lambda *a, **k: None)
     monkeypatch.setattr(pipeline_module, "report", lambda *a, **k: None)
-    monkeypatch.setattr(
-        pipeline_module,
-        "subprocess",
-        SimpleNamespace(run=lambda *a, **k: subprocess.CompletedProcess(a, 0)),
-    )
     monkeypatch.setattr(pipeline_module.state, "tasks_done", 0)
 
 
@@ -1619,9 +1619,9 @@ def test_loops_construct_one_backend_and_forward_it(tmp_path, monkeypatch, loop_
     monkeypatch.setattr(main_module, "_check_usage_limits", (lambda c: policy_calls.append((c,))) if selected == "claude" else _unexpected_runtime)
     monkeypatch.setattr(main_module, "_check_codex_usage_limits", (lambda c, p: policy_calls.append((c, p))) if selected == "codex" else _unexpected_runtime)
 
-    def make_runtime(c, p):
-        make_calls.append((c, p))
-        return real_make_runtime(c, p)
+    def make_runtime(c, p, roles):
+        make_calls.append((c, p, roles))
+        return real_make_runtime(c, p, roles)
 
     def capture_loop(project_dir, roadmap_path, config, process_fn, mode, *, usage_check):
         captured.update(process_fn=process_fn, mode=mode, usage_check=usage_check)
@@ -1636,7 +1636,7 @@ def test_loops_construct_one_backend_and_forward_it(tmp_path, monkeypatch, loop_
     captured["usage_check"]()
     captured["process_fn"](_TaskStub(), 1, "sid")
 
-    assert make_calls == [(config, tmp_path)]
+    assert make_calls == [(config, tmp_path, tuple(AgentRole))]
     assert len(constructor_calls) == 1
     assert policy_calls == ([(config,)] if selected == "claude" else [(config, tmp_path)])
     (_, kwargs), = process_calls
@@ -1755,7 +1755,7 @@ def test_loops_apply_and_print_resolved_settings(tmp_path, monkeypatch, capsys, 
             role_lines[0] = "  planner: codex operator-model (high)"
             role_lines[2] = "  implementer: codex gpt-6.1-sol (operator-effort)"
     assert capsys.readouterr().out == "\n".join(
-        [f"Agent runtime: {selected}", *role_lines, "Plan review iterations: 3"]
+        [f"Agent runtime: {selected}", *role_lines, "Planning: on", "Plan review iterations: 3"]
     ) + "\n"
 
 
@@ -1766,7 +1766,7 @@ def test_loops_apply_and_print_resolved_settings(tmp_path, monkeypatch, capsys, 
 
 def _capture_loop_mode(monkeypatch, project_dir):
     captured = {}
-    monkeypatch.setattr(main_module, "_make_runtime", lambda c, p: (FakeAgentBackend(), lambda: None))
+    monkeypatch.setattr(main_module, "_make_runtime", lambda c, p, roles: (FakeAgentBackend(), lambda: None))
     monkeypatch.setattr(
         main_module, "_run_dynamic_loop",
         lambda project_dir, roadmap_path, config, process_fn, *, mode, usage_check: captured.update(mode=mode),
@@ -1802,7 +1802,149 @@ def test_loops_print_the_budget_after_the_agent_lines(
 
     getattr(main_module, loop_name)(tmp_path, config)
 
-    assert capsys.readouterr().out == f"Plan review iterations: {expected_budget}\n"
+    assert capsys.readouterr().out == f"Planning: on\nPlan review iterations: {expected_budget}\n"
+
+
+def _capture_loop_assembly(monkeypatch, project_dir):
+    """Capture the loop's mode, the config and the usage check it hands on."""
+    captured = {}
+    monkeypatch.setattr(main_module, "ClaudeAgentBackend", lambda agents=None: FakeAgentBackend())
+    monkeypatch.setattr(main_module, "CodexAgentBackend", lambda agents=None: FakeAgentBackend())
+    monkeypatch.setattr(main_module, "_check_usage_limits", _unexpected_runtime)
+    monkeypatch.setattr(main_module, "_check_codex_usage_limits", _unexpected_runtime)
+    monkeypatch.setattr(
+        main_module, "_run_dynamic_loop",
+        lambda project_dir, roadmap_path, config, process_fn, *, mode, usage_check:
+        captured.update(mode=mode, config=config, usage_check=usage_check),
+    )
+    _write_loop_roadmaps(project_dir)
+    return captured
+
+
+def test_implement_loop_with_planning_off_prints_off_and_no_budget_line(tmp_path, monkeypatch, capsys):
+    """With planning false the run prints `Planning: off` and no plan-review budget."""
+    _capture_loop_mode(monkeypatch, tmp_path)
+    config = dataclasses.replace(_flow_config(), planning=False, plan_review_iterations=5)
+
+    main_module._implement_loop(tmp_path, config)
+
+    assert capsys.readouterr().out == "Planning: off\n"
+
+
+def test_implement_loop_assembles_the_spec_layer_and_two_roles_under_planning_off(tmp_path, monkeypatch):
+    """The mode's factory builds SpecLayer, its roles are the implementer and the code
+    reviewer, and the loop runs on a copy of the configuration whose budget is 0."""
+    captured = _capture_loop_assembly(monkeypatch, tmp_path)
+    config = dataclasses.replace(_flow_config(), planning=False, plan_review_iterations=5)
+
+    main_module._implement_loop(tmp_path, config)
+
+    planner = captured["mode"].make_planner(tmp_path, FakeAgentBackend(), "planner")
+    assert isinstance(planner, SpecLayer)
+    assert captured["mode"].roles == (AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER)
+    assert captured["config"].planning is False
+    assert captured["config"].plan_review_iterations == 0
+    assert config.plan_review_iterations == 5  # the caller's configuration is untouched
+
+
+def test_implement_loop_keeps_the_planner_and_all_four_roles_with_planning_on(tmp_path, monkeypatch):
+    """With planning true nothing differs: the factory builds the Planner, all four
+    roles stand, and the configuration passes through as it is."""
+    captured = _capture_loop_assembly(monkeypatch, tmp_path)
+    config = dataclasses.replace(_flow_config(), plan_review_iterations=5)
+
+    main_module._implement_loop(tmp_path, config)
+
+    planner = captured["mode"].make_planner(tmp_path, FakeAgentBackend(), "planner")
+    assert isinstance(planner, Planner)
+    assert captured["mode"].roles == tuple(AgentRole)
+    assert captured["config"] is config
+
+
+def test_test_loop_under_planning_false_prints_the_stage_it_runs(tmp_path, monkeypatch, capsys):
+    """Test mode plans and reviews plans whatever the setting: it prints its four
+    role lines, `Planning: on` and the budget, and hands the loop planning true."""
+    captured = _capture_loop_assembly(monkeypatch, tmp_path)
+    config = dataclasses.replace(_flow_config(), planning=False, plan_review_iterations=5)
+
+    main_module._test_loop(tmp_path, config)
+
+    out = capsys.readouterr().out
+    assert out.endswith("Planning: on\nPlan review iterations: 5\n")
+    role_lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert role_lines == [f"  {role.value}: claude fake-{role.value} (fake-effort)" for role in AgentRole]
+    assert captured["config"].planning is True
+    assert captured["config"].plan_review_iterations == 5
+    assert config.planning is False  # the caller's configuration is untouched
+
+
+def test_test_loop_keeps_its_test_planner_and_all_four_roles_under_planning_false(tmp_path, monkeypatch):
+    """Test mode plans and reviews plans whatever the setting: the test-planner stays
+    and the loop runs on the configuration with the stage it runs."""
+    captured = _capture_loop_assembly(monkeypatch, tmp_path)
+    config = dataclasses.replace(_flow_config(), planning=False, plan_review_iterations=5)
+
+    main_module._test_loop(tmp_path, config)
+
+    planner = captured["mode"].make_planner(tmp_path, FakeAgentBackend(), "test-planner")
+    assert isinstance(planner, Planner)
+    assert captured["mode"].planner_prompt_name == "test-planner"
+    assert captured["mode"].roles == tuple(AgentRole)
+    assert captured["config"].planning is True
+    assert captured["config"].plan_review_iterations == 5
+
+
+def test_planning_off_adds_no_claude_usage_check_and_prints_two_role_lines(tmp_path, monkeypatch, capsys):
+    """Claude as the default runtime with a Hermes implementer and a head code reviewer:
+    no Claude usage check runs and only the two roles the run has are printed."""
+    captured = _capture_loop_assembly(monkeypatch, tmp_path)
+    _executable_answer_command(monkeypatch, tmp_path)
+    repository = tmp_path / "the-project"
+    (repository / ".ai-factory" / "architects" / "max" / "r-d").mkdir(parents=True)
+    (repository / ".ai-factory" / "architects" / "max" / "r-d" / "address.json").write_text(
+        json.dumps({"session-id": "tid", "runtime": "claude", "session-name": "the head"}), encoding="utf-8",
+    )
+    checks = []
+    monkeypatch.setattr(main_module, "_check_usage_limits", lambda c: checks.append("claude"))
+    monkeypatch.setattr(main_module, "HermesAgentBackend",
+                        lambda server, port, key_file: FakeAgentBackend())
+    monkeypatch.setattr(main_module, "_implementer_result", lambda *a: WorkingTreeResult())
+    config = dataclasses.replace(
+        _flow_config(), planning=False,
+        hermes_instances={"main": {"server": "https://hermes.invalid", "port": 443,
+                                   "key_file": str(tmp_path / "k.pem")}},
+        roles={
+            "implementer": {"runtime": "hermes", "instance": "main"},
+            "code_reviewer": {"runtime": "head", "head": {
+                "repository": str(repository), "owner": "max", "folder": "r-d"}},
+        },
+    )
+
+    main_module._implement_loop(tmp_path, config)
+    captured["usage_check"]()
+
+    assert checks == []  # no Claude role is called, so no Claude usage check runs
+    out = capsys.readouterr().out
+    role_lines = [line for line in out.splitlines() if line.startswith("  ")]
+    assert role_lines == [
+        "  implementer: hermes main",
+        f"  code_reviewer: head {repository} max r-d",
+    ]
+
+
+def test_a_head_named_only_as_the_planner_is_never_read_under_planning_off(tmp_path, monkeypatch):
+    """The planner is not among the run's roles, so its head's address is never read."""
+    captured = _capture_loop_assembly(monkeypatch, tmp_path)
+    monkeypatch.setattr(main_module, "read_address", _unexpected_runtime)
+    monkeypatch.setattr(main_module, "_implementer_result", lambda *a: WorkingTreeResult())
+    config = dataclasses.replace(
+        _flow_config(), planning=False,
+        roles={"planner": {"runtime": "head", "head": {
+            "repository": str(tmp_path / "nowhere"), "owner": "max", "folder": "r-d"}}},
+    )
+
+    main_module._implement_loop(tmp_path, config)  # the unreadable address halts nothing
+    assert set(captured["mode"].roles) == {AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER}
 
 
 @pytest.mark.parametrize("value", ["run", "head"])
@@ -1893,7 +2035,7 @@ def test_runtime_reads_only_selected_block_and_prints_backend_mapping(tmp_path, 
     monkeypatch.setattr(main_module, "_check_usage_limits", _unexpected_runtime)
     monkeypatch.setattr(main_module, "_check_codex_usage_limits", _unexpected_runtime)
 
-    result, usage_check = main_module._make_runtime(SelectedConfig(), tmp_path)
+    result, usage_check = main_module._make_runtime(SelectedConfig(), tmp_path, tuple(AgentRole))
 
     assert isinstance(result, RoleRoutedBackend)
     assert result.runtime_of(AgentRole.PLANNER) == selected
@@ -1935,7 +2077,7 @@ def test_make_runtime_builds_each_taken_runtime_and_composes_both_checks_in_orde
         roles={"implementer": {"runtime": "codex"}, "code_reviewer": {"runtime": "codex"}},
     )
 
-    backend, usage_check = main_module._make_runtime(config, tmp_path)
+    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
 
     assert constructed == [("claude", {}), ("codex", {})]
     usage_check()
@@ -1966,7 +2108,7 @@ def test_a_roles_runtime_missing_executable_fails_at_assembly(tmp_path, monkeypa
     config = dataclasses.replace(_flow_config(), roles={"implementer": {"runtime": "codex"}})
 
     with pytest.raises(FileNotFoundError):
-        main_module._make_runtime(config, tmp_path)
+        main_module._make_runtime(config, tmp_path, tuple(AgentRole))
     assert capsys.readouterr().out == "Agent runtime: claude\n"
 
 
@@ -2005,7 +2147,7 @@ def test_make_runtime_builds_one_hermes_backend_per_named_instance_and_prints_hi
         },
     )
 
-    backend, usage_check = main_module._make_runtime(config, tmp_path)
+    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
 
     assert constructed == [  # one backend per distinct key, in the roles' order
         ("hermes", "127.0.0.1", 8801, "/stand/keys/main"),
@@ -3160,18 +3302,22 @@ def test_completion_path_requires_available_git_target(completion_env, monkeypat
     assert not env.proof.exists()
 
 
-@pytest.mark.parametrize("fault", ["exec", "empty", "failed", "resolve"])
+@pytest.mark.parametrize("fault", ["exec", "empty", "failed", "timeout", "resolve"])
 def test_external_evidence_check_converts_boundary_faults_to_value_error(tmp_path, monkeypatch, fault):
     if fault == "resolve":
         def resolve(*a, **kw):
             raise RuntimeError("symlink loop")
         monkeypatch.setattr(Path, "resolve", resolve)
-    else:
+    elif fault == "exec":
         def git(*a, **kw):
-            if fault == "exec":
-                raise FileNotFoundError("git unavailable")
-            return SimpleNamespace(returncode=1 if fault == "failed" else 0, stdout=b"", stderr=b"")
-        monkeypatch.setattr(layout_module.subprocess, "run", git)
+            raise FileNotFoundError("git unavailable")
+        monkeypatch.setattr(layout_module, "run_git_sync", git)
+    else:
+        def git_answer(*a, **kw):
+            if fault == "timeout":
+                raise subprocess.TimeoutExpired(["git", "rev-parse", "--show-toplevel"], 120)
+            return SimpleNamespace(returncode=1 if fault == "failed" else 0, stdout="", stderr="")
+        monkeypatch.setattr(layout_module, "run_git_sync", git_answer)
     with pytest.raises(ValueError, match="Invalid external evidence path"):
         layout_module._external_evidence_path(tmp_path, tmp_path / "evidence")
 
@@ -3464,7 +3610,7 @@ def test_the_answer_command_must_exist_before_any_head_is_asked(tmp_path, monkey
     config = dataclasses.replace(_flow_config(), roles=dict(_HEAD_ROLES))
 
     with pytest.raises(HeadNotReachedError) as caught:
-        main_module._make_runtime(config, tmp_path)
+        main_module._make_runtime(config, tmp_path, tuple(AgentRole))
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "A head could not be reached"
@@ -3482,7 +3628,7 @@ def test_an_answer_command_that_is_not_executable_halts_the_same(tmp_path, monke
     config = dataclasses.replace(_flow_config(), roles=dict(_HEAD_ROLES))
 
     with pytest.raises(HeadNotReachedError) as caught:
-        main_module._make_runtime(config, tmp_path)
+        main_module._make_runtime(config, tmp_path, tuple(AgentRole))
 
     assert str(caught.value).splitlines()[1] == (
         f"The answer command {command} does not exist or is not executable"
@@ -3495,7 +3641,7 @@ def test_a_run_with_no_head_role_makes_no_such_check(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", lambda agents=None: FakeAgentBackend())
     config = dataclasses.replace(_flow_config())
 
-    backend, usage_check = main_module._make_runtime(config, tmp_path)
+    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
 
     assert backend.run(role=AgentRole.PLANNER, prompt="p", cwd="c", instructions="i")[0] != ""
     assert not command.exists()
@@ -3512,7 +3658,7 @@ def test_a_head_whose_address_cannot_be_read_halts_the_assembly_before_any_backe
     config = dataclasses.replace(_flow_config(), roles=dict(_HEAD_ROLES))
 
     with pytest.raises(HeadNotReachedError) as caught:
-        main_module._make_runtime(config, tmp_path)
+        main_module._make_runtime(config, tmp_path, tuple(AgentRole))
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "A head could not be reached"
@@ -3536,7 +3682,7 @@ def test_a_head_role_prints_its_line_and_takes_no_usage_check(tmp_path, monkeypa
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", lambda agents=None: FakeAgentBackend())
     monkeypatch.setattr(main_module, "_check_usage_limits", lambda c: checks.append("claude"))
 
-    backend, usage_check = main_module._make_runtime(config, tmp_path)
+    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
 
     usage_check()
     assert checks == ["claude"]  # a head's role starts no usage check of its own
@@ -3620,7 +3766,7 @@ def test_every_role_reaches_its_own_backend_through_one_routed_assembly(tmp_path
                                    "key_file": str(tmp_path / "k.pem")}},
     )
 
-    backend, _usage_check = main_module._make_runtime(config, tmp_path)
+    backend, _usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
 
     assert sorted(built) == ["claude", "codex", "hermes"]  # the head's backend needs no constructor here
     for role, kind in ((AgentRole.PLANNER, "claude"), (AgentRole.PLAN_REVIEWER, "codex"),

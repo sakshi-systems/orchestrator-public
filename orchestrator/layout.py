@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 
 from .config import OrchestratorConfig
 from .errors import HaltError
+from .git_runner import run_git_sync
 
 
 _USER_SLUG_SCRIPT = Path.home() / ".claude" / "skills" / "roadmap-engine" / "scripts" / "user-slug.sh"
@@ -18,14 +18,11 @@ def _external_evidence_path(project_dir: Path, candidate: Path) -> Path:
     try:
         target = project_dir.resolve()
         destination = candidate.resolve()
-        result = subprocess.run(
-            ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-        )
-        root_bytes = result.stdout.removesuffix(b"\n")
-        if result.returncode != 0 or not root_bytes:
+        result = run_git_sync(["rev-parse", "--show-toplevel"], cwd=target)
+        root_text = result.stdout.removesuffix("\n")
+        if result.returncode != 0 or not root_text:
             raise ValueError(f"Cannot resolve target Git worktree: {target}")
-        root = Path(os.fsdecode(root_bytes)).resolve()
+        root = Path(root_text).resolve()
         if destination.is_relative_to(root):
             raise ValueError(f"Evidence path must be outside target Git worktree {root}: {destination}")
         return destination
@@ -35,9 +32,10 @@ def _external_evidence_path(project_dir: Path, candidate: Path) -> Path:
 
 def _git_config_value(project_dir: Path, key: str) -> str | None:
     """Read a single git config value in project_dir; None on any failure or empty value."""
-    result = subprocess.run(
-        ["git", "config", key], cwd=project_dir, capture_output=True, text=True,
-    )
+    try:
+        result = run_git_sync(["config", key], cwd=project_dir)
+    except subprocess.TimeoutExpired:
+        return None
     if result.returncode != 0:
         return None
     value = result.stdout.strip()

@@ -8,29 +8,29 @@ from pathlib import Path
 from . import git_runner
 from .errors import IterationCommitNotMadeError, IterationRefNotPushedError
 from .git_runner import run_git_sync
-from .implementer_result import branch_of
+from .implementer_result import branch_of, laid_ref_of, ref_name_of
 from .ports import IterationState
 
 
-def ref_of(stem: str) -> str:
-    """The ref the task's iterations are committed on: refs/orchestrator/<stem>."""
-    return f"refs/orchestrator/{stem}"
+def ref_of(name: str) -> str:
+    """The ref the task's iterations are committed on: refs/orchestrator/<name>."""
+    return f"refs/orchestrator/{name}"
 
 
-def make_iteration_commit(project_dir: Path, stem: str, iteration: int) -> IterationState:
+def make_iteration_commit(project_dir: Path, name: str, iteration: int) -> IterationState:
     """Write the real index's tree as a commit on the task's ref.
 
     The tree is the real index's, as the run's `git add -A` left it, so the
     commit holds what the task's own commit would, `.ai-factory` included; the
     parent is the base the task began on, so each iteration's commit holds the
-    task's whole state since the base; and the ref `refs/orchestrator/<stem>`
+    task's whole state since the base; and the ref `refs/orchestrator/<name>`
     is set to it, one ref for the task, moved to each iteration's commit in
     turn. Nothing is staged, HEAD does not move, and no call names a pathspec,
     so literal pathspecs change none of them. A call that exits non-zero halts
     as IterationCommitNotMadeError; a timeout surfaces as the
     subprocess.TimeoutExpired it is.
     """
-    ref = ref_of(stem)
+    ref = ref_of(name)
     base = run_git_sync(["rev-parse", "HEAD"], cwd=project_dir)
     if base.returncode != 0:
         raise IterationCommitNotMadeError(
@@ -42,7 +42,7 @@ def make_iteration_commit(project_dir: Path, stem: str, iteration: int) -> Itera
             f"The iteration's commit could not be made\n{ref}\n{tree.stderr.strip()[:500]}"
         )
     commit = run_git_sync(
-        ["commit-tree", tree.stdout.strip(), "-p", base.stdout.strip(), "-m", f"{stem}: iteration {iteration}"],
+        ["commit-tree", tree.stdout.strip(), "-p", base.stdout.strip(), "-m", f"{name}: iteration {iteration}"],
         cwd=project_dir,
     )
     if commit.returncode != 0:
@@ -80,22 +80,27 @@ def push_iteration_ref(project_dir: Path, state: IterationState) -> None:
 
 
 def remove_iteration_refs(project_dir: Path, plan_path: Path) -> None:
-    """Remove the task's iteration ref, locally and on origin, and the branch a
-    Hermes implementer pushed, so the task's branch carries one commit.
+    """Remove the task's iteration ref, locally and on origin, the branch a
+    Hermes implementer pushed, and the run's own laid ref, so the task's
+    branch carries one commit.
 
-    The local ref goes in any case. The remote steps ask origin once for the
-    ref and the branch and delete the refs the listing names exactly in one
-    push, and they run whether or not the local removal failed. A removal that
-    fails — a non-zero exit of any call or a timeout of any of them — prints
-    one warning line and returns; no git fault of the removal raises.
+    The two local refs go in any case; the laid ref is the run's own and never
+    travels to origin. The remote steps ask origin once for the ref and the
+    branch and delete the refs the listing names exactly in one push, and they
+    run whether or not the local removals failed. A removal that fails — a
+    non-zero exit of any call or a timeout of any of them — prints one warning
+    line and returns; no git fault of the removal raises.
     """
-    ref = ref_of(plan_path.stem)
-    branch = branch_of(plan_path)
+    ref = ref_of(ref_name_of(project_dir, plan_path))
+    branch = branch_of(project_dir, plan_path)
+    laid = laid_ref_of(project_dir, plan_path)
     failed = False
-    try:
-        failed = run_git_sync(["update-ref", "-d", ref], cwd=project_dir).returncode != 0
-    except subprocess.TimeoutExpired:
-        failed = True
+    for local in (ref, laid):
+        try:
+            if run_git_sync(["update-ref", "-d", local], cwd=project_dir).returncode != 0:
+                failed = True
+        except subprocess.TimeoutExpired:
+            failed = True
     wanted = {ref, f"refs/heads/{branch}"}
     listed = None
     try:

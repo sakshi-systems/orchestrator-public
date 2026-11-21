@@ -154,8 +154,10 @@ def test_a_defective_mode_is_malformed_for_claude_and_ignored_for_codex(tmp_path
     _write_json(tmp_path, {"session-id": "tid", "runtime": "codex", "permission-mode": bad_mode})
     assert read_address(_identity(tmp_path)).permission_mode is None  # ignored for a Codex address
 
+    _drop_json(tmp_path)
     _write_legacy(tmp_path, ["session-id: tid", "runtime: claude", "permission-mode: plan"])
     address = read_address(_identity(tmp_path))  # the legacy form carries no mode
+    assert address.runtime == "claude"
     assert address.permission_mode is None
 
 

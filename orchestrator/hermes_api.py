@@ -8,6 +8,7 @@ import json
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -36,10 +37,11 @@ def _build_opener() -> urllib.request.OpenerDirector:
 
 
 def _base_on_remote(cwd: str) -> str:
-    """Return the commit the run is at, once a remote branch is known to hold it.
+    """Return the commit the run is at, once origin is known to hold it.
 
-    A repository with no `origin` remote halts as BaseNotOnRemoteError, as does a
-    fetched remote none of whose branches holds the commit; a remote that cannot
+    A repository with no `origin` remote halts as BaseNotOnRemoteError, as does
+    a fetched origin none of whose remote-tracking refs holds the commit — a
+    commit only another remote's refs hold does not pass; a remote that cannot
     be fetched — a failed or timed-out `git fetch origin` — halts as
     OriginNotFetchedError, and a repository with no commit at all is a defect.
     """
@@ -62,21 +64,35 @@ def _base_on_remote(cwd: str) -> str:
         raise OriginNotFetchedError(
             f"The remote could not be fetched\norigin\n{fetched.stderr.strip()[:500]}"
         )
-    contains = run_git_sync(["branch", "-r", "--contains", commit], cwd=cwd)
+    contains = run_git_sync(
+        ["for-each-ref", "--contains", commit, "refs/remotes/origin/"], cwd=cwd
+    )
     if contains.returncode != 0 or not contains.stdout.strip():
         raise BaseNotOnRemoteError(f"The base commit is not on the remote\n{commit}")
     return commit
 
 
 def _channel_text(cwd: str, commit: str) -> str:
-    """The channel text naming the origin URL and the base commit he reads the project at."""
+    """The channel text naming the origin URL and the base commit his clone starts at.
+
+    A URL with a scheme is named without its userinfo — everything before the
+    last `@` of the authority — so no credential the URL holds reaches him as
+    conversation content; a URL without a scheme, a local path or an scp form,
+    is named as it is.
+    """
     resolved = run_git_sync(["remote", "get-url", "origin"], cwd=cwd)
     if resolved.returncode != 0:
         raise BaseNotOnRemoteError(f"The base commit is not on the remote\n{commit}")
     url = resolved.stdout.strip()
+    if "://" in url:
+        scheme, netloc, path, query, fragment = urllib.parse.urlsplit(url)
+        url = urllib.parse.urlunsplit(
+            (scheme, netloc.rpartition("@")[2], path, query, fragment)
+        )
     return (
         f"Channel: this run is the repository at origin {url}, at commit {commit}. "
-        "Read the project in your own clone at that commit — it is the base of your work."
+        "Your clone starts at that commit, the base of the work. "
+        "A commit or ref this message names is on origin: fetch it before you read it."
     )
 
 

@@ -1,7 +1,8 @@
 """Running git for a review's workspace and for the run's own adapters:
 one process group per call for the review, ended on time or on cancel,
-laying files readable by everyone; one bounded synchronous call for the
-run, judging no exit status itself.
+laying files readable by everyone; one synchronous call for the run
+that ends, when its bound passes, every process git began, judging no
+exit status itself.
 
 Sakshi runs git in a repository's checkout to fetch a pull request's
 head and to lay a review's tree.  Each call is a session of its own,
@@ -12,14 +13,15 @@ whatever Sakshi's umask, because a review's tree is read by a role
 user, not by Sakshi.
 
 The run's adapters — the hosted role's reach and the implementer's
-branch — call git synchronously through ``run_git_sync``: bounded,
-with the terminal prompt off, with every pathspec literal, and with
-the exit status left to the caller to judge.
+branch — call git synchronously through ``run_git_sync``: bound as the
+caller names it, with the terminal prompt off, with every pathspec
+literal, and with the exit status left to the caller to judge.
 """
 
 from __future__ import annotations
 
 import asyncio
+import locale
 import os
 import signal
 import subprocess
@@ -33,6 +35,19 @@ _TIMEOUT_RETURNCODE = 124
 GIT_TERMINAL_PROMPT = "0"
 
 SYNC_GIT_TIMEOUT = 120
+
+
+class _DefaultBound:
+    """The bound a synchronous call takes when its caller names none:
+    the module's ``SYNC_GIT_TIMEOUT``, read when the call runs, never
+    the constant's value bound at the definition."""
+
+    def __repr__(self) -> str:
+        return "SYNC_GIT_TIMEOUT, read when the call runs"
+
+
+_DEFAULT_BOUND = _DefaultBound()
+
 
 # Git's own repository-local names, less the three configuration
 # channels, which stay because they may carry the stand's credential
@@ -97,6 +112,57 @@ async def _end_group(proc: asyncio.subprocess.Process) -> None:
     except (ProcessLookupError, PermissionError):
         pass
     await proc.wait()
+
+
+def _close_pipes(proc: subprocess.Popen) -> None:
+    """Close git's captured pipes without reading them.
+
+    The ending's reach is git's group; a process that left the group
+    under its own session survives it holding an inherited write end,
+    and a read to that pipe's end would wait for that process's
+    lifetime.  Closing the read ends drops what the call holds — git's
+    own output is not read past the raise.
+    """
+    if proc.stdout is not None:
+        proc.stdout.close()
+    if proc.stderr is not None:
+        proc.stderr.close()
+
+
+def _end_group_sync(proc: subprocess.Popen) -> None:
+    """End git's whole group, the synchronous twin of ``_end_group``:
+    the same steps over a waited ``Popen``, sharing the grace.
+
+    SIGTERM goes to the group first, which lets git remove its lock
+    files.  Once git itself has ended, or after the grace seconds, the
+    group is probed: no live member answers with ProcessLookupError or
+    PermissionError alike (a group of only zombies on macOS answers
+    EPERM), and any other answer is a live member, which gets SIGKILL.
+    Git is then reaped and its captured pipes are closed without being
+    read — on every way out of the ending — so no pipe stays held:
+    neither by a member that is gone nor by a process that left the
+    group under its own session and holds one, whose lifetime a read
+    to the pipe's end would wait for, past the call's bound.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(_KILL_GRACE)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, 0)
+    except (ProcessLookupError, PermissionError):
+        _close_pipes(proc)
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    proc.wait()
+    _close_pipes(proc)
 
 
 async def _end_group_shielded(proc: asyncio.subprocess.Process) -> None:
@@ -177,7 +243,19 @@ async def run_git(arguments: Sequence[str], *, cwd: Path,
     return text
 
 
-def run_git_sync(arguments: Sequence[str], *, cwd: str | Path) -> subprocess.CompletedProcess:
+def _as_text(output: bytes) -> str:
+    """Decode captured output with the locale's encoding, as the text mode
+    of ``subprocess`` does, but without its newline translation: a carriage
+    return git printed — a worktree path ending in one among them — is kept
+    as git printed it, and bytes the locale cannot decode raise, read by
+    the caller as the failure of the read."""
+    return output.decode(locale.getpreferredencoding(False), "strict")
+
+
+def run_git_sync(arguments: Sequence[str], *, cwd: str | Path,
+                 timeout: float | None | _DefaultBound = _DEFAULT_BOUND,
+                 capture: bool = True,
+                 ) -> subprocess.CompletedProcess:
     """Run ``git <arguments>`` synchronously in ``cwd`` and return the
     completed process, judging no exit status: each caller decides what
     a non-zero exit means.
@@ -189,9 +267,21 @@ def run_git_sync(arguments: Sequence[str], *, cwd: str | Path) -> subprocess.Com
     for a credential no one will type, and ``GIT_LITERAL_PATHSPECS=1``,
     so a path a caller names is a literal path and never a pattern;
     with the standard input closed; with the standard output and the
-    standard error each captured as text; and with a timeout of
-    ``SYNC_GIT_TIMEOUT`` seconds, past which the call raises
-    ``subprocess.TimeoutExpired`` as it is.
+    standard error each captured and decoded as text by ``_as_text``,
+    or, for a caller that reads none of git's output, left uncaptured
+    and inherited as the caller's own through ``capture=False`` — git's
+    text then reaches the console as it runs, and the wait is on git
+    alone, so a background job a hook leaves holds no pipe the call
+    waits for; and in a session of its own, so the call is the only
+    member of its process group beside what git itself begins.  The
+    call waits under ``timeout`` seconds — left out, the module's
+    ``SYNC_GIT_TIMEOUT`` read when the call runs; ``None``, no bound at
+    all, so a caller whose duration is not the network's runs to git's
+    own end.  A call past its bound ends git's whole group — every
+    process it began, an ssh command or a hook among them — and raises
+    ``subprocess.TimeoutExpired``; any other interruption of the wait, a
+    ``KeyboardInterrupt`` among them, ends the group the same way and
+    propagates as it is.
     """
     environment = {
         name: value for name, value in os.environ.items()
@@ -199,13 +289,31 @@ def run_git_sync(arguments: Sequence[str], *, cwd: str | Path) -> subprocess.Com
     }
     environment["GIT_TERMINAL_PROMPT"] = GIT_TERMINAL_PROMPT
     environment["GIT_LITERAL_PATHSPECS"] = "1"
-    return subprocess.run(
+    bound: float | None
+    if isinstance(timeout, _DefaultBound):
+        bound = SYNC_GIT_TIMEOUT
+    else:
+        bound = timeout
+    proc = subprocess.Popen(
         ["git", *arguments],
         cwd=str(cwd),
         env=environment,
-        timeout=SYNC_GIT_TIMEOUT,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        start_new_session=True,
     )
+    try:
+        if capture:
+            stdout, stderr = proc.communicate(timeout=bound)
+        else:
+            proc.wait(timeout=bound)
+            return subprocess.CompletedProcess(proc.args, proc.returncode)
+    except subprocess.TimeoutExpired as error:
+        _end_group_sync(proc)
+        raise subprocess.TimeoutExpired(error.cmd, error.timeout)
+    except BaseException:
+        _end_group_sync(proc)
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode,
+                                       _as_text(stdout), _as_text(stderr))

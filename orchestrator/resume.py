@@ -29,30 +29,45 @@ def plan_review_budget(max_iterations: int, plan_review_iterations: int | None) 
 _PLAN_FAMILY_STEPS = ("plan", "plan_review")
 _PLAN_FAMILY_PREFIXES = ("planning:", "planned:", "plan_review_failed:")
 
+_RAISE_THE_SETTING = "Raise {setting} in orchestrator.json to continue."
+_ROLL_BACK_THE_RECORD = (
+    "Roll the record back to planning:1, which lays the spec, "
+    "or set planning to true in orchestrator.json to continue."
+)
 
-def _attempt_budget(label: str, max_iterations: int, plan_review_iterations: int | None) -> tuple[int, str, int]:
-    """Return the attempt bound for `label`, the setting that gives it and that setting's own value.
+
+def _attempt_budget(label: str, max_iterations: int, plan_review_iterations: int | None, planning: bool = True) -> tuple[int, str, int | str, str]:
+    """Return the attempt bound for `label`, the setting that gives it, that
+    setting's own value, and the line that says how to continue.
 
     The plan family — the dispatch steps `plan` and `plan_review` and the recorded values that
     start `planning:`, `planned:` and `plan_review_failed:` — takes the plan-review budget floored
     at 1, so the `planned:1` record written right after planning passes its check and meets the
     plan-review loop even at a budget of 0; for any budget of at least 1 the bound is the budget.
+    With planning false the run lays the spec and no round past the first can continue, so the
+    plan family's bound is 1 under the `planning` setting and the continuation line says so.
     Every other label keeps the iteration limit.
     """
     if label in _PLAN_FAMILY_STEPS or label.startswith(_PLAN_FAMILY_PREFIXES):
+        if not planning:
+            return (1, "planning", "false", _ROLL_BACK_THE_RECORD)
         if plan_review_iterations is not None:
-            return (max(plan_review_budget(max_iterations, plan_review_iterations), 1), "plan_review_iterations", plan_review_iterations)
-        return (max(max_iterations, 1), "max_iterations", max_iterations)
-    return (max_iterations, "max_iterations", max_iterations)
+            budget = max(plan_review_budget(max_iterations, plan_review_iterations), 1)
+            return (budget, "plan_review_iterations", plan_review_iterations,
+                    _RAISE_THE_SETTING.format(setting="plan_review_iterations"))
+        return (max(max_iterations, 1), "max_iterations", max_iterations,
+                _RAISE_THE_SETTING.format(setting="max_iterations"))
+    return (max_iterations, "max_iterations", max_iterations,
+            _RAISE_THE_SETTING.format(setting="max_iterations"))
 
 
-def _check_attempt(label: str, attempt: int, bound: int, setting: str, value: int) -> None:
+def _check_attempt(label: str, attempt: int, bound: int, setting: str, value: int | str, continuation: str) -> None:
     """Halt when `attempt` lies past the attempt budget that `setting` names."""
     if attempt > bound:
         raise HaltError(
             f"Resume exceeds the attempt budget\n"
             f"{label} attempt {attempt} exceeds {setting} ({value})\n"
-            f"Raise {setting} in orchestrator.json to continue."
+            f"{continuation}"
         )
 
 
@@ -141,7 +156,7 @@ def _validate_sidecar_step(
 def _detect_step(
     seq: str, slug: str,
     plan_path: Path, plan_reviews_dir: Path, output_dir: Path,
-    verify: VerifyKind, *, max_iterations: int, runtimes: dict[str, dict[str, str]], plan_review_iterations: int | None = None,
+    verify: VerifyKind, *, max_iterations: int, runtimes: dict[str, dict[str, str]], plan_review_iterations: int | None = None, planning: bool = True,
 ) -> tuple[str, int, Path]:
     """Detect where a previous run stopped and return (step, counter, plan_path) to resume from.
 
@@ -210,8 +225,8 @@ def _detect_step(
     if interpreted is not None:
         dispatch_step, next_attempt, explicit_counter = interpreted
         if explicit_counter is not None:
-            _check_attempt(raw, explicit_counter, *_attempt_budget(raw, max_iterations, plan_review_iterations))
-        _check_attempt(dispatch_step, next_attempt, *_attempt_budget(dispatch_step, max_iterations, plan_review_iterations))
+            _check_attempt(raw, explicit_counter, *_attempt_budget(raw, max_iterations, plan_review_iterations, planning))
+        _check_attempt(dispatch_step, next_attempt, *_attempt_budget(dispatch_step, max_iterations, plan_review_iterations, planning))
         if raw.startswith("planning:"):
             return (dispatch_step, next_attempt, plan_path)
     if not plan_path.exists():
