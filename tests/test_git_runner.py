@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import stat
 import time
 from pathlib import Path
@@ -87,6 +88,19 @@ def _written_pid(pid_file: Path, limit: float = 5.0) -> int:
                 return int(pid)
         time.sleep(0.05)
     raise AssertionError(f"no pid was written to {pid_file}")
+
+
+def _pid_or_none(pid_file: Path) -> int | None:
+    """The pid a file holds when it holds one at all: an absent, empty
+    or unfinished file answers None, so a ``finally`` that must not mask
+    the failure it follows can ask without raising."""
+    if not pid_file.exists():
+        return None
+    text = pid_file.read_text(encoding="utf-8")
+    pid = text.strip()
+    if text.endswith("\n") and pid.isdecimal():
+        return int(pid)
+    return None
 
 
 def test_git_returns_its_output_with_standard_error_merged(
@@ -226,7 +240,8 @@ def test_a_configuration_channel_reaches_git(
 def test_a_call_past_its_timeout_raises_and_leaves_no_member(
         git_stand: GitStand, tmp_path: Path) -> None:
     pid_file = tmp_path / "member.pid"
-    alias = f"alias.hang=!sh -c 'echo $$ > {pid_file}; sleep 300'"
+    script = f"echo $$ > {shlex.quote(str(pid_file))}; sleep 300"
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     async def scenario() -> GitError:
         with pytest.raises(GitError) as raised:
@@ -244,11 +259,13 @@ def test_a_call_past_its_timeout_raises_and_leaves_no_member(
 def test_a_member_ignoring_term_is_killed(git_stand: GitStand,
                                           tmp_path: Path) -> None:
     pid_file = tmp_path / "member.pid"
-    # A true empty trap action (the quote dance): the escaped-quotes
-    # spelling reaches the inner shell as a two-character action it
-    # runs and exits on, so the member would die of the TERM itself.
-    alias = (f"alias.hang=!sh -c 'echo $$ > {pid_file}; "
-             "trap '\\'''\\'' 15; sleep 300'")
+    # A true empty trap action, spelled plainly inside the quoted script:
+    # the escaped-quotes spelling reaches the inner shell as a
+    # two-character action it runs and exits on, so the member would die
+    # of the TERM itself.
+    script = (f"echo $$ > {shlex.quote(str(pid_file))}; "
+              "trap '' 15; sleep 300")
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     async def scenario() -> None:
         with pytest.raises(GitError):
@@ -263,8 +280,9 @@ def test_a_member_ignoring_term_is_killed(git_stand: GitStand,
 def test_the_ending_reaches_a_grandchild(git_stand: GitStand,
                                          tmp_path: Path) -> None:
     pid_file = tmp_path / "grandchild.pid"
-    alias = (f"alias.hang=!sh -c 'sleep 300 & echo $! > {pid_file}; "
-             "wait'")
+    script = (f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; "
+              "wait")
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     async def scenario() -> None:
         with pytest.raises(GitError):
@@ -279,7 +297,8 @@ def test_the_ending_reaches_a_grandchild(git_stand: GitStand,
 def test_a_git_that_exited_with_the_pipe_held_times_out_and_ends_the_member(
         git_stand: GitStand, tmp_path: Path) -> None:
     pid_file = tmp_path / "member.pid"
-    alias = f"alias.hang=!sh -c 'sleep 300 & echo $! > {pid_file}'"
+    script = f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}"
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     async def scenario() -> GitError:
         with pytest.raises(GitError) as raised:
@@ -369,7 +388,8 @@ def test_a_cancel_of_a_git_that_closed_its_output_leaves_no_member(
 def test_a_cancelled_call_leaves_no_member(git_stand: GitStand,
                                            tmp_path: Path) -> None:
     pid_file = tmp_path / "member.pid"
-    alias = f"alias.hang=!sh -c 'echo $$ > {pid_file}; sleep 300'"
+    script = f"echo $$ > {shlex.quote(str(pid_file))}; sleep 300"
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     async def scenario() -> None:
         task = asyncio.create_task(
@@ -392,8 +412,10 @@ def test_a_second_cancel_during_the_grace_still_ends_the_member(
     cancel in that window must not leave the ending before its
     SIGKILL."""
     pid_file = tmp_path / "member.pid"
-    alias = (f"alias.hang=!sh -c 'kill -STOP $PPID; "
-             f"echo $$ > {pid_file}; trap \"\" 15; sleep 300'")
+    script = (f"kill -STOP $PPID; "
+              f"echo $$ > {shlex.quote(str(pid_file))}; "
+              "trap '' 15; sleep 300")
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     async def scenario() -> None:
         task = asyncio.create_task(
@@ -464,8 +486,10 @@ def test_a_cancel_during_a_timeouts_ending_cancels_the_call(
     timeout's error, once the ending has finished."""
     monkeypatch.setattr(git_runner, "_KILL_GRACE", 1.5)
     pid_file = tmp_path / "member.pid"
-    alias = (f"alias.hang=!sh -c 'kill -STOP $PPID; "
-             f"echo $$ > {pid_file}; trap "" 15; sleep 300'")
+    script = (f"kill -STOP $PPID; "
+              f"echo $$ > {shlex.quote(str(pid_file))}; "
+              "trap '' 15; sleep 300")
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     async def scenario() -> None:
         task = asyncio.create_task(
@@ -527,8 +551,8 @@ def test_run_git_sync_raises_for_a_call_past_its_bound_and_ends_the_ssh_process_
         monkeypatch: pytest.MonkeyPatch) -> None:
     pid_file = tmp_path / "ssh.pid"
     monkeypatch.setattr(git_runner, "SYNC_GIT_TIMEOUT", 0.5)
-    monkeypatch.setenv("GIT_SSH_COMMAND",
-                       f"sh -c 'echo $$ > {pid_file}; sleep 30'")
+    script = f"echo $$ > {shlex.quote(str(pid_file))}; sleep 30"
+    monkeypatch.setenv("GIT_SSH_COMMAND", f"sh -c {shlex.quote(script)}")
 
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired) as raised:
@@ -545,12 +569,13 @@ def test_run_git_sync_raises_for_a_call_past_its_bound_and_ends_the_ssh_process_
 def test_a_sync_call_past_its_bound_kills_a_member_ignoring_term(
         git_stand: GitStand, tmp_path: Path) -> None:
     pid_file = tmp_path / "member.pid"
-    # The quote dance hands the inner shell a true empty trap action:
-    # ``trap "" 15`` spelled with escaped quotes reaches it as a
-    # two-character action the shell runs and then exits on, so the
+    # A true empty trap action, spelled plainly inside the quoted script:
+    # ``trap "" 15`` spelled with escaped quotes reaches the inner shell
+    # as a two-character action the shell runs and then exits on, so the
     # member would die of the TERM and no escalation would be seen.
-    alias = (f"alias.hang=!sh -c 'echo $$ > {pid_file}; "
-             "trap '\\'''\\'' 15; sleep 300'")
+    script = (f"echo $$ > {shlex.quote(str(pid_file))}; "
+              "trap '' 15; sleep 300")
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     with pytest.raises(subprocess.TimeoutExpired):
         run_git_sync(["-c", alias, "hang"], cwd=git_stand.checkout,
@@ -563,8 +588,9 @@ def test_a_sync_call_past_its_bound_kills_a_member_ignoring_term(
 def test_a_sync_call_past_its_bound_ends_a_grandchild_it_started(
         git_stand: GitStand, tmp_path: Path) -> None:
     pid_file = tmp_path / "grandchild.pid"
-    alias = (f"alias.hang=!sh -c 'sleep 300 & echo $! > {pid_file}; "
-             "wait'")
+    script = (f"sleep 300 & echo $! > {shlex.quote(str(pid_file))}; "
+              "wait")
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     with pytest.raises(subprocess.TimeoutExpired):
         run_git_sync(["-c", alias, "hang"], cwd=git_stand.checkout,
@@ -591,25 +617,32 @@ def test_a_sync_call_past_its_bound_waits_for_no_process_outside_the_group(
         "    handle.write(str(os.getpid()) + '\\n')\n"
         "time.sleep(20)\n",
         encoding="utf-8")
-    alias = (f"alias.hang=!sh -c 'echo $$ > {member}; "
-             f"python3 {escapee} {outside} & "
-             "trap '\\'''\\'' 15; sleep 300'")
+    script = (f"echo $$ > {shlex.quote(str(member))}; "
+              f"python3 {shlex.quote(str(escapee))} "
+              f"{shlex.quote(str(outside))} & "
+              "trap '' 15; sleep 300")
+    alias = f"alias.hang=!sh -c {shlex.quote(script)}"
 
     started = time.monotonic()
-    with pytest.raises(subprocess.TimeoutExpired):
-        run_git_sync(["-c", alias, "hang"], cwd=git_stand.checkout,
-                     timeout=1.0)
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 1.0 + git_runner._KILL_GRACE + 2.0
-    assert _poll_sync(lambda: _gone(_written_pid(member)))
-
-    # The escapee left git's group and outlives the call by design; end
-    # it here so the test leaves nothing behind.
     try:
-        os.kill(_written_pid(outside), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_git_sync(["-c", alias, "hang"], cwd=git_stand.checkout,
+                         timeout=1.0)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 1.0 + git_runner._KILL_GRACE + 2.0
+        assert _poll_sync(lambda: _gone(_written_pid(member)))
+    finally:
+        # The escapee left git's group and outlives the call by design;
+        # end it here so the test leaves nothing behind — a failing
+        # assertion above included, its failure never masked: no pid, no
+        # kill, and a signal that lands too late is tolerated.
+        pid = _pid_or_none(outside)
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
 
 
 def test_a_sync_call_takes_its_bound_from_the_call_not_the_module_constant(
@@ -648,6 +681,38 @@ def test_run_git_sync_returns_a_failed_process_without_raising(
     assert completed.returncode != 0
     assert isinstance(completed.stderr, str)
     assert completed.stderr  # a call that writes to standard error on every machine
+
+
+def test_a_standard_output_byte_the_locale_cannot_decode_round_trips(
+        git_stand: GitStand,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The standard output is read as paths and ref names that travel
+    back to git as arguments: a byte the locale cannot decode comes home
+    as a lone surrogate, and ``os.fsencode`` of it is the byte again."""
+    monkeypatch.setattr(git_runner.locale, "getpreferredencoding",
+                        lambda *args, **kwargs: "ascii")
+    alias = r"alias.raw=!printf '\351'"
+
+    completed = run_git_sync(["-c", alias, "raw"], cwd=git_stand.checkout)
+
+    assert completed.returncode == 0
+    assert os.fsencode(completed.stdout) == b"\xe9"
+
+
+def test_a_standard_error_byte_the_locale_cannot_decode_stays_printable(
+        git_stand: GitStand,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a person reads the standard error: it never raises at decode
+    and never at print, the byte stays visible as ``\\xe9``, and the
+    status git exited with is still the status the call returns."""
+    monkeypatch.setattr(git_runner.locale, "getpreferredencoding",
+                        lambda *args, **kwargs: "ascii")
+    alias = r"alias.raw=!printf '\351' 1>&2; exit 3"
+
+    completed = run_git_sync(["-c", alias, "raw"], cwd=git_stand.checkout)
+
+    assert completed.returncode == 3
+    assert "\\xe9" in completed.stderr
 
 
 def test_run_git_sync_reads_the_repository_in_cwd_not_an_ambient_one(

@@ -243,13 +243,18 @@ async def run_git(arguments: Sequence[str], *, cwd: Path,
     return text
 
 
-def _as_text(output: bytes) -> str:
+def _as_text(output: bytes, errors: str) -> str:
     """Decode captured output with the locale's encoding, as the text mode
     of ``subprocess`` does, but without its newline translation: a carriage
     return git printed — a worktree path ending in one among them — is kept
-    as git printed it, and bytes the locale cannot decode raise, read by
-    the caller as the failure of the read."""
-    return output.decode(locale.getpreferredencoding(False), "strict")
+    as git printed it.  The error policy comes with the bytes, so decoding
+    never raises: the standard output is read as paths and ref names that
+    travel back to git as arguments, and ``surrogateescape`` keeps a byte
+    the locale cannot decode as a lone surrogate that ``os.fsencode`` turns
+    into the same byte again; the standard error is read only by a person,
+    and ``backslashreplace`` keeps its undecodable bytes visible, as
+    ``\\xe9``, in a text that never fails to print."""
+    return output.decode(locale.getpreferredencoding(False), errors)
 
 
 def run_git_sync(arguments: Sequence[str], *, cwd: str | Path,
@@ -267,8 +272,10 @@ def run_git_sync(arguments: Sequence[str], *, cwd: str | Path,
     for a credential no one will type, and ``GIT_LITERAL_PATHSPECS=1``,
     so a path a caller names is a literal path and never a pattern;
     with the standard input closed; with the standard output and the
-    standard error each captured and decoded as text by ``_as_text``,
-    or, for a caller that reads none of git's output, left uncaptured
+    standard error each captured and decoded as text by ``_as_text`` —
+    the standard output so a path or a ref name keeps its bytes, the
+    standard error so its text stays printable — or, for a caller that
+    reads none of git's output, left uncaptured
     and inherited as the caller's own through ``capture=False`` — git's
     text then reaches the console as it runs, and the wait is on git
     alone, so a background job a hook leaves holds no pipe the call
@@ -315,5 +322,7 @@ def run_git_sync(arguments: Sequence[str], *, cwd: str | Path,
     except BaseException:
         _end_group_sync(proc)
         raise
-    return subprocess.CompletedProcess(proc.args, proc.returncode,
-                                       _as_text(stdout), _as_text(stderr))
+    return subprocess.CompletedProcess(
+        proc.args, proc.returncode,
+        _as_text(stdout, "surrogateescape"),
+        _as_text(stderr, "backslashreplace"))

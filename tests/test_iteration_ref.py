@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -62,8 +63,18 @@ def _parents_of(project, commit):
 
 
 def _remote_refs(project, origin, *patterns):
+    """Origin's ref names, read by git's delimiters: a newline between
+    records and a tab before the name, so a name holding a character Python
+    treats as a line break or a space is read whole."""
     listed = git_in(project, "ls-remote", str(origin), *patterns) if patterns else git_in(project, "ls-remote", str(origin))
-    return {line.split()[1] for line in listed.splitlines() if line.strip()}
+    names = set()
+    for record in listed.split("\n"):
+        if not record:
+            continue
+        _sha, tab, name = record.partition("\t")
+        if tab:
+            names.add(name)
+    return names
 
 
 def test_the_commit_s_parent_is_the_base_and_its_tree_holds_what_the_add_stages(tmp_path):
@@ -345,6 +356,32 @@ def test_a_removal_with_no_branch_on_origin_removes_only_the_refs_silently(tmp_p
     assert capsys.readouterr().out == ""
 
 
+def test_a_ref_name_holding_a_unicode_line_boundary_is_removed_whole(tmp_path, capsys):
+    """A named roadmap whose segment holds U+2028 reads as one record: the
+    listing is split by git's newline and the name taken after the tab, so
+    the ref and the branch come off origin and nothing is printed."""
+    project, base, origin = _repo(tmp_path)
+    (project / ".ai-factory" / "plans" / "a\u2028b").mkdir()
+    plan = project / ".ai-factory" / "plans" / "a\u2028b" / "01-slug.md"
+    plan.write_text("# Plan\n")
+    (project / "work.txt").write_text("work\n")
+    git_in(project, "add", "-A")
+    state = make_iteration_commit(project, ref_name_of(project, plan), 1)
+    push_iteration_ref(project, state)
+    branch = f"refs/heads/orchestrator/a\u2028b/01-slug"
+    git_in(project, "push", "-q", "origin", f"{base}:{branch}")  # a Hermes task's branch
+    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/heads/orchestrator/*") == {
+        state.ref, branch,
+    }
+
+    remove_iteration_refs(project, plan)
+
+    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/orchestrator-laid/*", "refs/heads/orchestrator/*") == set()
+    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator/", "refs/orchestrator-laid/")
+    assert listed.split() == []
+    assert capsys.readouterr().out == ""  # nothing failed, no line
+
+
 def test_two_roadmaps_sharing_a_stem_never_share_a_ref_or_a_cleanup(tmp_path):
     project, base, origin = _repo(tmp_path)
     (project / ".ai-factory" / "plans" / "john-doe").mkdir()
@@ -473,7 +510,7 @@ def test_a_local_removal_that_times_out_is_the_one_line_and_the_remote_still_run
     monkeypatch.setattr(git_runner, "SYNC_GIT_TIMEOUT", 0.5)
     pid_file = tmp_path / "hook.pid"
     hook = project / ".git" / "hooks" / "reference-transaction"
-    hook.write_text(f"#!/bin/sh\necho $$ > {pid_file}\nwhile read old new ref; do :; done\nsleep 30\n")
+    hook.write_text(f"#!/bin/sh\necho $$ > {shlex.quote(str(pid_file))}\nwhile read old new ref; do :; done\nsleep 30\n")
     hook.chmod(0o755)
 
     remove_iteration_refs(project, project / ".ai-factory" / "plans" / "01-slug.md")
@@ -611,7 +648,7 @@ def test_the_commit_waits_for_git_alone_not_a_hook_s_background_job(tmp_path):
     project, base, origin = _repo(tmp_path)
     pid_file = tmp_path / "background.pid"
     hook = project / ".git" / "hooks" / "pre-commit"
-    hook.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > '{pid_file}'\nexit 0\n")
+    hook.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {shlex.quote(str(pid_file))}\nexit 0\n")
     hook.chmod(0o755)
     (project / "work.txt").write_text("work\n")
 
@@ -635,6 +672,26 @@ def test_a_push_an_origin_refuses_prints_the_one_warning_and_raises_nothing(tmp_
     project, base, origin = _repo(tmp_path)
     hook = origin / "hooks" / "pre-receive"
     hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    (project / "work.txt").write_text("work\n")
+
+    pipeline_module._git_commit(project, "The task's title")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-1] == ">>> WARNING: git push failed, continuing anyway."
+    assert git_in(project, "rev-parse", "HEAD").strip() != base  # the commit stands
+
+
+def test_a_push_an_origin_refuses_with_undecodable_bytes_prints_the_one_warning_and_raises_nothing(
+        tmp_path, monkeypatch, capsys):
+    """A refusal whose diagnostic holds a byte the locale cannot decode is
+    still the one warning: the push's text never raises at the decode and
+    the commit stands."""
+    project, base, origin = _repo(tmp_path)
+    monkeypatch.setattr(git_runner.locale, "getpreferredencoding",
+                        lambda *args, **kwargs: "ascii")
+    hook = origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nprintf '\\351\\n'\nexit 1\n")
     hook.chmod(0o755)
     (project / "work.txt").write_text("work\n")
 

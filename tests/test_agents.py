@@ -1928,14 +1928,14 @@ def test_spec_layer_refuses_a_directory_at_the_specs_path(tmp_path):
 
 def test_spec_layer_reads_through_a_linked_factory_directory(tmp_path):
     """.ai-factory may be a link out of the project: the path is read, never resolved."""
-    real = tmp_path / "elsewhere"
-    (real / "specs").mkdir(parents=True)
-    (real / "specs" / "01-thing.md").write_text("spec through the link", encoding="utf-8")
-    factory = tmp_path / ".ai-factory"
-    factory.rmdir()  # the file's autouse _factory_dir stands down for the link
-    factory.symlink_to(real, target_is_directory=True)
-    plan = tmp_path / "plans" / "01-slug.md"
+    project = tmp_path / "project"
+    project.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "specs").mkdir(parents=True)
+    (elsewhere / "specs" / "01-thing.md").write_text("spec through the link", encoding="utf-8")
+    (project / ".ai-factory").symlink_to(elsewhere, target_is_directory=True)
+    plan = project / "plans" / "01-slug.md"
 
-    SpecLayer(tmp_path).plan(_SPEC_TITLE, _spec_description(), plan)
+    SpecLayer(project).plan(_SPEC_TITLE, _spec_description(), plan)
 
     assert plan.read_text(encoding="utf-8") == f"# Plan: {_SPEC_TITLE}\n\nspec through the link"

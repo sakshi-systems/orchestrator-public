@@ -87,9 +87,12 @@ def remove_iteration_refs(project_dir: Path, plan_path: Path) -> None:
     The two local refs go in any case; the laid ref is the run's own and never
     travels to origin. The remote steps ask origin once for the ref and the
     branch and delete the refs the listing names exactly in one push, and they
-    run whether or not the local removals failed. A removal that fails — a
-    non-zero exit of any call or a timeout of any of them — prints one warning
-    line and returns; no git fault of the removal raises.
+    run whether or not the local removals failed. The listing is read by the
+    delimiters git writes, a newline between records and a tab before the ref
+    name, so a ref name that holds a character Python treats as a line break
+    or a space is read whole. A removal that fails — a non-zero exit of any
+    call, a timeout of any of them, or a listing record with no tab — prints
+    one warning line and returns; no git fault of the removal raises.
     """
     ref = ref_of(ref_name_of(project_dir, plan_path))
     branch = branch_of(project_dir, plan_path)
@@ -111,10 +114,16 @@ def remove_iteration_refs(project_dir: Path, plan_path: Path) -> None:
         if listed.returncode != 0:
             failed = True
         else:
-            names = [
-                line.split()[1] for line in listed.stdout.splitlines()
-                if line.strip() and line.split()[1] in wanted
-            ]
+            names = []
+            for record in listed.stdout.split("\n"):
+                if not record:
+                    continue
+                _sha, tab, name = record.partition("\t")
+                if not tab:
+                    failed = True
+                    continue
+                if name in wanted:
+                    names.append(name)
             if names:
                 deleted = None
                 try:
