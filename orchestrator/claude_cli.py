@@ -55,13 +55,20 @@ def _classify_result(parsed_final: dict, result_text: str, returncode: int,
     `_run_claude` should take.
 
     Returns one of the literals `"retry" | "ratelimit" | "network_halt" |
-    "error" | "ok"`. `no_result = not parsed_final` means the CLI exited
-    before emitting any `result` event — an infra/network death, not a task
-    outcome — as opposed to a result-bearing nonzero exit, which is a
-    task-level outcome only when its text names no transport fault, or an
-    `is_error` result on a zero exit, which is a task-level outcome
-    whatever its text names.
+    "error" | "ok"`, deciding in this precedence — what outranks what:
 
+    - An overloaded result text retries while `attempt < max_retries`;
+      past the budget it falls through to the rules below.
+    - A transport-fault text on a nonzero exit retries while the budget
+      lasts, and once the budget is spent halts as a network fault
+      (`"network_halt"`).
+    - A missing `result` event (`not parsed_final`) on a nonzero exit is
+      an infra death, not a task outcome, and goes the same way: retry
+      while the budget lasts, then `"network_halt"`.
+    - A rate-limit text ("hit your limit" / "resets") outranks a
+      task-level error both on a nonzero exit and on a zero-exit
+      `is_error` result (`"ratelimit"`).
+    - What is left is a task-level `"error"` or `"ok"`.
     """
     no_result = not parsed_final
 

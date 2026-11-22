@@ -74,7 +74,10 @@ class PipelineStopError(Exception):
 
 
 class EscalationError(Exception):
-    """Raised when an agent cannot honestly produce its mandated output because
-    the missing decision is outside its authority — escalation, not halt.
-    A deliberate sibling of PipelineStopError, NOT a HaltError subclass: halt is
-    'not a task failure', escalation IS a judgment. Do not move it under HaltError."""
+    """Raised when an agent cannot produce its mandated output without a
+    decision outside its authority. What escalation is lives in
+    docs/concepts/outcomes.md, section "Escalation".
+
+    A deliberate sibling of PipelineStopError, never a HaltError subclass:
+    the base class a stop raises decides the outcome the stop reports.
+    """

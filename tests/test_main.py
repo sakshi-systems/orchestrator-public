@@ -1,4 +1,5 @@
-"""Unit tests for _parse_pct, _validate_sidecar_step, _detect_task_step, and _detect_test_task_step."""
+"""Unit tests for the run's flow: resume and step detection, the task pipeline and its
+printed choices, and the usage, layout and command-line helpers around them."""
 
 import dataclasses
 import json
@@ -11,7 +12,6 @@ from pathlib import Path
 
 from orchestrator import claude_cli as claude_module
 from orchestrator import codex_cli as codex_module
-from orchestrator import errors as errors_module
 from orchestrator import layout as layout_module
 from orchestrator import main as main_module
 from orchestrator import pipeline as pipeline_module
@@ -69,7 +69,7 @@ def _call(step_value: str, plan_reviews_dir: Path, artifact_dir: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Task 1: Pass-through values that need no artifact
+# _validate_sidecar_step — pass-through values that need no artifact
 # ---------------------------------------------------------------------------
 
 
@@ -112,7 +112,7 @@ def test_validate_unknown_value_passthrough(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 2: plan_review_failed:N gated on the plan-review file
+# _validate_sidecar_step — plan_review_failed:N gated on the plan-review file
 # ---------------------------------------------------------------------------
 
 
@@ -160,7 +160,7 @@ def test_detect_malformed_counter_halts_instead_of_falling_back(tmp_path, suffix
 
 
 # ---------------------------------------------------------------------------
-# Task 3: plan_reviewed requires a passing plan-review file
+# _validate_sidecar_step — plan_reviewed requires a passing plan-review file
 # ---------------------------------------------------------------------------
 
 
@@ -178,7 +178,7 @@ def test_validate_plan_reviewed_no_files(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 4: review_failed:N gated on the review artifact file
+# _validate_sidecar_step — review_failed:N gated on the review artifact file
 # ---------------------------------------------------------------------------
 
 
@@ -196,7 +196,7 @@ def test_validate_review_failed_file_missing(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 5: escalated is always valid — a terminal, unindexed step
+# _validate_sidecar_step — escalated is always valid — a terminal, unindexed step
 # ---------------------------------------------------------------------------
 
 
@@ -212,7 +212,7 @@ WEEKLY_PATTERN = r"Current week \(all models\):\s+(\d+(?:\.\d+)?)%"
 
 
 # ---------------------------------------------------------------------------
-# Task 1: Successful matches return the captured percentage as a float
+# _parse_pct — successful matches return the captured percentage as a float
 # ---------------------------------------------------------------------------
 
 
@@ -241,7 +241,7 @@ def test_successful_match_returns_float_instance():
 
 
 # ---------------------------------------------------------------------------
-# Task 2: Non-matching input returns None
+# _parse_pct — non-matching input returns None
 # ---------------------------------------------------------------------------
 
 
@@ -258,7 +258,7 @@ def test_no_match_unrelated_digits():
 
 
 # ---------------------------------------------------------------------------
-# Task 3: re.search scans the whole string, returning the first match anywhere
+# _parse_pct — re.search scans the whole string, returning the first match anywhere
 # ---------------------------------------------------------------------------
 
 
@@ -342,7 +342,7 @@ def _dms_dirs(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 # ---------------------------------------------------------------------------
-# Task 1: Fresh start and sidecar-driven steps (no git repo needed)
+# _detect_task_step — fresh start and sidecar-driven steps (no git repo needed)
 # ---------------------------------------------------------------------------
 
 
@@ -521,7 +521,7 @@ def test_detect_task_step_plan_review_pass_with_stray_line_returns_implement(tmp
 
 
 # ---------------------------------------------------------------------------
-# Task 3: Canonical slug/seq resolution on mismatch
+# _detect_task_step — canonical slug/seq resolution on mismatch
 # ---------------------------------------------------------------------------
 
 
@@ -672,7 +672,7 @@ def _dtms_dirs(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 # ---------------------------------------------------------------------------
-# Task 1: Fresh start and sidecar-driven steps (no git repo needed)
+# _detect_test_task_step — fresh start and sidecar-driven steps (no git repo needed)
 # ---------------------------------------------------------------------------
 
 
@@ -868,13 +868,12 @@ def test_cli_escalation_error_routes_to_escalated_with_no_detail(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Source-level exception-type tests: both currently raise PipelineStopError,
-# both should raise HaltError once task 05 lands.
+# _check_usage_limits raises HaltError over a threshold
 # ---------------------------------------------------------------------------
 
 
 def test_check_usage_limits_raises_halt_error_over_threshold(monkeypatch):
-    """Should raise HaltError when session usage crosses usage_threshold_5h (red now — currently raises PipelineStopError)."""
+    """Should raise HaltError when session usage crosses usage_threshold_5h."""
     config = OrchestratorConfig(
         max_iterations=3,
         usage_threshold_5h=90,
@@ -884,11 +883,8 @@ def test_check_usage_limits_raises_halt_error_over_threshold(monkeypatch):
 
     monkeypatch.setattr(usage_module, "_run_usage_probe", lambda: "Current session: 99%")
 
-    with pytest.raises(Exception) as exc:
+    with pytest.raises(HaltError):
         _check_usage_limits(config)
-
-    HaltError = getattr(errors_module, "HaltError", None)
-    assert HaltError is not None and isinstance(exc.value, HaltError)
 
 
 def test_process_task_escalated_sidecar_raises_without_constructing_agents(tmp_path, monkeypatch):

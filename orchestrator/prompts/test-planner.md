@@ -27,9 +27,12 @@ You will be given the task title and description.
 ### Step 1: Read the Task
 
 Extract from the task description:
-- Which files/classes/functions to test
-- The target spec file path (usually stated explicitly — e.g. `src/format/price-formatter.spec.ts`)
-- The test command (if stated — e.g. `npm test -- --testPathPattern=price-formatter.spec`)
+- Which files/classes/functions to test — the target files
+- The target test file (e.g. `src/format/price-formatter.spec.ts` in jest, e.g. `tests/test_price_formatter.py` in pytest), if the task states it
+- The test command (e.g. `npm test -- --testPathPattern=price-formatter.spec` in jest, e.g. `uv run pytest tests/test_price_formatter.py` in pytest), if the task states it
+- The scope — the part of the target the test cases must cover
+
+Each of these stands as given wherever the task states it.
 
 ---
 
@@ -46,18 +49,16 @@ Do NOT skip this step — test cases must be grounded in the actual code, not gu
 
 ### Step 3: Find Existing Test Patterns
 
-Enumerate paths to find existing `*.spec.*` or `*.test.*` files in the project (exclude `node_modules`) — for example with a shell command:
+Whatever the task leaves open, discover from the target: the tests already beside the target files, and the project's test configuration — in whatever language and runner the target uses. Read them to learn:
 
-```bash
-find . -name "*.spec.*" -o -name "*.test.*" | grep -v node_modules | head -20
-```
-
-If any exist, read one or two to understand:
-- Test runner and assertion style (`jest`, `vitest`, `mocha`, etc.)
-- How `describe`/`it` blocks are structured
+- Where the target's test file lies
+- How the tests are run
+- The runner and assertion style
+- How a group of test cases is set up
 - How test data and mocks are set up
+- How a test case is named
 
-If none exist, infer the test runner from `package.json` devDependencies.
+Where neither the task nor the target's tests and configuration tell how the tests are run, escalate — name the missing test command and its options — rather than guessing one.
 
 ---
 
@@ -79,36 +80,36 @@ Return the plan as your answer, in the format given below, with nothing before o
 - Docs: no
 
 ## Test Command
-`<exact command to run — e.g. npm test -- --testPathPattern=price-formatter.spec>`
+`<exact command to run — e.g. npm test -- --testPathPattern=price-formatter.spec, e.g. uv run pytest tests/test_price_formatter.py>`
 
-## Target Spec File
-`<path to spec file — e.g. src/format/price-formatter.spec.ts>`
+## Target Test File
+`<path to the target's test file — e.g. src/format/price-formatter.spec.ts, e.g. tests/test_price_formatter.py>`
 
 ## Tasks
 
 ### <group name — e.g. "PriceFormatter — core behavior">
 
-- [ ] **<describe block subject>**
-  Files: `<target spec file>`
+- [ ] **<group subject>**
+  Files: `<target test file>`
   Test cases:
-  - `should <expected behavior> when <condition>`
-  - `should <expected behavior> when <condition>`
-  - `should throw <error> when <condition>`
+  - `<case name in the target's own convention — e.g. should <expected behavior> when <condition> in jest, e.g. test_<expected_behavior>_<condition> in pytest>`
+  - `<case name>`
+  - `<case name>`
 
-- [ ] **<describe block subject>**
-  Files: `<target spec file>`
+- [ ] **<group subject>**
+  Files: `<target test file>`
   Test cases:
-  - `should <expected behavior> when <condition>`
-  - `should <expected behavior> when <condition>`
+  - `<case name>`
+  - `<case name>`
 ```
 
 **Task grouping rules:**
-- One task per logical group of related behaviors (maps to one `describe` block)
+- One task per logical group of related behaviors, in the target's own grouping unit — a `describe` block (e.g. jest), a test class (e.g. XCTest), a test module (e.g. pytest)
 - Keep tasks small enough that each can be implemented in one focused session
 - Order tasks from simplest behavior to most complex
 
 **Test case rules:**
-- Name format: `"should [expected behavior] when [condition]"`
+- Name format: a case name in the target's own convention — `should … when …` in mocha and jest, `test_…` in pytest, `test…` in XCTest — the should-form being one example among others
 - Cover: happy path, boundary values, null/empty inputs, error throws
 - Do NOT write implementation — only describe what the test must verify
 - Do NOT add tasks for wiring up the test file itself — the implementer handles imports/setup

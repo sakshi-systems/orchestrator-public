@@ -1,5 +1,6 @@
-"""Unit tests for _has_signal, TestRunner._extract_test_command, _resolve_claude,
-sidecar session I/O (_read_sessions/_write_session), and kill_active_child."""
+"""Unit tests for the orchestrator's agent layer: the helpers and decision table
+its agents run on, the backends and roles behind them, and the session and
+child-process machinery they share."""
 
 import io
 import json
@@ -41,7 +42,7 @@ _ITERATION = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrat
 
 
 # ---------------------------------------------------------------------------
-# Task 1: match within the last-5-line window
+# _has_signal — match within the last-5-line window
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
@@ -80,7 +81,7 @@ def test_signal_is_plan_review_pass():
 
 
 # ---------------------------------------------------------------------------
-# Task 2: window exclusion and exact-match rejection
+# _has_signal — window exclusion and exact-match rejection
 # ---------------------------------------------------------------------------
 
 
@@ -112,7 +113,7 @@ def test_empty_text_returns_false():
 
 
 # ---------------------------------------------------------------------------
-# Task 1: backtick-wrapped command
+# TestRunner._extract_test_command — backtick-wrapped command
 # ---------------------------------------------------------------------------
 
 
@@ -124,7 +125,7 @@ def test_extract_test_command_backtick_wrapped(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 2: bare command without backticks
+# TestRunner._extract_test_command — bare command without backticks
 # ---------------------------------------------------------------------------
 
 
@@ -136,7 +137,7 @@ def test_extract_test_command_bare(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 3: command after intervening blank lines
+# TestRunner._extract_test_command — command after intervening blank lines
 # ---------------------------------------------------------------------------
 
 
@@ -148,7 +149,7 @@ def test_extract_test_command_blank_lines(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 4: heading absent
+# TestRunner._extract_test_command — heading absent
 # ---------------------------------------------------------------------------
 
 
@@ -160,7 +161,7 @@ def test_extract_test_command_no_heading(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 5: empty section before next heading
+# TestRunner._extract_test_command — empty section before next heading
 # ---------------------------------------------------------------------------
 
 
@@ -189,7 +190,7 @@ def _make_claude_bin(node_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Task 2: PATH-hit tests
+# _resolve_claude — PATH-hit tests
 # ---------------------------------------------------------------------------
 
 
@@ -208,7 +209,7 @@ def test_resolve_claude_path_hit_short_circuits_nvm(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 3: not-found tests -> FileNotFoundError with install message
+# _resolve_claude — not-found tests -> FileNotFoundError with install message
 # ---------------------------------------------------------------------------
 
 
@@ -245,7 +246,7 @@ def test_resolve_claude_no_bin_claude_in_any_version_raises(monkeypatch, tmp_pat
 
 
 # ---------------------------------------------------------------------------
-# Task 4: nvm candidate selection -- multi-candidate, partial-install,
+# _resolve_claude — nvm candidate selection -- multi-candidate, partial-install,
 # non-dir tolerance
 # ---------------------------------------------------------------------------
 
@@ -307,7 +308,7 @@ def test_resolve_claude_semver_ordering_picks_true_latest(monkeypatch, tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# Task 2: _sorted_nvm_node_dirs -- direct unit cases on the pure helper
+# _sorted_nvm_node_dirs -- direct unit cases on the pure helper
 # ---------------------------------------------------------------------------
 
 
@@ -684,7 +685,7 @@ def clean_active_proc():
 
 
 # ---------------------------------------------------------------------------
-# Task 4: kill_active_child no-op branches
+# kill_active_child no-op branches
 # ---------------------------------------------------------------------------
 
 
@@ -707,7 +708,7 @@ def test_kill_active_child_clears_already_exited_process(clean_active_proc):
 
 
 # ---------------------------------------------------------------------------
-# Task 5: kill_active_child kills a live process group
+# kill_active_child kills a live process group
 # ---------------------------------------------------------------------------
 
 
@@ -728,7 +729,7 @@ def test_kill_active_child_kills_live_process_group(clean_active_proc):
 
 
 # ---------------------------------------------------------------------------
-# Task 6: kill_active_child killpg-failure fallback
+# kill_active_child killpg-failure fallback
 # ---------------------------------------------------------------------------
 
 
@@ -1644,7 +1645,7 @@ def test_claude_backend_settings_are_read_only_and_detached_from_input(monkeypat
     for role in AgentRole:
         backend.run(role=role, prompt="p", cwd="c", instructions="FULL")
 
-    for role, call in zip(AgentRole, seen):
+    for role, call in zip(AgentRole, seen, strict=True):
         assert (call["model"], call["effort"]) == expected[role]
         assert call["allowed_tools"] == _EXPECTED_POLICY[role][2]
 

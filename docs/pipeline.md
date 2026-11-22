@@ -1,6 +1,6 @@
 # Pipeline
 
-## The agent pipeline
+## The agent flow
 
 Every task goes through two phases, each bounded by the same iteration limit, unless the project sets the stages its run goes through, which runtime takes each of the run's roles, or how many plan reviews a plan takes (see [Planning is a stage a project can switch off](#planning-is-a-stage-a-project-can-switch-off), [Who reviews a task](#who-reviews-a-task) and [The plan-review budget](#the-plan-review-budget)). The run's roles are the planner, the plan reviewer, the implementer and the reviewer.
 

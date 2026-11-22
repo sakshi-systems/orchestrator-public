@@ -43,7 +43,7 @@ def test_run_summary_with_no_run_started():
 
 
 # ---------------------------------------------------------------------------
-# Task 1: _fmt_elapsed — format branches and hour boundary
+# _fmt_elapsed — format branches and hour boundary
 # ---------------------------------------------------------------------------
 
 
@@ -73,7 +73,7 @@ def test_fmt_elapsed_exact_hour_boundary_3600():
 
 
 # ---------------------------------------------------------------------------
-# Task 2: _with_caffeinate — success paths (caffeinate unavailable vs available)
+# _with_caffeinate — success paths (caffeinate unavailable vs available)
 # ---------------------------------------------------------------------------
 
 _ELAPSED_RE = re.compile(r"^(\d+h )?\d+m \d+s$")
@@ -107,7 +107,7 @@ def test_with_caffeinate_available_wraps_and_cleans_up_on_success(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 3: _with_caffeinate — exception propagation on both branches and
+# _with_caffeinate — exception propagation on both branches and
 # cleanup on failure
 # ---------------------------------------------------------------------------
 
@@ -215,7 +215,7 @@ def test_with_caffeinate_survives_sigint_to_run_group():
 
 
 # ---------------------------------------------------------------------------
-# Task 4: _handle_sigint — first Ctrl+C sets stop_requested without exiting
+# _handle_sigint — first Ctrl+C sets stop_requested without exiting
 # ---------------------------------------------------------------------------
 
 

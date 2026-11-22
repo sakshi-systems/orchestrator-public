@@ -18,7 +18,7 @@ def _write_roadmap(tmp_path: Path, lines: list) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Task 1: parse_roadmap — task collection and done flags
+# parse_roadmap — task collection and done flags
 # ---------------------------------------------------------------------------
 
 
@@ -62,7 +62,7 @@ def test_parse_roadmap_line_numbers(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 2: parse_roadmap — section assignment
+# parse_roadmap — section assignment
 # ---------------------------------------------------------------------------
 
 
@@ -99,7 +99,7 @@ def test_parse_roadmap_section_none_before_heading(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 3: parse_roadmap — ---STOP--- breakpoint behavior
+# parse_roadmap — ---STOP--- breakpoint behavior
 # ---------------------------------------------------------------------------
 
 
@@ -150,7 +150,7 @@ def test_parse_roadmap_no_breakpoint(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 4: Task.slug generation
+# Task.slug generation
 # ---------------------------------------------------------------------------
 
 
@@ -175,7 +175,7 @@ def test_slug_strips_leading_trailing_hyphens():
 
 
 # ---------------------------------------------------------------------------
-# Task 5: _find_task_line lookup
+# _find_task_line lookup
 # ---------------------------------------------------------------------------
 
 
@@ -209,7 +209,7 @@ def test_find_task_line_no_match_returns_none():
 
 
 # ---------------------------------------------------------------------------
-# Task 6: mark_done line mutation
+# mark_done line mutation
 # ---------------------------------------------------------------------------
 
 

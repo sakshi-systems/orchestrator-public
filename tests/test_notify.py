@@ -37,7 +37,7 @@ def sent(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Task 1: Emoji-prefix mapping
+# notify() — emoji-prefix mapping
 # ---------------------------------------------------------------------------
 
 ALL_ALERTS = ["task-fail", "stop", "task", "done", "whatever"]
@@ -87,7 +87,7 @@ def test_escalation_alert_prefixed_blue(sent):
 
 
 # ---------------------------------------------------------------------------
-# Task 2: Gating (silent no-op)
+# notify() — gating (silent no-op)
 # ---------------------------------------------------------------------------
 
 

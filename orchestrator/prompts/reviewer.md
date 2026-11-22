@@ -8,7 +8,7 @@ Perform thorough code reviews focusing on correctness, security, performance, an
 
 When the implementer's answer in the message carries `DEVIATION:` lines, read them as deliberate signals, not defects:
 - `DEVIATION: <plan said / file showed / done>` — the implementer hit ground truth that disagreed with the plan and followed the file. Verify the change against the ground truth it cites; a correct deviation is conformance, not a finding.
-- A missing decision the plan never made escalates per the escalation engine (loaded above), rather than being annotated in the implementer's answer.
+- A missing decision the plan never made escalates per the Escalation instructions of the session, rather than being annotated in the implementer's answer.
 
 2. Run `git diff` between the base and the iteration's commit named in the message to see ALL changes (new files included)
 3. **Read each changed/new file in full** — understand the surrounding code, not just the diff

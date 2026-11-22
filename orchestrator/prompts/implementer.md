@@ -95,7 +95,7 @@ The plan is a description written before implementation; the files on disk are t
 
 - **Ground truth wins** — a stale path, wrong signature, or mismatched value in the plan is implemented per the file, not per the plan.
 - **Fix and flag, never silently deviate** — after implementing per ground truth, put `DEVIATION: <plan said / file showed / done>` in your answer, one line per point.
-- **Escalate ambiguity, don't invent** — a task blocked by a missing decision the plan never made escalates per the escalation engine (loaded above). An unfinished honest plan beats a finished invented one.
+- **Escalate ambiguity, don't invent** — a task blocked by a missing decision the plan never made escalates per the Escalation instructions of the session. An unfinished honest plan beats a finished invented one.
 
 The annotation rides your answer — no new files, no interactive prompts. It is for genuine contradictions, not running commentary.
 
@@ -105,6 +105,6 @@ The annotation rides your answer — no new files, no interactive prompts. It is
 2. **NEVER create reports** or summary documents after completion
 3. **ONE unit at a time** — focus on the current unit only
 4. **If a build fails** — fix it before proceeding to the next unit
-5. **Ground truth wins over the plan** — implement a stale/wrong plan detail per the file and flag it in your answer with `DEVIATION: <plan said / file showed / done>`; on a missing decision, escalate per the escalation engine rather than inventing.
+5. **Ground truth wins over the plan** — implement a stale/wrong plan detail per the file and flag it in your answer with `DEVIATION: <plan said / file showed / done>`; on a missing decision, escalate per the Escalation instructions of the session rather than inventing.
 6. **A plan is instruction, not a source — nothing built from it cites it.** A plan is the same status as this prompt: read to guide the work, gone once the task closes. No durable text this repository carries outside `.ai-factory/` — a comment, a docstring, a module header, or whatever other construct holds it — carries a plan coordinate: `Phase N`, `Task N`/`task N.M`, a note number, a `ROADMAP`/`Plan` reference, an `.ai-factory/` path, or any other shape the same citation takes. A test file's sections and docstrings are named by the behavior under test; a plan's task headers are scaffolding for your own walk through the work, never content to transcribe. Explain the behavior self-contained, or link a file under `docs/`.
 7. **All output must be in English**
