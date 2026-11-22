@@ -33,6 +33,7 @@ from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol
 from .resume import plan_review_budget
 from .runtime import _handle_sigint, _run_summary, _with_caffeinate
 from .usage import _check_codex_usage_limits, _check_usage_limits
+from .user_slug import USER_SLUG_MISSING, user_slug
 from . import state
 
 
@@ -238,6 +239,25 @@ def _write_completion_proof(completion_path: Path, invocation_id: str, succeeded
     os.replace(temporary, completion_path)
 
 
+def _run_settings_slug(project_dir: Path) -> str | None:
+    """The slug that names the person's run settings file, derived where the
+    project holds a run-settings directory.
+
+    Where `.ai-factory/run-settings/` exists the person's file is looked for
+    under the slug the git identity gives; a project that holds no such
+    directory derives no slug and the run reads no person's file. Where the
+    directory exists and no slug can be derived the run exits at its start
+    with the shared no-slug text — a startup error, raised before the
+    configuration loads, so no config exists to report a halt through.
+    """
+    if not (project_dir / ".ai-factory" / "run-settings").is_dir():
+        return None
+    slug = user_slug(project_dir)
+    if slug is None:
+        raise SystemExit(USER_SLUG_MISSING)
+    return slug
+
+
 def cli() -> None:
     state.queue_exhausted = False
     parser = argparse.ArgumentParser(description="AI orchestrator — plan, implement, review from roadmap")
@@ -273,7 +293,7 @@ def cli() -> None:
 
     completed_normally = False
     try:
-        config = load_config(project_dir=project_dir)
+        config = load_config(project_dir=project_dir, user_slug=_run_settings_slug(project_dir))
 
         try:
             if args.command == "test":

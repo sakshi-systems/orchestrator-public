@@ -1224,7 +1224,7 @@ def test_a_planning_off_record_past_the_first_round_halts_naming_planning(flow, 
         "Resume exceeds the attempt budget\n"
         f"{second_line}\n"
         "Roll the record back to planning:1, which lays the spec, "
-        "or set planning to true in orchestrator.json to continue."
+        "or set planning to true in the run settings file to continue."
     )
     assert backend.calls == []
     assert _snapshot(f) == before

@@ -36,7 +36,7 @@ The more precisely the target files and classes are named, the more precise the 
 ## Running it
 
 ```bash
-uv run orchestrator test /path/to/project
+orchestrator test /path/to/project
 ```
 
 The orchestrator reads the target project's test roadmap: `.ai-factory/ROADMAP_TESTS.md`, or for a named roadmap its sibling — see [named-roadmaps.md](named-roadmaps.md) for the name. After each task, the task is marked done in the test roadmap and a git commit is made that carries the mark.

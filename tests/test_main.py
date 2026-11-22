@@ -3,6 +3,7 @@ printed choices, and the usage, layout and command-line helpers around them."""
 
 import dataclasses
 import json
+import os
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from orchestrator import layout as layout_module
 from orchestrator import main as main_module
 from orchestrator import pipeline as pipeline_module
 from orchestrator import usage as usage_module
+from orchestrator import user_slug as user_slug_module
 from orchestrator.agents import REVIEW_VERIFY, TEST_RUN_VERIFY, Planner, SpecLayer
 from orchestrator.errors import EscalationError, HaltError, HeadNotReachedError, PipelineStopError, RateLimitError
 from orchestrator.config import OrchestratorConfig, load_config, role_runtimes
@@ -41,7 +43,7 @@ from orchestrator.ports import AgentRole, RoleSetting
 from tests.conftest import git_in
 from orchestrator.roadmap import mark_done
 from tests.fakes import FakeAgentBackend
-from tests.test_config import _write_config, _write_override
+from tests.test_config import _write_config, _write_run_settings
 
 # ---------------------------------------------------------------------------
 # Helpers / constants shared across _validate_sidecar_step tests
@@ -819,7 +821,7 @@ def _run_cli_with(monkeypatch, exc):
     """Patch load_config/run_implement/report/argv; return the list report() calls get recorded into."""
     recorded = []
 
-    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None: _cli_config())
+    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None, user_slug=None: _cli_config())
 
     def _raise_run_implement(project_dir, config):
         raise exc
@@ -1029,13 +1031,10 @@ def _config_with_roadmap_path(roadmap_path):
     )
 
 
-def _fake_git_config(email=None, name=None, slug=None, script_returncode=None, script_stderr=""):
-    """Build the two stand-ins `_resolve_roadmap_relpath` needs: one answering
-    the git config reads (`run_git_sync`, a text CompletedProcess) and one
-    answering the user-slug script call (`subprocess.run`).
-
-    The script call returns `script_returncode` when set, else the slug with exit 0
-    when `slug` is set, else exit 2 (no derivable slug)."""
+def _patch_git_identity(monkeypatch, email=None, name=None):
+    """Patch the git config reads behind the user-slug derivation with one
+    run_git_sync stand-in answering `user.email` and `user.name` as git would
+    (exit 1 for a key that is not set)."""
     def _config(arguments, *, cwd, timeout=None):
         key = arguments[-1]
         value = email if key == "user.email" else name if key == "user.name" else None
@@ -1043,36 +1042,7 @@ def _fake_git_config(email=None, name=None, slug=None, script_returncode=None, s
             return subprocess.CompletedProcess(["git", *arguments], 1, "", "")
         return subprocess.CompletedProcess(["git", *arguments], 0, value, "")
 
-    class _Result:
-        def __init__(self, returncode, stdout, stderr=""):
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
-    def _script(cmd, cwd=None, capture_output=None, text=None):
-        if script_returncode is not None:
-            return _Result(script_returncode, "", script_stderr)
-        if slug is not None:
-            return _Result(0, f"{slug}\n")
-        return _Result(2, "", "user-slug.sh: neither user.email nor user.name yields a slug …")
-
-    return _config, _script
-
-
-def _patch_git_identity(monkeypatch, **values):
-    """Patch the git config reads and the slug-script call with one stand-in pair."""
-    _config, _script = _fake_git_config(**values)
-    monkeypatch.setattr(layout_module, "run_git_sync", _config)
-    monkeypatch.setattr(layout_module.subprocess, "run", _script)
-
-
-def _install_slug_script(tmp_path, monkeypatch):
-    """Point the slug-script path at a placeholder file under tmp_path (subprocess.run is patched)."""
-    script = tmp_path / "slug-bin" / "user-slug.sh"
-    script.parent.mkdir(parents=True)
-    script.write_text("#!/bin/sh\n")
-    monkeypatch.setattr(layout_module, "_USER_SLUG_SCRIPT", script)
-    return script
+    monkeypatch.setattr(user_slug_module, "run_git_sync", _config)
 
 
 def test_resolve_roadmap_relpath_absent_returns_default(tmp_path):
@@ -1086,8 +1056,7 @@ def test_resolve_roadmap_relpath_my_present_matching_owner(tmp_path, monkeypatch
     roadmaps_dir = tmp_path / ".ai-factory" / "roadmaps"
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "john-doe.md").write_text("> Owner: john.doe@example.com\n\n- [ ] Task\n")
-    _install_slug_script(tmp_path, monkeypatch)
-    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
+    _patch_git_identity(monkeypatch, email="john.doe@example.com")
 
     config = _config_with_roadmap_path("my")
     assert _resolve_roadmap_relpath(config, tmp_path) == "roadmaps/john-doe.md"
@@ -1098,8 +1067,7 @@ def test_resolve_roadmap_relpath_my_name_derived_owner_matches(tmp_path, monkeyp
     roadmaps_dir = tmp_path / ".ai-factory" / "roadmaps"
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "alice.md").write_text("> Owner: Alice\n\n- [ ] Task\n")
-    _install_slug_script(tmp_path, monkeypatch)
-    _patch_git_identity(monkeypatch, email=None, name="Alice", slug="alice")
+    _patch_git_identity(monkeypatch, email=None, name="Alice")
 
     config = _config_with_roadmap_path("my")
     assert _resolve_roadmap_relpath(config, tmp_path) == "roadmaps/alice.md"
@@ -1108,8 +1076,7 @@ def test_resolve_roadmap_relpath_my_name_derived_owner_matches(tmp_path, monkeyp
 def test_resolve_roadmap_relpath_my_missing_file_raises_halt(tmp_path, monkeypatch):
     """Should raise HaltError with a fixed first line and the expected path on a later line
     when the personal roadmap file is missing."""
-    _install_slug_script(tmp_path, monkeypatch)
-    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
+    _patch_git_identity(monkeypatch, email="john.doe@example.com")
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError) as exc:
@@ -1124,8 +1091,7 @@ def test_resolve_roadmap_relpath_my_owner_mismatch_raises_halt(tmp_path, monkeyp
     roadmaps_dir = tmp_path / ".ai-factory" / "roadmaps"
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "john-doe.md").write_text("> Owner: someone.else@example.org\n\n- [ ] Task\n")
-    _install_slug_script(tmp_path, monkeypatch)
-    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
+    _patch_git_identity(monkeypatch, email="john.doe@example.com")
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError):
@@ -1138,8 +1104,7 @@ def test_resolve_roadmap_relpath_my_owner_mismatch_halt_has_fixed_first_line(tmp
     roadmaps_dir = tmp_path / ".ai-factory" / "roadmaps"
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "john-doe.md").write_text("> Owner: someone.else@example.org\n\n- [ ] Task\n")
-    _install_slug_script(tmp_path, monkeypatch)
-    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
+    _patch_git_identity(monkeypatch, email="john.doe@example.com")
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError) as exc:
@@ -1158,73 +1123,25 @@ def test_resolve_roadmap_relpath_my_malformed_first_line_raises_halt(tmp_path, m
     roadmaps_dir = tmp_path / ".ai-factory" / "roadmaps"
     roadmaps_dir.mkdir(parents=True)
     (roadmaps_dir / "john-doe.md").write_text("# Not an owner line\n\n- [ ] Task\n")
-    _install_slug_script(tmp_path, monkeypatch)
-    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
+    _patch_git_identity(monkeypatch, email="john.doe@example.com")
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError):
         _resolve_roadmap_relpath(config, tmp_path)
 
 
-def test_resolve_roadmap_relpath_my_script_exit_2_raises_identity_halt(tmp_path, monkeypatch):
-    """Should raise the identity HaltError when the script reports no derivable slug (exit 2)."""
-    _install_slug_script(tmp_path, monkeypatch)
+def test_resolve_roadmap_relpath_my_no_derivable_slug_raises_identity_halt(tmp_path, monkeypatch):
+    """Should raise the identity HaltError when neither git setting yields a slug:
+    the shared no-slug text, then this caller's own line naming the explicit path."""
     _patch_git_identity(monkeypatch, email=None, name=None)
 
     config = _config_with_roadmap_path("my")
     with pytest.raises(HaltError) as exc:
         _resolve_roadmap_relpath(config, tmp_path)
 
-    assert str(exc.value).splitlines()[0].startswith("roadmap_path is 'my' but no git identity is set")
-
-
-def test_resolve_roadmap_relpath_my_missing_script_raises_halt(tmp_path, monkeypatch):
-    """Should halt with a fixed first line and the script path below when the script is not installed."""
-    missing = tmp_path / "nowhere" / "user-slug.sh"
-    monkeypatch.setattr(layout_module, "_USER_SLUG_SCRIPT", missing)
-    _patch_git_identity(monkeypatch, email="john.doe@example.com", slug="john-doe")
-
-    config = _config_with_roadmap_path("my")
-    with pytest.raises(HaltError) as exc:
-        _resolve_roadmap_relpath(config, tmp_path)
-
-    assert str(exc.value).splitlines()[0] == "User-slug script not found"
-    assert str(missing) in str(exc.value).split("\n", 1)[1]
-
-
-def test_resolve_roadmap_relpath_my_script_failure_raises_halt(tmp_path, monkeypatch):
-    """Should halt with a fixed first line and the script's stderr below on an exit other than 0 or 2."""
-    _install_slug_script(tmp_path, monkeypatch)
-    _patch_git_identity(
-        monkeypatch,
-        email="john.doe@example.com", script_returncode=1,
-        script_stderr="user-slug.sh: git is not installed\n",
-    )
-
-    config = _config_with_roadmap_path("my")
-    with pytest.raises(HaltError) as exc:
-        _resolve_roadmap_relpath(config, tmp_path)
-
-    assert str(exc.value).splitlines()[0] == "User-slug script failed"
-    assert "user-slug.sh: git is not installed" in str(exc.value).split("\n", 1)[1]
-
-
-def test_resolve_roadmap_relpath_my_script_not_executable_raises_halt(tmp_path, monkeypatch):
-    """Should treat an installed script that cannot be executed as a script failure."""
-    _install_slug_script(tmp_path, monkeypatch)
-    _config, _ = _fake_git_config(email="john.doe@example.com")
-
-    def _run(cmd, cwd=None, capture_output=None, text=None):
-        raise PermissionError("Permission denied")
-
-    monkeypatch.setattr(layout_module, "run_git_sync", _config)
-    monkeypatch.setattr(layout_module.subprocess, "run", _run)
-
-    config = _config_with_roadmap_path("my")
-    with pytest.raises(HaltError) as exc:
-        _resolve_roadmap_relpath(config, tmp_path)
-
-    assert str(exc.value).splitlines()[0] == "User-slug script failed"
+    lines = str(exc.value).splitlines()
+    assert lines[:2] == user_slug_module.USER_SLUG_MISSING.splitlines()
+    assert lines[2] == "or set roadmap_path to an explicit path."
 
 
 def test_resolve_roadmap_relpath_explicit_returned_verbatim(tmp_path):
@@ -1948,43 +1865,151 @@ def test_a_configuration_carrying_task_reviewer_is_retired(tmp_path, monkeypatch
     base_path = _write_config(tmp_path, monkeypatch)
     project_dir = tmp_path / "project"
     project_dir.mkdir()
-    overlay_path = _write_override(project_dir, {"task_reviewer": value})
+    person_path = _write_run_settings(project_dir, "alice", {"task_reviewer": value})
 
     with pytest.raises(SystemExit) as exc:
-        load_config(project_dir)
+        load_config(project_dir, "alice")
 
     message = str(exc.value)
     assert message == (
-        f"Invalid 'task_reviewer' in {overlay_path}: "
+        f"Invalid 'task_reviewer' in {person_path}: "
         "the setting is retired; name who reviews a task as the runtime of 'roles.code_reviewer'"
     )
     assert str(base_path) not in message
 
 
-def test_a_configuration_carrying_task_reviewer_in_base_exits_naming_base(tmp_path, monkeypatch):
-    base_path = _write_config(tmp_path, monkeypatch, {"task_reviewer": "run"})
+def test_a_base_carrying_task_reviewer_is_ignored(tmp_path, monkeypatch):
+    """The base holds the machine's keys alone; the retired setting found in it is
+    ignored and the person's file loads as though it were not there."""
+    _write_config(tmp_path, monkeypatch, {"task_reviewer": "run"})
     project_dir = tmp_path / "project"
     project_dir.mkdir()
-    overlay_path = _write_override(project_dir, {"max_iterations": 4})
+    _write_run_settings(project_dir, "alice", {"max_iterations": 4})
 
-    with pytest.raises(SystemExit) as exc:
-        load_config(project_dir)
+    config = load_config(project_dir, "alice")
 
-    message = str(exc.value)
-    assert str(base_path) in message
-    assert str(overlay_path) not in message
-    assert "the setting is retired" in message
+    assert config.max_iterations == 4
 
 
 def test_a_configuration_without_task_reviewer_loads_and_runs_the_review_as_before(tmp_path, monkeypatch):
     _write_config(tmp_path, monkeypatch)
     project_dir = tmp_path / "project"
     project_dir.mkdir()
-    _write_override(project_dir, {"max_iterations": 4})
+    _write_run_settings(project_dir, "alice", {"max_iterations": 4})
 
-    config = load_config(project_dir)
+    config = load_config(project_dir, "alice")
 
     assert config.max_iterations == 4  # the merge still works; no field names a reviewer
+
+
+# ---------------------------------------------------------------------------
+# the slug that names the person's run settings file
+# ---------------------------------------------------------------------------
+
+
+def test_run_settings_slug_derives_the_slug_where_run_settings_exists(tmp_path):
+    """Where .ai-factory/run-settings/ exists the slug comes from the project's git identity."""
+    project = tmp_path / "project"
+    project.mkdir()
+    git_in(project, "init", "-q", "-b", "main", ".")
+    git_in(project, "config", "user.email", "alice@example.com")
+    git_in(project, "config", "user.name", "Alice")
+    (project / ".ai-factory" / "run-settings").mkdir(parents=True)
+
+    assert main_module._run_settings_slug(project) == "alice"
+
+
+def test_run_settings_slug_is_none_where_the_directory_does_not_exist(tmp_path, monkeypatch):
+    """A project with no run-settings directory derives no slug; the git identity is never read."""
+    project = tmp_path / "project"
+    project.mkdir()
+
+    def _unexpected(*args, **kwargs):
+        pytest.fail("the git identity was read where no run-settings directory exists")
+
+    monkeypatch.setattr(main_module, "user_slug", _unexpected)
+
+    assert main_module._run_settings_slug(project) is None
+
+
+def test_run_settings_slug_exits_with_the_shared_no_slug_text_where_none_derives(tmp_path, monkeypatch):
+    """Where the directory exists and no slug can be derived the run exits with the shared text."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    project = tmp_path / "project"
+    project.mkdir()
+    git_in(project, "init", "-q", "-b", "main", ".")
+    (project / ".ai-factory" / "run-settings").mkdir(parents=True)
+
+    with pytest.raises(SystemExit) as exc:
+        main_module._run_settings_slug(project)
+
+    assert str(exc.value) == user_slug_module.USER_SLUG_MISSING
+    assert "roadmap" not in str(exc.value)
+
+
+def test_cli_hands_load_config_the_derived_slug(monkeypatch, tmp_path):
+    """cli derives the slug where run-settings/ exists and hands it to load_config."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".ai-factory" / "run-settings").mkdir(parents=True)
+    recorded = []
+
+    def _load_config(project_dir=None, user_slug=None):
+        recorded.append(user_slug)
+        return _cli_config()
+
+    monkeypatch.setattr(main_module, "user_slug", lambda project_dir: "alice")
+    monkeypatch.setattr(main_module, "load_config", _load_config)
+    monkeypatch.setattr(main_module, "run_implement", lambda project_dir, config: None)
+    monkeypatch.setattr(main_module, "report", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["orchestrator", "implement", str(project)])
+
+    main_module.cli()
+
+    assert recorded == ["alice"]
+
+
+def test_cli_hands_load_config_none_where_no_run_settings_directory_exists(monkeypatch, tmp_path):
+    """Without the directory cli hands load_config None and no slug is derived."""
+    project = tmp_path / "project"
+    project.mkdir()
+    recorded = []
+
+    def _load_config(project_dir=None, user_slug=None):
+        recorded.append(user_slug)
+        return _cli_config()
+
+    def _unexpected(*args, **kwargs):
+        pytest.fail("the git identity was read where no run-settings directory exists")
+
+    monkeypatch.setattr(main_module, "user_slug", _unexpected)
+    monkeypatch.setattr(main_module, "load_config", _load_config)
+    monkeypatch.setattr(main_module, "run_implement", lambda project_dir, config: None)
+    monkeypatch.setattr(main_module, "report", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["orchestrator", "implement", str(project)])
+
+    main_module.cli()
+
+    assert recorded == [None]
+
+
+def test_cli_exits_with_the_shared_no_slug_text_before_the_configuration_loads(monkeypatch, tmp_path):
+    """Where run-settings/ exists and no slug derives, cli exits at its start with the shared text."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    project = tmp_path / "project"
+    project.mkdir()
+    git_in(project, "init", "-q", "-b", "main", ".")
+    (project / ".ai-factory" / "run-settings").mkdir(parents=True)
+    monkeypatch.setattr(main_module, "load_config", _unexpected_runtime)
+    monkeypatch.setattr(sys, "argv", ["orchestrator", "implement", str(project)])
+
+    with pytest.raises(SystemExit) as exc:
+        main_module.cli()
+
+    assert str(exc.value) == user_slug_module.USER_SLUG_MISSING
+    assert "roadmap" not in str(exc.value)
 
 
 
@@ -2331,16 +2356,12 @@ def test_a_loop_with_hermes_as_the_implementer_of_an_untracked_factory_exits_bef
 def test_mode_assembly_binds_merged_config(tmp_path, monkeypatch, loop_name, selected):
     _write_loop_roadmaps(tmp_path)
     base_path = tmp_path / "base.json"
-    base_path.write_text(json.dumps({
-        "max_iterations": 3, "enable_phase_sessions": False,
-        "runtime": "claude" if selected == "codex" else "codex",
-        "usage_threshold_5h": 5, "usage_threshold_weekly": 7,
-    }))
-    (tmp_path / ".ai-factory" / "orchestrator.json").write_text(json.dumps({
+    base_path.write_text(json.dumps({"telegram_chat_id": "chat"}))
+    _write_run_settings(tmp_path, "alice", {
         "runtime": selected, "usage_threshold_5h": 61, "usage_threshold_weekly": 72,
-    }))
+    })
     monkeypatch.setenv("ORCHESTRATOR_CONFIG", str(base_path))
-    config = load_config(tmp_path)
+    config = load_config(tmp_path, "alice")
     config.roadmap_path = None
     calls = []
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", (lambda agents=None: FakeAgentBackend()) if selected == "claude" else _unexpected_runtime)
@@ -2355,6 +2376,7 @@ def test_mode_assembly_binds_merged_config(tmp_path, monkeypatch, loop_name, sel
     assert calls[0][0] is config
     assert config.runtime == selected
     assert (config.usage_threshold_5h, config.usage_threshold_weekly) == (61, 72)
+    assert config.telegram_chat_id == "chat"
 
 
 @pytest.mark.parametrize("loop_name", ["_implement_loop", "_test_loop"])
@@ -2647,7 +2669,7 @@ def test_detect_halt_names_the_setting_that_gives_the_bound(tmp_path, raw, setti
     assert str(exc.value) == (
         f"Resume exceeds the attempt budget\n"
         f"{label} attempt {attempt} exceeds {named_setting} ({value})\n"
-        f"Raise {named_setting} in orchestrator.json to continue."
+        f"Raise {named_setting} in the run settings file to continue."
     )
 
 
@@ -2691,7 +2713,7 @@ def test_process_task_resume_plan_review_failed_past_budget_halts_naming_the_bud
     assert str(exc.value) == (
         "Resume exceeds the attempt budget\n"
         "plan_review_failed:4 attempt 4 exceeds plan_review_iterations (2)\n"
-        "Raise plan_review_iterations in orchestrator.json to continue."
+        "Raise plan_review_iterations in the run settings file to continue."
     )
     assert backend.calls == []
 
@@ -3074,7 +3096,7 @@ def completion_env(tmp_path, monkeypatch):
         mark_done(project_dir / ".ai-factory" / mode.roadmap_relpath, task)
 
     monkeypatch.setattr(main_module, "_with_caffeinate", without_sleep_prevention)
-    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None: env.config)
+    monkeypatch.setattr(main_module, "load_config", lambda project_dir=None, user_slug=None: env.config)
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", constructor)
     monkeypatch.setattr(main_module, "CodexAgentBackend", constructor)
     monkeypatch.setattr(main_module, "_check_usage_limits", lambda *a: events.append("quota"))
@@ -3207,7 +3229,7 @@ def test_cli_resets_exhaustion_before_startup_failure(completion_env, monkeypatc
     if failure == "config":
         error = SystemExit(9)
 
-        def fail_config(project_dir=None):
+        def fail_config(project_dir=None, user_slug=None):
             assert main_module.state.queue_exhausted is False
             raise error
 

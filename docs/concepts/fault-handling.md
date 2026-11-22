@@ -53,7 +53,7 @@ Every fault the orchestrator can meet, and the handling it requires.
 | A notification that cannot be sent | Logged; the run continues |
 | A push that fails | Logged; the run continues — see [target-project.md](../reference/target-project.md) |
 | Usage output that cannot be read | Logged; the run continues without gating on it — see [usage-limits.md](../features/usage-limits.md) |
-| A user-slug script that is missing or fails | A halt |
+| A user-slug that cannot be derived, since neither `user.email` nor `user.name` yields one | A halt |
 
 **From configuration or the operator**
 

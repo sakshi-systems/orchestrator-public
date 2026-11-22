@@ -29,10 +29,10 @@ def plan_review_budget(max_iterations: int, plan_review_iterations: int | None) 
 _PLAN_FAMILY_STEPS = ("plan", "plan_review")
 _PLAN_FAMILY_PREFIXES = ("planning:", "planned:", "plan_review_failed:")
 
-_RAISE_THE_SETTING = "Raise {setting} in orchestrator.json to continue."
+_RAISE_THE_SETTING = "Raise {setting} in the run settings file to continue."
 _ROLL_BACK_THE_RECORD = (
     "Roll the record back to planning:1, which lays the spec, "
-    "or set planning to true in orchestrator.json to continue."
+    "or set planning to true in the run settings file to continue."
 )
 
 

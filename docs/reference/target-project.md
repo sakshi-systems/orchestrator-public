@@ -8,7 +8,7 @@ The orchestrator works with any project, provided it has a handful of files unde
 
 `ROADMAP_TESTS.md` — the equivalent file for test tasks, read only in `test` mode. A separate file keeps test tasks apart from the main roadmap.
 
-A run's target can also be a named roadmap under `.ai-factory/roadmaps/` — a specific developer's personal queue instead of the shared `ROADMAP.md`. Which roadmap is used is selected by the `roadmap_path` setting in `orchestrator.json` — see [named-roadmaps.md](../features/named-roadmaps.md); without it, behaviour is unchanged.
+A run's target can also be a named roadmap under `.ai-factory/roadmaps/` — a specific developer's personal queue instead of the shared `ROADMAP.md`. Which roadmap is used is selected by the `roadmap_path` setting in the person's run settings — see [named-roadmaps.md](../features/named-roadmaps.md); without it, behaviour is unchanged.
 
 `ARCHITECTURE.md` — an optional file describing module structure, layer boundaries, and dependency rules in detail. When present, both the planner and the implementer treat it as a hard requirement for file placement.
 

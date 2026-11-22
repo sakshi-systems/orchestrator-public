@@ -12,6 +12,7 @@ import pytest
 from orchestrator import git_runner
 from orchestrator import layout as layout_module
 from orchestrator import pipeline as pipeline_module
+from orchestrator import user_slug as user_slug_module
 from orchestrator.config import OrchestratorConfig
 from orchestrator.errors import IterationCommitNotMadeError, IterationRefNotPushedError, PipelineStopError
 from orchestrator.iteration_ref import (
@@ -753,6 +754,6 @@ def test_the_assembly_s_reads_run_in_the_target_with_git_dir_aimed_elsewhere(tmp
 
     with monkeypatch.context() as mp:
         mp.setenv("GIT_DIR", str(other / ".git"))
-        assert layout_module._git_config_value(project, "user.email") == "test@example.com"
+        assert user_slug_module.git_config_value(project, "user.email") == "test@example.com"
         with pytest.raises(ValueError, match="outside target Git worktree"):
             layout_module._external_evidence_path(project, project / "evidence.json")

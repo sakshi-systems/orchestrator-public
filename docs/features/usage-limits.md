@@ -6,7 +6,7 @@ Implement and test runs use the pre-task usage policy of each local runtime, Cla
 
 ## Thresholds
 
-Each such runtime's available five-hour and weekly windows are checked independently. Reaching or exceeding a configured threshold halts the run before the task starts; see [outcomes.md](../concepts/outcomes.md). Comparisons use the observed percentage without rounding. Default values and overlay rules live in [configuration.md](../reference/configuration.md).
+Each such runtime's available five-hour and weekly windows are checked independently. Reaching or exceeding a configured threshold halts the run before the task starts; see [outcomes.md](../concepts/outcomes.md). Comparisons use the observed percentage without rounding. Default values and the file that holds the thresholds live in [configuration.md](../reference/configuration.md).
 
 | Threshold | Config key | Scope |
 |---|---|---|

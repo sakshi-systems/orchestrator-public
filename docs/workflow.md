@@ -22,7 +22,7 @@ A good task looks like this:
 Once the roadmap is ready:
 
 ```bash
-uv run orchestrator implement /path/to/project
+orchestrator implement /path/to/project
 ```
 
 The orchestrator processes tasks one at a time: plan → plan review → implementation → code review → commit, the stages a project sets ([Pipeline](pipeline.md#planning-is-a-stage-a-project-can-switch-off)). Each task is marked `[x]` after it completes.
@@ -38,7 +38,7 @@ Once enough tasks have accumulated, it is worth addressing test coverage. `/road
 Then:
 
 ```bash
-uv run orchestrator test /path/to/project
+orchestrator test /path/to/project
 ```
 
 See [test-mode.md](features/test-mode.md) for what makes this final check different from the implement flow.
@@ -57,14 +57,14 @@ After pruning, the roadmap is short again — only pending tasks.
    (repeat a few times)
         │
         ▼
-uv run orchestrator implement
+orchestrator implement
         │
         ▼
 /roadmap-test-coverage  ← what's worth covering with tests
 /roadmap-decompose      ← test tasks into ROADMAP_TESTS.md
         │
         ▼
-uv run orchestrator test
+orchestrator test
         │
         ▼
 /roadmap-prune          ← summary into ARCHITECTURE.md, roadmap cleanup

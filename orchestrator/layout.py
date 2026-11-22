@@ -8,9 +8,7 @@ from pathlib import Path
 from .config import OrchestratorConfig
 from .errors import HaltError
 from .git_runner import run_git_sync
-
-
-_USER_SLUG_SCRIPT = Path.home() / ".claude" / "skills" / "roadmap-engine" / "scripts" / "user-slug.sh"
+from .user_slug import USER_SLUG_MISSING, git_config_value, user_slug
 
 
 def _external_evidence_path(project_dir: Path, candidate: Path) -> Path:
@@ -30,43 +28,18 @@ def _external_evidence_path(project_dir: Path, candidate: Path) -> Path:
         raise ValueError(f"Invalid external evidence path: {e}") from e
 
 
-def _git_config_value(project_dir: Path, key: str) -> str | None:
-    """Read a single git config value in project_dir; None on any failure or empty value."""
-    try:
-        result = run_git_sync(["config", key], cwd=project_dir)
-    except subprocess.TimeoutExpired:
-        return None
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
-    return value or None
-
-
 def _resolve_roadmap_relpath(config: OrchestratorConfig, project_dir: Path) -> str:
     """Three explicit states keyed on config.roadmap_path: absent, 'my', or an explicit path."""
     if config.roadmap_path is None:
         return "ROADMAP.md"
 
     if config.roadmap_path == "my":
-        email = _git_config_value(project_dir, "user.email")
-        name = _git_config_value(project_dir, "user.name")
-        if not _USER_SLUG_SCRIPT.exists():
-            raise HaltError(f"User-slug script not found\n{_USER_SLUG_SCRIPT}")
-        try:
-            result = subprocess.run(
-                [str(_USER_SLUG_SCRIPT)], cwd=project_dir, capture_output=True, text=True,
-            )
-        except OSError as e:
-            raise HaltError(f"User-slug script failed\n{e}") from e
-        if result.returncode == 0:
-            slug = result.stdout.strip()
-        elif result.returncode == 2:
+        slug = user_slug(project_dir)
+        if slug is None:
             raise HaltError(
-                "roadmap_path is 'my' but no git identity is set — "
-                "set git user.email or user.name, or use an explicit roadmap_path."
+                f"{USER_SLUG_MISSING}\n"
+                f"or set roadmap_path to an explicit path."
             )
-        else:
-            raise HaltError(f"User-slug script failed\n{result.stderr.strip()}")
         relpath = f"roadmaps/{slug}.md"
         roadmap_file = project_dir / ".ai-factory" / relpath
         if not roadmap_file.exists():
@@ -77,7 +50,10 @@ def _resolve_roadmap_relpath(config: OrchestratorConfig, project_dir: Path) -> s
 
         lines = roadmap_file.read_text().splitlines()
         first_line = lines[0] if lines else ""
-        identity = email or name
+        identity = (
+            git_config_value(project_dir, "user.email")
+            or git_config_value(project_dir, "user.name")
+        )
         expected_owner = f"> Owner: {identity}"
         if first_line.strip() != expected_owner:
             raise HaltError(

@@ -37,7 +37,7 @@ htmlcov/
 # Sidecar atomic-write temp files
 *.json.tmp
 
-# Local config with secrets — root global and per-project .ai-factory/ overrides alike; per-developer, never committed
+# Local config with secrets — a base file left at a checkout's root stays out of git; per-developer, never committed
 orchestrator.json
 
 # Clones of the sources we follow, beside their tracked files in upstream/

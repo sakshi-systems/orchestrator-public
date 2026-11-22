@@ -38,9 +38,12 @@ def test_launch_and_worker_preserve_caller_context(monkeypatch, tmp_path, capsys
     caller.mkdir()
     monkeypatch.chdir(caller)
     config = caller / "claude-config.json"
-    config.write_text(json.dumps({"runtime": "claude"}), encoding="utf-8")
+    config.write_text(json.dumps({"telegram_chat_id": "chat"}), encoding="utf-8")
     monkeypatch.setenv("ORCHESTRATOR_CONFIG", str(config))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "offline-auth-marker")
+    person_settings = tmp_path / "target" / ".ai-factory" / "run-settings" / "alice.json"
+    person_settings.parent.mkdir(parents=True)
+    person_settings.write_text(json.dumps({"runtime": "claude"}), encoding="utf-8")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
     monkeypatch.setattr(launcher.uuid, "uuid4", lambda: uuid.UUID(INVOCATION))
     original_environment = dict(os.environ)
@@ -54,7 +57,8 @@ def test_launch_and_worker_preserve_caller_context(monkeypatch, tmp_path, capsys
     def check_context():
         assert os.getcwd() == str(caller)
         assert dict(os.environ) == original_environment
-        assert json.loads(Path(os.environ["ORCHESTRATOR_CONFIG"]).read_text()) == {"runtime": "claude"}
+        assert json.loads(Path(os.environ["ORCHESTRATOR_CONFIG"]).read_text()) == {"telegram_chat_id": "chat"}
+        assert json.loads(person_settings.read_text()) == {"runtime": "claude"}
         assert os.environ["ANTHROPIC_API_KEY"] == "offline-auth-marker"
 
     def popen(argv, **kwargs):

@@ -10,28 +10,26 @@ A target project needs an initialized git repository and a handful of files unde
 
 ## Install
 
-The orchestrator needs Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
+The orchestrator needs Python 3.11 or newer, [uv](https://docs.astral.sh/uv/) and git. It is installed as a tool from a release tag of this repository, in an environment of its own outside every repository:
 
 ```bash
-uv sync
+uv tool install git+https://github.com/sakshi-systems/orchestrator-public@vX.Y.Z
 ```
 
-It also needs the command-line tool of the runtime it runs on, installed and authorized; the runtime is chosen in the configuration, see [Agent runtime — Runtime selection](docs/features/agent-runtime.md#runtime-selection).
+`vX.Y.Z` is the tag of the release to install. Updating is the same command with `--force` and the next tag; `uv tool upgrade` does not move an install pinned to a tag. The `orchestrator`, `orchestrator-launch`, `orchestrator-answer` and `sakshi` commands start from the install. To work on the orchestrator itself, clone the repository, run `uv sync` and run its tests with `uv run pytest`.
+
+It also needs the command-line tool of the runtime it runs on, installed and authorized; the runtime is chosen in the run settings, see [Agent runtime — Runtime selection](docs/features/agent-runtime.md#runtime-selection).
 
 ## Configure
 
-```bash
-cp orchestrator.json.example orchestrator.json
-```
-
-`orchestrator.json` is the local configuration, one per developer, and it can hold Telegram credentials, so it stays out of version control. The `runtime` key selects Claude or Codex, `roadmap_path` selects which roadmap to run (empty means the default `ROADMAP.md`), and the thresholds bound the usage a run may spend. Any key can be overridden per project in `<project>/.ai-factory/orchestrator.json`. Every key and its default are in the [configuration reference](docs/reference/configuration.md).
+Two files configure a run. The machine's base, `~/.local/state/orchestrator/orchestrator.json`, is optional and holds the machine's facts, the Hermes instances and the Telegram credentials; it stays outside every repository. Your run settings are one file of your own in the project, `.ai-factory/run-settings/<your-slug>.json`, committed with the project, and hold everything that shapes a run: the `runtime` key selects Claude or Codex, `roadmap_path` selects which roadmap to run (empty means the default `ROADMAP.md`), and the thresholds and iteration limits bound the usage and the length of a run. A key the files leave out takes its default. Every key and its default are in the [configuration reference](docs/reference/configuration.md).
 
 ## Modes
 
 | Command | What it does |
 |---------|-------------|
-| `uv run orchestrator implement /path/to/project` | Plans and implements every pending task |
-| `uv run orchestrator test /path/to/project` | Writes tests for the tasks in `ROADMAP_TESTS.md` |
+| `orchestrator implement /path/to/project` | Plans and implements every pending task |
+| `orchestrator test /path/to/project` | Writes tests for the tasks in `ROADMAP_TESTS.md` |
 
 Without a mode the orchestrator runs `implement` on the current directory. [Test mode](docs/features/test-mode.md) describes the second mode.
 
@@ -53,9 +51,8 @@ Start with [Workflow](docs/workflow.md), the working pattern from filling a road
 | [Non-convergence](docs/concepts/non-convergence.md) | Reading a stalled review loop |
 | [Context model](docs/concepts/context-model.md) | What an agent is handed literally and what it reaches by links |
 | [Target project requirements](docs/reference/target-project.md) | What a target project must provide |
-| [Configuration](docs/reference/configuration.md) | Settings, overlay precedence and agent models |
+| [Configuration](docs/reference/configuration.md) | Settings, the machine's base, a person's run settings and agent models |
 | [Codex runtime](docs/reference/codex-runtime.md) | Native invocation, faults and retry limits |
-| [Sakshi reference](docs/reference/sakshi.md) | Sakshi's settings file, the review request and its refusals, a review's files and its failure, and the exit statuses of `sakshi review` |
 
 ## License
 
