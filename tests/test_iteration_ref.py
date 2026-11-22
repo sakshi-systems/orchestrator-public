@@ -88,7 +88,7 @@ def test_the_commit_s_parent_is_the_base_and_its_tree_holds_what_the_add_stages(
     state = make_iteration_commit(project, "01-slug", 1)
 
     assert state.base == base
-    assert state.ref == "refs/orchestrator/01-slug"
+    assert state.ref == "refs/orchestrator-iteration/01-slug"
     assert state.commit
     assert _parents_of(project, state.commit) == [state.commit, base]
     paths = _paths_of(project, state.commit)
@@ -113,7 +113,7 @@ def test_a_second_iteration_moves_the_ref_to_a_commit_whose_parent_is_still_the_
 
     assert second.commit != first.commit
     assert _parents_of(project, second.commit) == [second.commit, base]
-    assert git_in(project, "rev-parse", "refs/orchestrator/01-slug").strip() == second.commit
+    assert git_in(project, "rev-parse", "refs/orchestrator-iteration/01-slug").strip() == second.commit
     paths = _paths_of(project, second.commit)
     assert "first.txt" in paths and "second.txt" in paths  # each holds the whole state since the base
 
@@ -128,13 +128,31 @@ def test_a_named_roadmap_s_plan_carries_its_segment_in_the_ref(tmp_path):
 
     state = make_iteration_commit(project, ref_name_of(project, plan), 1)
 
-    assert state.ref == "refs/orchestrator/john-doe/01-slug"
+    assert state.ref == "refs/orchestrator-iteration/john-doe/01-slug"
     assert git_in(project, "rev-parse", state.ref).strip() == state.commit
+
+
+def test_the_branch_s_short_name_reaches_the_branch_and_the_iteration_s_the_iteration(tmp_path):
+    """The two refs share no short name: with the iteration ref and the
+    implementer's branch on different commits, each short name resolves to
+    its own ref, so a command that names the branch by its short name gets
+    the branch's commit, never the run's."""
+    project, base, origin = _repo(tmp_path)
+    (project / "work.txt").write_text("work\n")
+    git_in(project, "add", "-A")
+    state = make_iteration_commit(project, "01-slug", 1)
+    push_iteration_ref(project, state)
+    git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")  # a Hermes task's branch
+    git_in(project, "update-ref", "refs/heads/orchestrator/01-slug", base)  # its ref in the run's clone, on another commit
+    assert state.commit != base
+
+    assert git_in(project, "rev-parse", "orchestrator/01-slug").strip() == base
+    assert git_in(project, "rev-parse", "orchestrator-iteration/01-slug").strip() == state.commit
 
 
 def test_a_held_lock_on_the_ref_halts_the_call(tmp_path):
     project, _, origin = _repo(tmp_path)
-    lock = project / ".git" / "refs" / "orchestrator" / "01-slug.lock"
+    lock = project / ".git" / "refs" / "orchestrator-iteration" / "01-slug.lock"
     lock.parent.mkdir(parents=True)
     lock.write_text("")
 
@@ -143,7 +161,7 @@ def test_a_held_lock_on_the_ref_halts_the_call(tmp_path):
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "The iteration's commit could not be made"
-    assert lines[1] == "refs/orchestrator/01-slug"
+    assert lines[1] == "refs/orchestrator-iteration/01-slug"
     assert lines[2]
 
 
@@ -184,7 +202,7 @@ def test_a_halt_of_the_commit_leaves_implemented_recorded_and_calls_no_verify(tm
     project, plan, config, _ = _flow_at_implemented(tmp_path, monkeypatch)
     verifier = _RecordingVerifier()
     mode = IMPLEMENT_MODE._replace(verify=IMPLEMENT_MODE.verify._replace(make_verifier=lambda reviewer, project_dir: verifier))
-    lock = project / ".git" / "refs" / "orchestrator" / "01-slug.lock"
+    lock = project / ".git" / "refs" / "orchestrator-iteration" / "01-slug.lock"
     lock.parent.mkdir(parents=True)
     lock.write_text("")
 
@@ -213,12 +231,12 @@ def test_a_resume_at_implemented_makes_the_commit_and_passes_the_state_to_verify
     state = call[-1]
     assert isinstance(state, IterationState)
     assert state.base == base
-    assert state.ref == "refs/orchestrator/01-slug"
+    assert state.ref == "refs/orchestrator-iteration/01-slug"
     assert _parents_of(project, state.commit) == [state.commit, base]
     # The task ended, so the ref is gone from the clone and from origin.
-    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator/")
+    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/")
     assert listed.split() == []
-    assert _remote_refs(project, _origin_of(project), "refs/orchestrator/*", "refs/heads/orchestrator/*") == set()
+    assert _remote_refs(project, _origin_of(project), "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == set()
 
 
 # ---------------------------------------------------------------------------
@@ -259,14 +277,14 @@ def test_the_push_puts_the_ref_on_origin_and_a_second_iteration_moves_it(tmp_pat
     first = make_iteration_commit(project, "01-slug", 1)
     push_iteration_ref(project, first)
 
-    assert _remote_refs(project, origin, "refs/orchestrator/*") == {first.ref}
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*") == {first.ref}
 
     (project / "second.txt").write_text("two\n")
     git_in(project, "add", "-A")
     second = make_iteration_commit(project, "01-slug", 2)
     push_iteration_ref(project, second)
 
-    assert _remote_refs(project, origin, "refs/orchestrator/*") == {second.ref}
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*") == {second.ref}
     assert _parents_of(project, second.commit) == [second.commit, base]  # a sibling of the first, not a child
 
 
@@ -331,15 +349,15 @@ def test_the_removal_takes_the_local_ref_the_remote_ref_and_the_task_s_branch(tm
     push_iteration_ref(project, state)
     git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")  # a Hermes task's branch
     git_in(project, "update-ref", "refs/orchestrator-laid/01-slug", base)  # the run's own laid ref
-    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/heads/orchestrator/*") == {
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
         state.ref, "refs/heads/orchestrator/01-slug",
     }
 
     remove_iteration_refs(project, project / ".ai-factory" / "plans" / "01-slug.md")
 
-    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator/", "refs/orchestrator-laid/")
+    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/", "refs/orchestrator-laid/")
     assert listed.split() == []
-    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/orchestrator-laid/*", "refs/heads/orchestrator/*") == set()
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/orchestrator-laid/*", "refs/heads/orchestrator/*") == set()
     assert capsys.readouterr().out == ""  # nothing failed, no line
 
 
@@ -352,7 +370,7 @@ def test_a_removal_with_no_branch_on_origin_removes_only_the_refs_silently(tmp_p
 
     remove_iteration_refs(project, project / ".ai-factory" / "plans" / "01-slug.md")
 
-    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/heads/orchestrator/*") == set()
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == set()
     assert capsys.readouterr().out == ""
 
 
@@ -370,14 +388,14 @@ def test_a_ref_name_holding_a_unicode_line_boundary_is_removed_whole(tmp_path, c
     push_iteration_ref(project, state)
     branch = f"refs/heads/orchestrator/a\u2028b/01-slug"
     git_in(project, "push", "-q", "origin", f"{base}:{branch}")  # a Hermes task's branch
-    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/heads/orchestrator/*") == {
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
         state.ref, branch,
     }
 
     remove_iteration_refs(project, plan)
 
-    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/orchestrator-laid/*", "refs/heads/orchestrator/*") == set()
-    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator/", "refs/orchestrator-laid/")
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/orchestrator-laid/*", "refs/heads/orchestrator/*") == set()
+    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/", "refs/orchestrator-laid/")
     assert listed.split() == []
     assert capsys.readouterr().out == ""  # nothing failed, no line
 
@@ -400,17 +418,17 @@ def test_two_roadmaps_sharing_a_stem_never_share_a_ref_or_a_cleanup(tmp_path):
     git_in(project, "push", "-q", "origin",
            f"{base}:refs/heads/orchestrator/01-slug",
            f"{base}:refs/heads/orchestrator/john-doe/01-slug")
-    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/heads/orchestrator/*") == {
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
         plain_state.ref, named_state.ref,
         "refs/heads/orchestrator/01-slug", "refs/heads/orchestrator/john-doe/01-slug",
     }
 
     remove_iteration_refs(project, plain)  # the default pair's task ends
 
-    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/heads/orchestrator/*") == {
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
         named_state.ref, "refs/heads/orchestrator/john-doe/01-slug",  # the named roadmap's own stay
     }
-    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator/")
+    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/")
     assert listed.split() == [named_state.ref]  # and its local ref stays too
 
 
@@ -436,7 +454,7 @@ def test_a_refusing_origin_prints_the_one_line_removes_the_local_ref_and_returns
 
     out = capsys.readouterr().out
     assert out == f">>> WARNING: the iteration's ref {state.ref} could not be removed, continuing anyway.\n"
-    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator/")
+    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/")
     assert listed.split() == []  # the local ref went anyway
 
 
@@ -454,7 +472,7 @@ def test_an_origin_that_never_answers_prints_the_one_line(tmp_path, monkeypatch,
 
         out = capsys.readouterr().out
         assert out == f">>> WARNING: the iteration's ref {state.ref} could not be removed, continuing anyway.\n"
-        listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator/")
+        listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/")
         assert listed.split() == []  # the local ref went anyway
     finally:
         silent.close()
@@ -504,7 +522,7 @@ def test_a_local_removal_that_times_out_is_the_one_line_and_the_remote_still_run
     state = make_iteration_commit(project, "01-slug", 1)
     push_iteration_ref(project, state)
     git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")  # a Hermes task's branch
-    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/heads/orchestrator/*") == {
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
         state.ref, "refs/heads/orchestrator/01-slug",
     }
     monkeypatch.setattr(git_runner, "SYNC_GIT_TIMEOUT", 0.5)
@@ -517,7 +535,7 @@ def test_a_local_removal_that_times_out_is_the_one_line_and_the_remote_still_run
 
     out = capsys.readouterr().out
     assert out == f">>> WARNING: the iteration's ref {state.ref} could not be removed, continuing anyway.\n"
-    assert _remote_refs(project, origin, "refs/orchestrator/*", "refs/heads/orchestrator/*") == set()
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == set()
     assert _ended(_hook_pid(pid_file))
 
 
@@ -540,9 +558,9 @@ def test_a_task_that_stops_before_it_ends_leaves_its_refs(tmp_path, monkeypatch)
             backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(),
         )
 
-    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator/")
-    assert listed.split() == ["refs/orchestrator/01-slug"]  # the local ref stays
-    assert _remote_refs(project, _origin_of(project), "refs/orchestrator/*") == {"refs/orchestrator/01-slug"}
+    listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/")
+    assert listed.split() == ["refs/orchestrator-iteration/01-slug"]  # the local ref stays
+    assert _remote_refs(project, _origin_of(project), "refs/orchestrator-iteration/*") == {"refs/orchestrator-iteration/01-slug"}
 
 
 def _origin_of(project):

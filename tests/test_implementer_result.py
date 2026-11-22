@@ -125,7 +125,7 @@ def test_the_channel_names_the_branch_and_how_to_reach_it(stand):
     assert BRANCH in continued and "Continue the branch" in continued and "base commit" not in continued
 
 
-ITERATION_REF = "refs/orchestrator/01-slug"  # an iteration ref origin holds under a name like the branch's
+ITERATION_REF = "refs/orchestrator-iteration/01-slug"  # an iteration ref origin holds in the run's namespace
 
 
 def test_prepare_removes_a_leftover_branch_of_an_earlier_attempt(stand):
@@ -139,7 +139,7 @@ def test_prepare_removes_a_leftover_branch_of_an_earlier_attempt(stand):
     _result(stand).prepare(stand.factory / "plans" / "01-slug.md")
 
     assert _heads(stand.origin, BRANCH) == ""
-    assert _remote_ref(stand.origin, ITERATION_REF)  # the similar-named iteration ref is not the branch
+    assert _remote_ref(stand.origin, ITERATION_REF)  # the run's iteration ref is not the branch
     assert not _ref_held(stand.run, LAID)  # and its tip is not read as this task's previous lay
 
 

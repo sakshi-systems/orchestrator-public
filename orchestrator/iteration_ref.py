@@ -13,8 +13,8 @@ from .ports import IterationState
 
 
 def ref_of(name: str) -> str:
-    """The ref the task's iterations are committed on: refs/orchestrator/<name>."""
-    return f"refs/orchestrator/{name}"
+    """The ref the task's iterations are committed on: refs/orchestrator-iteration/<name>."""
+    return f"refs/orchestrator-iteration/{name}"
 
 
 def make_iteration_commit(project_dir: Path, name: str, iteration: int) -> IterationState:
@@ -23,7 +23,7 @@ def make_iteration_commit(project_dir: Path, name: str, iteration: int) -> Itera
     The tree is the real index's, as the run's `git add -A` left it, so the
     commit holds what the task's own commit would, `.ai-factory` included; the
     parent is the base the task began on, so each iteration's commit holds the
-    task's whole state since the base; and the ref `refs/orchestrator/<name>`
+    task's whole state since the base; and the ref `refs/orchestrator-iteration/<name>`
     is set to it, one ref for the task, moved to each iteration's commit in
     turn. Nothing is staged, HEAD does not move, and no call names a pathspec,
     so literal pathspecs change none of them. A call that exits non-zero halts

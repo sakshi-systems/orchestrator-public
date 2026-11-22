@@ -17,7 +17,7 @@ _PROMPT_NAMES = ("execution", "planner", "test-planner", "reviewer", "implemente
 
 
 
-_ITERATION = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
+_ITERATION = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
 
 def _canary(name: str) -> str:
     return f"<<canary:{name}>>"

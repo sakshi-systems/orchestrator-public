@@ -38,7 +38,7 @@ from orchestrator.protocol import (
 from orchestrator.ports import AgentRole, IterationState, RoleSetting
 from tests.fakes import FakeAgentBackend
 
-_ITERATION = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
+_ITERATION = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
 
 
 # ---------------------------------------------------------------------------
@@ -1188,7 +1188,7 @@ def test_review_message_carries_plan_answer_and_no_previous_review_or_diff(tmp_p
     review_path = tmp_path / ".ai-factory" / "01-slug-review-1.md"
     backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
     pr = CodeReviewer(tmp_path, backend)
-    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
+    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
 
     assert pr.review(plan_path, review_path, implementer_answer_path=answer_path, iteration_state=iteration) is True
 
@@ -1220,7 +1220,7 @@ def test_re_review_message_keeps_the_quoted_obligations_and_carries_the_previous
     review_2 = tmp_path / ".ai-factory" / "01-slug-review-2.md"
     backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
     pr = CodeReviewer(tmp_path, backend)
-    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
+    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
 
     assert pr.review(plan_path, review_2, prev_review_path=review_1, iteration_state=iteration) is True
 
@@ -1715,7 +1715,7 @@ def test_each_role_passes_the_exchange_its_artifact_gives(tmp_path):
     review_1 = factory / "reviews" / "john-doe" / "01-slug-review-1.md"
     review_1.write_text("Finding one.")
     review_2 = factory / "reviews" / "john-doe" / "01-slug-review-2.md"
-    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator/01-slug")
+    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
     backend = FakeAgentBackend(on_call=lambda call: {
         AgentRole.PLANNER: "# Plan\n\n## Test Command\n`true`\n",
     }.get(call.role, "REVIEW_PASS\n" if call.role is not AgentRole.IMPLEMENTER else "Did the work.\n"))

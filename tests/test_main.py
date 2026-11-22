@@ -1,4 +1,4 @@
-"""Unit tests for the run's flow: resume and step detection, the task pipeline and its
+"""Unit tests for the run's flow: resume and step detection, the task flow and its
 printed choices, and the usage, layout and command-line helpers around them."""
 
 import dataclasses
