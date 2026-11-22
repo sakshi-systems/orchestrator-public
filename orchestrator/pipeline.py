@@ -9,6 +9,18 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 from .agents import REVIEW_VERIFY, TEST_RUN_VERIFY, CodeReviewer, Implementer, Planner, PlanReviewer
+from .artifact_layout import (
+    PLAN_REVIEWS_DIRNAME,
+    PLAN_SUFFIX,
+    PLANS_DIRNAME,
+    REVIEWS_DIRNAME,
+    SIDECAR_SUFFIX,
+    artifact_dir,
+    implementer_answer_name,
+    plan_name,
+    plan_review_name,
+    task_stem,
+)
 from .config import _ALL_ROLES, OrchestratorConfig, role_runtimes
 from .errors import EscalationError, PipelineStopError
 from .exchange import remove_task
@@ -57,7 +69,7 @@ TEST_MODE = Mode(
 
 def _next_number(directory: Path) -> int:
     """Return the next sequential number based on existing files in directory."""
-    existing = [f for f in directory.glob("*") if f.suffix in (".md", ".json") and not f.is_dir()]
+    existing = [f for f in directory.glob("*") if f.suffix in (PLAN_SUFFIX, SIDECAR_SUFFIX) and not f.is_dir()]
     numbers = [
         int(parts[0])
         for f in existing
@@ -65,13 +77,12 @@ def _next_number(directory: Path) -> int:
     ]
     if numbers:
         return max(numbers) + 1
-    return sum(f.suffix == ".md" for f in existing) + 1
+    return sum(f.suffix == PLAN_SUFFIX for f in existing) + 1
 
 
 def _artifact_dir(project_dir: Path, mode: Mode, dirname: str) -> Path:
     """The artifact directory `dirname`, under the mode's per-roadmap subdirectory when it has one; creates nothing."""
-    base = project_dir / ".ai-factory" / dirname
-    return base / mode.artifact_subdir if mode.artifact_subdir else base
+    return artifact_dir(project_dir, dirname, mode.artifact_subdir)
 
 
 def _raise_git_failure(result: subprocess.CompletedProcess) -> None:
@@ -124,10 +135,10 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     """Plan → implement → verify loop for a single task (verify = review, or a real test run in test mode)."""
     max_iterations = config.max_iterations
     runtimes = role_runtimes(config.runtime, config.roles, mode.roles)
-    plans_dir = _artifact_dir(project_dir, mode, "plans")
+    plans_dir = _artifact_dir(project_dir, mode, PLANS_DIRNAME)
     output_dir = _artifact_dir(project_dir, mode, mode.verify.output_dirname)
-    plan_reviews_dir = _artifact_dir(project_dir, mode, "plan-reviews")
-    reviews_dir = _artifact_dir(project_dir, mode, "reviews")
+    plan_reviews_dir = _artifact_dir(project_dir, mode, PLAN_REVIEWS_DIRNAME)
+    reviews_dir = _artifact_dir(project_dir, mode, REVIEWS_DIRNAME)
     plans_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     plan_reviews_dir.mkdir(parents=True, exist_ok=True)
@@ -135,7 +146,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
 
     roadmap_path = project_dir / ".ai-factory" / mode.roadmap_relpath
     seq = f"{task_index:02d}"
-    plan_path = plans_dir / f"{seq}-{task.slug}.md"
+    plan_path = plans_dir / plan_name(seq, task.slug)
     print(f"\n{'='*60}")
     print(f"{mode.header_label}: {task.title}")
     print(f"{'='*60}")
@@ -146,6 +157,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         plan_review_iterations=config.plan_review_iterations, planning=config.planning,
     )
     seq = plan_path.stem.split("-", 1)[0]
+    stem = task_stem(seq, task.slug)
 
     sessions = _read_sessions(plan_path)
     if not sessions:
@@ -195,7 +207,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         print("\n>>> PLANNING...")
         _record_planning(plan_path, runtimes, counter, planner.session_id)
         if counter > 1:
-            prev_plan_review = plan_reviews_dir / f"{seq}-{task.slug}-plan-review-{counter - 1}.md"
+            prev_plan_review = plan_reviews_dir / plan_review_name(seq, task.slug, counter - 1)
             planner.plan(task.title, task.description, plan_path, roadmap_path=roadmap_path, line_number=task.line_number, plan_review_path=prev_plan_review)
         else:
             planner.plan(task.title, task.description, plan_path, roadmap_path=roadmap_path, line_number=task.line_number)
@@ -210,7 +222,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         for attempt in range(counter, budget + 1):
             print(f"\n>>> REVIEWING PLAN (attempt {attempt})...")
             plan_reviewer = PlanReviewer(project_dir, backend)
-            plan_review_path = plan_reviews_dir / f"{seq}-{task.slug}-plan-review-{attempt}.md"
+            plan_review_path = plan_reviews_dir / plan_review_name(seq, task.slug, attempt)
             plan_passed = plan_reviewer.review_plan(plan_path, plan_review_path, attempt)
             _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
 
@@ -244,8 +256,8 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
             pass
         else:
             print(f"\n>>> IMPLEMENTING (iteration {iteration})...")
-            feedback_path = output_dir / f"{seq}-{task.slug}{mode.verify.output_suffix.format(n=iteration - 1)}" if iteration > 1 else None
-            answer_path = reviews_dir / f"{seq}-{task.slug}-implementer-{iteration}.md"
+            feedback_path = output_dir / (stem + mode.verify.output_suffix.format(n=iteration - 1)) if iteration > 1 else None
+            answer_path = reviews_dir / implementer_answer_name(seq, task.slug, iteration)
             implementer.implement(plan_path, answer_path, feedback_path=feedback_path, roadmap_path=roadmap_path, line_number=task.line_number)
             _write_session(plan_path, "step", f"implemented:{iteration}")
             _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
@@ -254,13 +266,13 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         _raise_git_failure(run_git_sync(["add", "-A"], cwd=project_dir))
         iteration_state = make_iteration_commit(project_dir, ref_name_of(project_dir, plan_path), iteration)
         push_iteration_ref(project_dir, iteration_state)
-        out_path = output_dir / f"{seq}-{task.slug}{mode.verify.output_suffix.format(n=iteration)}"
+        out_path = output_dir / (stem + mode.verify.output_suffix.format(n=iteration))
         prev_out_path = None
         if iteration > 1:
-            prev = output_dir / f"{seq}-{task.slug}{mode.verify.output_suffix.format(n=iteration - 1)}"
+            prev = output_dir / (stem + mode.verify.output_suffix.format(n=iteration - 1))
             if prev.exists():
                 prev_out_path = prev
-        implementer_answer = reviews_dir / f"{seq}-{task.slug}-implementer-{iteration}.md"
+        implementer_answer = reviews_dir / implementer_answer_name(seq, task.slug, iteration)
         passed = verifier.verify(plan_path, out_path, prev_out_path,
                                  implementer_answer if implementer_answer.exists() else None,
                                  iteration_state)
@@ -294,7 +306,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
 
 def _run_dynamic_loop(project_dir: Path, roadmap_path: Path, config: OrchestratorConfig, process_fn, mode: Mode, *, usage_check: Callable[[], None]) -> None:
     """Dynamically re-scan the roadmap before each task, always running the first unchecked one."""
-    plans_dir = _artifact_dir(project_dir, mode, "plans")
+    plans_dir = _artifact_dir(project_dir, mode, PLANS_DIRNAME)
     plans_dir.mkdir(parents=True, exist_ok=True)
     phase_sessions_enabled = config.enable_phase_sessions
 

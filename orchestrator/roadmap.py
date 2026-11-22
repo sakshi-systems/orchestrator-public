@@ -6,7 +6,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .errors import RunDataRefusal
+
 CHECKBOX_RE = re.compile(r"^- \[([ x])\] \*\*(.+?)\*\*\s*[—–-]\s*(.+)$")
+PHASE_HEADING_RE = re.compile(r"^Phase (\d+)\b")
+# The number is anchored to the contract line's own form: it is followed by
+# the dash that joins it to the rest of the title, so a flat title that
+# begins like a number ("2.0 migration notes") carries no number.
+NUMBER_RE = re.compile(r"(\d+(?:\.\d+){1,2})(?=\s+[—–-]\s)")
 
 
 @dataclass
@@ -24,6 +31,23 @@ class Task:
         s = re.sub(r"[^a-z0-9]+", "-", s)
         return s.strip("-")
 
+    @property
+    def number(self) -> str | None:
+        """The leading ``N.M`` or ``N.M.k`` of the title as the contract line
+        writes it — a number the line's own dash follows — or None where the
+        title carries none, a flat task."""
+        found = NUMBER_RE.match(self.title)
+        return found.group(1) if found else None
+
+    @property
+    def phase(self) -> int | None:
+        """The ``N`` of the section heading ``Phase N —`` the task sits under,
+        or None where the section names no phase."""
+        if self.section is None:
+            return None
+        found = PHASE_HEADING_RE.match(self.section)
+        return int(found.group(1)) if found else None
+
 
 @dataclass
 class ParseResult:
@@ -32,11 +56,13 @@ class ParseResult:
     tasks_after_breakpoint: int
 
 
-def parse_roadmap(path: Path) -> ParseResult:
+def parse_roadmap(path: Path, *, keep_after_breakpoint: bool = False) -> ParseResult:
     """Parse ROADMAP.md and return ParseResult.
 
     When a ``---STOP---`` marker is present and at least one task follows it,
-    only tasks before the marker are returned and ``breakpoint_hit`` is True.
+    only tasks before the marker are returned and ``breakpoint_hit`` is True,
+    unless ``keep_after_breakpoint`` keeps the tasks after the marker among
+    the returned ones — the run's queue hides them whatever a reader asks for.
     A marker with nothing after it is treated as if it weren't there.
     """
     lines = path.read_text().splitlines()
@@ -50,7 +76,7 @@ def parse_roadmap(path: Path) -> ParseResult:
         if stripped.startswith("## ") or stripped.startswith("### "):
             current_section = stripped.lstrip("#").strip()
 
-        if marker_found:
+        if marker_found and not keep_after_breakpoint:
             if CHECKBOX_RE.match(stripped):
                 tasks_after_breakpoint += 1
             continue
@@ -61,6 +87,8 @@ def parse_roadmap(path: Path) -> ParseResult:
 
         m = CHECKBOX_RE.match(stripped)
         if m:
+            if marker_found:
+                tasks_after_breakpoint += 1
             done = m.group(1) == "x"
             title = m.group(2).strip()
             description = m.group(3).strip()
@@ -68,6 +96,26 @@ def parse_roadmap(path: Path) -> ParseResult:
 
     breakpoint_hit = marker_found and tasks_after_breakpoint > 0
     return ParseResult(tasks=tasks, breakpoint_hit=breakpoint_hit, tasks_after_breakpoint=tasks_after_breakpoint)
+
+
+def find_task(tasks: list[Task], address: str) -> Task:
+    """The task an address names: its ``N.M``, or a flat task's title as its
+    line gives it.
+
+    Raises RunDataRefusal where no line of the roadmap matches the address,
+    and where a flat title stands on more than one line, naming each line's
+    number as the file counts them.
+    """
+    for task in tasks:
+        if task.number == address:
+            return task
+    titled = [task for task in tasks if task.number is None and task.title == address]
+    if len(titled) > 1:
+        lines = ", ".join(str(task.line_number + 1) for task in titled)
+        raise RunDataRefusal(f"Task {address!r} stands on more than one line of the roadmap: lines {lines}")
+    if titled:
+        return titled[0]
+    raise RunDataRefusal(f"No task {address!r} in the roadmap")
 
 
 def _find_task_line(lines: list[str], task: Task) -> int | None:

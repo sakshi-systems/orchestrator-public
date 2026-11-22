@@ -56,7 +56,7 @@ Agents never communicate directly — only through files in the target project's
 
 No role writes an artifact and no runtime has its own path to one: whichever agent takes a role, wherever it lives, the role's turn goes in as one self-contained message ([Invoking a role](features/agent-runtime.md#invoking-a-role)) and its result comes out as its answer. A project's `.ai-factory` may lie outside its repository, and the protocol serves it the same way. The run writes its artifacts as UTF-8 and reads them back as UTF-8, whatever the machine's locale.
 
-Artifact directory layout and per-roadmap routing live on [named-roadmaps.md](features/named-roadmaps.md); resume state built on top of this protocol lives on [resume.md](features/resume.md).
+Artifact directory layout and per-roadmap routing live on [named-roadmaps.md](features/named-roadmaps.md); resume state built on top of this protocol lives on [resume.md](features/resume.md). A client outside the run, a skill included, reaches these files only through [the commands](features/run-data.md) and never reads or writes them.
 
 ## Completion signals
 

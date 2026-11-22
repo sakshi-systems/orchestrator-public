@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .artifact_layout import sidecar_path
 from .config import AGENT_RUNTIMES
 from .errors import EmptyAnswerError, HaltError
 from .ports import AgentRole
@@ -136,7 +137,7 @@ def _validate_record(data: dict[str, Any], path: Path) -> None:
 def _read_sessions(plan_path: Path) -> dict[str, Any]:
     """Return the plan's sidecar record: `{}` when absent; halts when the existing
     sidecar is unreadable, non-UTF-8, malformed or not a JSON object."""
-    p = plan_path.with_suffix('.json')
+    p = sidecar_path(plan_path)
     data = _load_sidecar(p)
     _validate_record(data, p)
     return data
@@ -148,12 +149,22 @@ def _write_session(plan_path: Path, key: str, value: str) -> None:
 
 
 def _write_sessions(plan_path: Path, updates: dict[str, Any]) -> None:
-    """Merge keys into the existing sidecar record via a temporary file and an
-    atomic replace. Invalid existing data or an I/O failure halts without
-    replacing the original."""
-    p = plan_path.with_suffix('.json')
+    """Merge keys into the existing sidecar record: the record as read,
+    updated, written whole through the shared atomic replacing writer."""
     data = _read_sessions(plan_path)
     data.update(updates)
+    _replace_sessions(plan_path, data)
+
+
+def _replace_sessions(plan_path: Path, record: dict[str, Any]) -> None:
+    """Write `record` as the plan's whole sidecar record, replacing what the
+    file holds without merging, via a temporary file and an atomic replace.
+
+    The merging writer's validation and failure behaviour, on a record the
+    caller built: invalid values halt before anything is written, and an
+    I/O failure halts without replacing the original."""
+    p = sidecar_path(plan_path)
+    data = dict(record)
     _validate_record(data, p)
     tmp = p.with_suffix('.json.tmp')
     try:

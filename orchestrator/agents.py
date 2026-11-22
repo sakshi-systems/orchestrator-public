@@ -7,6 +7,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from .artifact_layout import REVIEWS_DIRNAME, REVIEW_SUFFIX, TEST_RUNS_DIRNAME, TEST_RUN_SUFFIX
 from .errors import EscalationError, HaltError
 from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, IterationState, VerifierProtocol, VerifyKind
 from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_artifact, _write_artifact, _write_session
@@ -43,8 +44,8 @@ def _test_run_verifier(code_reviewer: VerifierProtocol, project_dir: Path) -> Ve
 REVIEW_VERIFY = VerifyKind(
     step="review",
     fail_tag="review_failed:",
-    output_dirname="reviews",
-    output_suffix="-review-{n}.md",
+    output_dirname=REVIEWS_DIRNAME,
+    output_suffix=REVIEW_SUFFIX,
     pass_signal="REVIEW_PASS",
     running_header="REVIEWING",
     pass_line="REVIEW PASSED — see {path}",
@@ -56,8 +57,8 @@ REVIEW_VERIFY = VerifyKind(
 TEST_RUN_VERIFY = VerifyKind(
     step="test_run",
     fail_tag="test_run_failed:",
-    output_dirname="test-runs",
-    output_suffix="-test-{n}.txt",
+    output_dirname=TEST_RUNS_DIRNAME,
+    output_suffix=TEST_RUN_SUFFIX,
     pass_signal="TEST_PASS",
     running_header="RUNNING TESTS",
     pass_line="TESTS PASSED — see {path}",

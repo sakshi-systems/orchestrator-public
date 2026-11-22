@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .artifact_layout import plan_groups, plan_review_name, plan_review_pattern, sidecar_path, task_stem
 from .errors import HaltError
 from .ports import VerifyKind
 from .protocol import PLAN_REVIEW_PASS, _has_signal, _read_artifact, _read_sessions
@@ -132,25 +133,51 @@ def _validate_sidecar_step(
         return step_value
     if step_value.startswith("plan_review_failed:"):
         n = _parse_counter(step_value, "plan_review_failed:")
-        if not (plan_reviews_dir / f"{seq}-{slug}-plan-review-{n}.md").exists():
+        if not (plan_reviews_dir / plan_review_name(seq, slug, n)).exists():
             return ""
         return step_value
     if step_value == "plan_reviewed":
         if not any(
             _has_signal(_read_artifact(f), PLAN_REVIEW_PASS)
-            for f in plan_reviews_dir.glob(f"{seq}-{slug}-plan-review-*.md")
+            for f in plan_reviews_dir.glob(plan_review_pattern(seq, slug))
         ):
             return ""
         return step_value
     if step_value.startswith(fail_prefix):
         n = _parse_counter(step_value, fail_prefix)
-        if not (artifact_dir / f"{seq}-{slug}{fail_suffix.format(n=n)}").exists():
+        if not (artifact_dir / (task_stem(seq, slug) + fail_suffix.format(n=n))).exists():
             return ""
         return step_value
     if step_value == "escalated":
         return step_value
     # unrecognized → return as-is; dispatch falls through to detection from the plan reviews on disk
     return step_value
+
+
+def select_task_group(plans_dir: Path, slug: str) -> Path | None:
+    """The task's selected group in the plans directory: the lowest-numbered
+    plan of the slug whose sidecar is not ``done``, or None where no group of
+    the slug is unfinished.
+
+    Every group's sidecar is read, so a record the run cannot read halts
+    before any selection. Two unfinished groups of the slug whose numbers read
+    the same halt the run, naming both files.
+    """
+    groups = plan_groups(plans_dir, slug)
+    unfinished = [
+        f for f in groups.values()
+        if _read_sessions(f).get("step") != "done"
+    ]
+    numbers: dict[int, str] = {}
+    for f in unfinished:
+        prefix = f.stem.split("-", 1)[0]
+        number = int(prefix)
+        if number in numbers:
+            raise HaltError(f"Resume record number is ambiguous\n{numbers[number]}\n{f}")
+        numbers[number] = str(f)
+    if not unfinished:
+        return None
+    return min(unfinished, key=lambda f: int(f.stem.split("-", 1)[0]))
 
 
 def _detect_step(
@@ -174,27 +201,11 @@ def _detect_step(
     the slug whose sidecar is not `done` (handles the case where a previous run was interrupted and the current run computes
     a different seq via _next_number).
     """
-    plans_dir = plan_path.parent
-    groups: dict[str, Path] = {}
-    for f in plans_dir.glob("*"):
-        if f.suffix not in (".md", ".json") or f.is_dir():
-            continue
-        prefix, separator, candidate_slug = f.stem.partition("-")
-        if separator and prefix.isascii() and prefix.isdigit() and candidate_slug == slug:
-            groups[f.stem] = f.with_suffix(".md")
-    # Validate every matching group before excluding terminal history.
-    records = [(f, _read_sessions(f)) for f in groups.values()]
-    unfinished = [(f, record) for f, record in records if record.get("step") != "done"]
-    numbers: dict[int, str] = {}
-    for f, _ in unfinished:
-        prefix = f.stem.split("-", 1)[0]
-        number = int(prefix)
-        if number in numbers:
-            raise HaltError(f"Resume record number is ambiguous\n{numbers[number]}\n{f}")
-        numbers[number] = str(f)
-    if not unfinished:
+    selected = select_task_group(plan_path.parent, slug)
+    if selected is None:
         return ("plan", 1, plan_path)
-    plan_path, sessions = min(unfinished, key=lambda item: int(item[0].stem.split("-", 1)[0]))
+    plan_path = selected
+    sessions = _read_sessions(plan_path)
     seq = plan_path.stem.split("-", 1)[0]
 
     raw = sessions.get("step", "")
@@ -214,14 +225,14 @@ def _detect_step(
             for role in mismatched
         )
         raise HaltError(
-            f"Resume runtime does not match the record owner\n{plan_path.with_suffix('.json')}\n{details}"
+            f"Resume runtime does not match the record owner\n{sidecar_path(plan_path)}\n{details}"
         )
     if "runtime" not in sessions and not plan_path.exists():
-        raise HaltError(f"Resume record has no legacy plan\n{plan_path.with_suffix('.json')}")
+        raise HaltError(f"Resume record has no legacy plan\n{sidecar_path(plan_path)}")
 
     interpreted = _interpret_step(raw, verify)
     if interpreted is None and "runtime" in sessions:
-        raise HaltError(f"Resume record has no usable explicit step\n{plan_path.with_suffix('.json')}\n{raw!r}")
+        raise HaltError(f"Resume record has no usable explicit step\n{sidecar_path(plan_path)}\n{raw!r}")
     if interpreted is not None:
         dispatch_step, next_attempt, explicit_counter = interpreted
         if explicit_counter is not None:
@@ -242,7 +253,7 @@ def _detect_step(
     # unrecognized or stale → fall through to detection from the plan reviews on disk
 
     # 3. No plan-review files → need to do first plan review
-    plan_review_files = sorted(plan_reviews_dir.glob(f"{seq}-{slug}-plan-review-*.md"))
+    plan_review_files = sorted(plan_reviews_dir.glob(plan_review_pattern(seq, slug)))
     if not plan_review_files:
         return ("plan_review", 1, plan_path)
 

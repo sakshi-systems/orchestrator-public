@@ -227,6 +227,23 @@ def _run_settings_file(project_dir: Path | None, user_slug: str | None) -> Path:
     return directory / f"{slug}.json"
 
 
+def validate_roadmap_path(value: str | None, source: Path | None) -> None:
+    """Refuse a roadmap path that is absolute or holds a ``..`` segment — the
+    one guard every roadmap path passes, wherever it was read from.
+
+    `source` is the file the value was read from, whose refusal names it; a
+    None `source` marks the ``--roadmap`` option, whose refusal names the
+    option instead.
+    """
+    if value is None:
+        return
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        if source is None:
+            raise SystemExit(f"Invalid '--roadmap' value: {value!r} (must be a relative path with no '..' segments)")
+        raise SystemExit(f"Invalid 'roadmap_path' in {source}: {value!r} (must be a relative path with no '..' segments)")
+
+
 def load_config(project_dir: Path | None = None, user_slug: str | None = None) -> OrchestratorConfig:
     """Load and validate the configuration from the machine's base and the person's
     run settings.
@@ -326,8 +343,7 @@ def load_config(project_dir: Path | None = None, user_slug: str | None = None) -
     # file — the base holds no run key and a default always validates — so
     # every diagnostic names the person's file.
     roadmap_path = data.get("roadmap_path") or None
-    if roadmap_path is not None and (Path(roadmap_path).is_absolute() or ".." in Path(roadmap_path).parts):
-        raise SystemExit(f"Invalid 'roadmap_path' in {person_path}: {roadmap_path!r} (must be a relative path with no '..' segments)")
+    validate_roadmap_path(roadmap_path, person_path)
 
     runtime = data["runtime"] if "runtime" in data else "claude"
     if not isinstance(runtime, str) or runtime not in AGENT_RUNTIMES:

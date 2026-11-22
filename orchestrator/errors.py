@@ -69,6 +69,16 @@ class HeadNotReachedError(HaltError):
     or the courier could not deliver the call's message to it."""
 
 
+class RunDataRefusal(Exception):
+    """Raised when a command over a run's data refuses what it was asked for.
+
+    A deliberate sibling of the halt, never a HaltError subclass: a halt ends
+    a run, a refusal answers a command — printed as its first line on standard
+    error with exit status 1, and nothing on standard output. The behaviour is
+    docs/features/run-data.md; the values live in docs/reference/run-data.md.
+    """
+
+
 class PipelineStopError(Exception):
     """Raised to request a graceful halt of the pipeline."""
 

@@ -28,12 +28,19 @@ def _external_evidence_path(project_dir: Path, candidate: Path) -> Path:
         raise ValueError(f"Invalid external evidence path: {e}") from e
 
 
-def _resolve_roadmap_relpath(config: OrchestratorConfig, project_dir: Path) -> str:
-    """Three explicit states keyed on config.roadmap_path: absent, 'my', or an explicit path."""
-    if config.roadmap_path is None:
+def _resolve_roadmap_relpath(config: OrchestratorConfig, project_dir: Path, roadmap: str | None = None) -> str:
+    """Three explicit states keyed on the roadmap value: absent, 'my', or an
+    explicit path.
+
+    The value is `roadmap` — the ``--roadmap`` option's — where one is given,
+    and the configured `roadmap_path` where none is, so a run of the project
+    and a command over its data take the same roadmap.
+    """
+    value = roadmap if roadmap is not None else config.roadmap_path
+    if value is None:
         return "ROADMAP.md"
 
-    if config.roadmap_path == "my":
+    if value == "my":
         slug = user_slug(project_dir)
         if slug is None:
             raise HaltError(
@@ -62,7 +69,7 @@ def _resolve_roadmap_relpath(config: OrchestratorConfig, project_dir: Path) -> s
             )
         return relpath
 
-    return config.roadmap_path
+    return value
 
 
 def _tests_sibling(relpath: str) -> str:

@@ -6,12 +6,13 @@ import subprocess
 from pathlib import Path
 
 from . import git_runner
+from .artifact_layout import PLANS_DIRNAME, artifact_dir
 from .errors import (
     BranchNotFetchedError,
     BranchNotFromBaseError,
     LeftoverBranchNotRemovedError,
 )
-from .git_runner import run_git_sync
+from .git_runner import _changed_paths, run_git_sync
 from .ports import ImplementerResultProtocol
 
 
@@ -38,7 +39,7 @@ def ref_name_of(project_dir: Path, plan_path: Path) -> str:
     before its stem, `john-doe/01-slug`, so two roadmaps whose tasks share a
     stem never share a name.
     """
-    segment = plan_path.parent.relative_to(project_dir / ".ai-factory" / "plans")
+    segment = plan_path.parent.relative_to(artifact_dir(project_dir, PLANS_DIRNAME, None))
     return "/".join((*segment.parts, plan_path.stem))
 
 
@@ -98,16 +99,6 @@ def _previous_tip(cwd: Path, laid_ref: str, base: str) -> str:
     rev = run_git_sync(["rev-parse", "--verify", "--quiet", laid_ref], cwd=cwd)
     resolved = rev.stdout.strip() if rev.returncode == 0 else ""
     return resolved or base
-
-
-def _changed_paths(cwd: Path, base: str, tip: str) -> set[str]:
-    """The paths that differ between the two commits, relative to `cwd`, a
-    rename listed as the deletion of its source and the addition of its
-    destination whatever the repository's `diff.renames` setting says."""
-    diff = run_git_sync(
-        ["diff", "--no-renames", "--name-only", "-z", "--relative", base, tip], cwd=cwd,
-    )
-    return {path for path in diff.stdout.split("\0") if path}
 
 
 def _lay_branch_tree(cwd: Path, branch: str, laid_ref: str, preserved: tuple[Path, ...]) -> None:

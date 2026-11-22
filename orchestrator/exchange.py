@@ -10,12 +10,13 @@ import tempfile
 from pathlib import Path
 from typing import NamedTuple
 
+from .artifact_layout import PLAN_REVIEWS_DIRNAME, PLANS_DIRNAME, REVIEWS_DIRNAME, artifact_dir
 from .ports import AgentRole
 
 POLL_SECONDS = 2
 
 _ROOT = Path.home() / ".local/state/orchestrator/exchanges"
-_DIRS = ("plans", "plan-reviews", "reviews")
+_DIRS = (PLANS_DIRNAME, PLAN_REVIEWS_DIRNAME, REVIEWS_DIRNAME)
 
 
 def answer_command() -> Path:
@@ -84,7 +85,7 @@ def remove_task(project_dir: Path, plan_path: Path) -> None:
     not exist is not an error, and nothing that does not exist is removed.
     """
     root = _ROOT / _digest_of(project_dir)
-    segment = plan_path.parent.relative_to(project_dir / ".ai-factory" / "plans")
+    segment = plan_path.parent.relative_to(artifact_dir(project_dir, PLANS_DIRNAME, None))
     stem = plan_path.stem
     prefixes = tuple(
         (f"{role.value}-{stem}.", f"{role.value}-{stem}-") for role in AgentRole

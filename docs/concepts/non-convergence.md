@@ -43,4 +43,4 @@ The reason is where each thing lies. What the implementer must do is in the task
 - **The review's language** — phrasing like "spec-owner decision," "by design," "carried over" in the early rounds.
 - **The implementer's answers** — its `DEVIATION:` notes in the file beside each review, which say where it departed from the plan and why.
 
-Diagnosis and repair are carried out by a chat skill over the remaining artifacts: `/task-rescue` diagnoses how deep the root cause runs (spec / plan / code), repairs to that depth, and rolls the sidecar and artifacts back to the repaired state.
+Diagnosis and repair are carried out by a chat skill over the remaining artifacts: `/task-rescue` diagnoses how deep the root cause runs (spec / plan / code), repairs to that depth, and rolls the task back to the repaired state through the orchestrator's `rollback` ([A run's data is reached through commands](../features/run-data.md#rolling-a-task-back)).

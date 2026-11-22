@@ -12,13 +12,14 @@ import time
 import uuid
 from functools import partial
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NoReturn
 
 from .agents import SpecLayer
+from .artifact_layout import PLAN_REVIEWS_DIRNAME, PLANS_DIRNAME, REVIEWS_DIRNAME, TEST_RUNS_DIRNAME
 from .claude_cli import ClaudeAgentBackend
 from .codex_cli import CodexAgentBackend
 from .config import OrchestratorConfig, load_config, role_runtimes
-from .errors import EscalationError, HaltError, HeadNotReachedError, PipelineStopError
+from .errors import EscalationError, HaltError, HeadNotReachedError, PipelineStopError, RunDataRefusal
 from .exchange import answer_command
 from .head_backend import HeadAgentBackend
 from .hermes_api import HermesAgentBackend
@@ -31,13 +32,14 @@ from .notify import Outcome, report
 from .pipeline import IMPLEMENT_MODE, TEST_MODE, Mode, _artifact_dir, _run_dynamic_loop, process_task
 from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol
 from .resume import plan_review_budget
+from .run_data import dispose, refuse, rollback, show, sweep
 from .runtime import _handle_sigint, _run_summary, _with_caffeinate
 from .usage import _check_codex_usage_limits, _check_usage_limits
 from .user_slug import USER_SLUG_MISSING, user_slug
 from . import state
 
 
-_IMPLEMENTER_RESULT_DIRS = ("plans", "plan-reviews", "reviews", "test-runs")
+_IMPLEMENTER_RESULT_DIRS = (PLANS_DIRNAME, PLAN_REVIEWS_DIRNAME, REVIEWS_DIRNAME, TEST_RUNS_DIRNAME)
 
 
 def _factory_tracked(project_dir: Path) -> bool:
@@ -258,6 +260,13 @@ def _run_settings_slug(project_dir: Path) -> str | None:
     return slug
 
 
+def _refuse_usage(message: str) -> NoReturn:
+    """Answer a malformed invocation of a command over a run's data the way
+    the command refuses: one line on standard error, status 1 — never
+    argparse's usage block."""
+    raise RunDataRefusal(message)
+
+
 def cli() -> None:
     state.queue_exhausted = False
     parser = argparse.ArgumentParser(description="AI orchestrator — plan, implement, review from roadmap")
@@ -272,7 +281,44 @@ def cli() -> None:
         p.add_argument("--completion-file", help="External path for terminal completion proof")
         p.add_argument("--invocation-id", help="Canonical UUID correlated with completion proof")
 
-    args = parser.parse_args()
+    # A malformed invocation of a command over a run's data is refused like
+    # any other refusal: one line, status 1 — the run's own commands keep
+    # argparse's usage error.
+    show_parser = subparsers.add_parser("show", help="Show what the orchestrator holds for a task or a phase, as JSON")
+    show_parser.error = _refuse_usage
+    show_parser.add_argument("--project-dir", help="Path to the project directory")
+    show_parser.add_argument("--roadmap", help="The roadmap to read, as the run's roadmap_path takes it")
+    show_parser.add_argument("task", nargs="?", help="The task's N.M, or a flat task's title as its line gives it")
+    show_parser.add_argument("--phase", help="The phase's number")
+
+    rollback_parser = subparsers.add_parser("rollback", help="Take a task back to a position show listed for it")
+    rollback_parser.error = _refuse_usage
+    rollback_parser.add_argument("--project-dir", help="Path to the project directory")
+    rollback_parser.add_argument("--roadmap", help="The roadmap to read, as the run's roadmap_path takes it")
+    rollback_parser.add_argument("task", help="The task's N.M, or a flat task's title as its line gives it")
+    rollback_parser.add_argument("position", help="The position show lists for the task")
+
+    sweep_parser = subparsers.add_parser("sweep", help="Remove the run's artifacts of a phase whose every task is done")
+    sweep_parser.error = _refuse_usage
+    sweep_parser.add_argument("--project-dir", help="Path to the project directory")
+    sweep_parser.add_argument("--roadmap", help="The roadmap to read, as the run's roadmap_path takes it")
+    sweep_parser.add_argument("--phase", help="The phase's number")
+
+    dispose_parser = subparsers.add_parser("dispose", help="Record the dispositions of a closure's deposit read from standard input")
+    dispose_parser.error = _refuse_usage
+    dispose_parser.add_argument("--project-dir", help="Path to the project directory")
+
+    try:
+        args, extras = parser.parse_known_args()
+    except RunDataRefusal as e:
+        refuse(e)
+    if extras:
+        # What parse_args says here for the run's own commands, kept as it
+        # was; a command over a run's data refuses the same leftovers as
+        # one line with status 1.
+        if args.command in ("show", "rollback", "sweep", "dispose"):
+            refuse(RunDataRefusal(f"unrecognized arguments: {' '.join(extras)}"))
+        parser.error(f"unrecognized arguments: {' '.join(extras)}")
     project_dir = Path(args.project_dir).resolve() if hasattr(args, "project_dir") and args.project_dir else Path(".").resolve()
 
     completion_file = getattr(args, "completion_file", None)
@@ -290,6 +336,28 @@ def cli() -> None:
             completion_path = _external_evidence_path(project_dir, Path(completion_file))
         except ValueError as e:
             parser.error(str(e))
+
+    if args.command in ("show", "rollback", "sweep", "dispose"):
+        # The commands answer from the run's data alone: they load the
+        # configuration as a run does and touch none of the run's state,
+        # handlers or loops. A rollback changes the run's records, artifacts
+        # and working tree — the head's exchange files among the things it
+        # leaves where they stand — a sweep removes the run's artifacts of a
+        # finished phase alone, and a dispose writes the dispositions
+        # record alone, its deposit read from standard input.
+        try:
+            config = load_config(project_dir=project_dir, user_slug=_run_settings_slug(project_dir))
+            if args.command == "show":
+                show(config, project_dir, roadmap=args.roadmap, task=args.task, phase=args.phase)
+            elif args.command == "rollback":
+                rollback(config, project_dir, roadmap=args.roadmap, task=args.task, position=args.position)
+            elif args.command == "sweep":
+                sweep(config, project_dir, roadmap=args.roadmap, phase=args.phase)
+            else:
+                dispose(project_dir)
+        except (RunDataRefusal, HaltError, SystemExit) as e:
+            refuse(e)
+        return
 
     completed_normally = False
     try:
