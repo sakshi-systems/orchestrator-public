@@ -19,7 +19,7 @@ from orchestrator.errors import EscalationError
 from orchestrator.layout import _artifact_subdir, _tests_sibling
 from orchestrator.implementer_result import WorkingTreeResult
 from orchestrator.pipeline import IMPLEMENT_MODE, TEST_MODE, _artifact_dir, _next_number, process_task
-from orchestrator.ports import AgentRole
+from orchestrator.ports import AgentRole, Repository
 from orchestrator.roadmap import parse_roadmap
 from tests.fakes import FakeAgentBackend
 
@@ -190,7 +190,8 @@ def _backend(flow):
 
 def _run(flow, backend, *, phase=None):
     return process_task(flow.project, flow.task, _next_number(flow.plan.parent), flow.config,
-                        flow.mode, phase_session_id=phase, backend=backend, implementer_result=WorkingTreeResult())
+                        flow.mode, phase_session_id=phase, backend=backend, implementer_result=WorkingTreeResult(),
+                        tree=(Repository(directory=flow.project, folder=None),))
 
 
 def _snapshot(flow):
@@ -203,7 +204,7 @@ def _assert_planner_assignment(call, flow):
     assert call.role is AgentRole.PLANNER
     assert flow.task.title in call.prompt
     assert flow.task.description in call.prompt
-    assert f"Roadmap: {flow.roadmap} (line {flow.task.line_number + 1})" in call.prompt
+    assert f"Roadmap: {flow.roadmap.relative_to(flow.project).as_posix()} (line {flow.task.line_number + 1})" in call.prompt
     assert "Return the plan as your answer." in call.prompt
     assert str(flow.plan) not in call.prompt
     names = ("execution", flow.mode.planner_prompt_name, "escalation")
@@ -942,7 +943,7 @@ def test_planning_assignment_includes_supplied_roadmap_without_display_line(flow
     Planner(f.project, backend).plan(f.task.title, f.task.description, f.plan,
                                      plan_review_path=review, roadmap_path=f.roadmap)
     prompt = backend.calls[0].prompt
-    assert f"Roadmap: {f.roadmap}\n" in prompt
+    assert f"Roadmap: {f.roadmap.relative_to(f.project).as_posix()}\n" in prompt
     assert f.task.title in prompt and f.task.description in prompt
     assert "Return the plan as your answer." in prompt
     assert str(f.plan) not in prompt

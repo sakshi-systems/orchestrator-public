@@ -744,3 +744,14 @@ def test_run_git_sync_treats_a_named_pathspec_as_a_literal_path(
 
     assert listed.returncode == 0
     assert listed.stdout.splitlines() == ["*.txt"]
+
+
+def test_run_git_sync_refuses_a_stdin_for_a_call_that_reads_none_of_git_s_output(
+        git_stand: GitStand) -> None:
+    """``stdin`` feeds one captured call: the uncaptured wait never writes
+    the pipe, so a call that reads its standard input would outwait any
+    bound. The pair is refused before any process runs — `git version`
+    reads no standard input, so without the refusal the call would return
+    git's own answer and no error."""
+    with pytest.raises(ValueError, match="stdin feeds a captured call"):
+        run_git_sync(["version"], cwd=git_stand.checkout, capture=False, stdin=b"")

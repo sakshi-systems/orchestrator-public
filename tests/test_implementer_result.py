@@ -16,6 +16,8 @@ from orchestrator.errors import (
     LeftoverBranchNotRemovedError,
 )
 from orchestrator.implementer_result import HermesResult, WorkingTreeResult, branch_of
+from orchestrator.ports import Repository
+from orchestrator.repositories import find_run_tree
 from tests.conftest import git_in
 
 ESCALATION_ARTIFACT = "Some notes\n\n## Escalation\nMissing decision: pick A or B.\n\nESCALATION"
@@ -98,7 +100,7 @@ def _push_his_branch(stand, change):
 
 def _result(stand, mode_dirs=("plans", "plan-reviews", "reviews", "test-runs", "dispositions")):
     preserved = tuple(stand.factory / name for name in mode_dirs)
-    return HermesResult(stand.run, preserved)
+    return HermesResult(stand.run, (Repository(directory=stand.run, folder=None),), preserved)
 
 
 def test_the_working_tree_result_does_nothing_and_says_nothing(stand):
@@ -122,7 +124,7 @@ def test_the_channel_names_the_branch_and_how_to_reach_it(stand):
     first = result.channel_text(plan, first=True)
     assert BRANCH in first and "base commit" in first and "push it to origin" in first
     continued = result.channel_text(plan, first=False)
-    assert BRANCH in continued and "Continue the branch" in continued and "base commit" not in continued
+    assert BRANCH in continued and "continue the branch" in continued and "base commit" not in continued
 
 
 ITERATION_REF = "refs/orchestrator-iteration/01-slug"  # an iteration ref origin holds in the run's namespace
@@ -504,7 +506,7 @@ def test_a_project_in_a_subdirectory_of_its_repository_is_laid(stand):
     project = stand.run / "work"
     (project / ".ai-factory" / "plans").mkdir(parents=True)
     preserved = tuple(project / ".ai-factory" / name for name in ("plans", "plan-reviews", "reviews", "test-runs"))
-    result = HermesResult(project, preserved)
+    result = HermesResult(project, (Repository(directory=project, folder=None),), preserved)
 
     result.lay(project / ".ai-factory" / "plans" / "01-slug.md")
 
@@ -599,7 +601,8 @@ def test_implement_prepares_sends_the_channel_and_lays_his_branch(stand, monkeyp
     assert observed["branch_at_call_time"] == ""
     (call,) = backend.calls
     assert call.prompt.endswith(
-        f"Create the branch {BRANCH} from the base commit, commit your work to it, and push it to origin."
+        f"In the project's repository, create the branch {BRANCH} from the base "
+        "commit, commit your work to it, and push it to origin."
     )
     assert "Implement the plan below." in call.prompt
     assert answer.read_text() == "Did the work."
@@ -628,7 +631,8 @@ def test_a_continued_session_skips_the_preparation_and_continues_the_branch(stan
 
     (call,) = backend.calls
     assert call.prompt.endswith(
-        f"Continue the branch {BRANCH}, commit your work to it, and push it to origin."
+        f"In the project's repository, continue the branch {BRANCH}, "
+        "commit your work to it, and push it to origin."
     )
     assert observed["branch_at_call_time"] != ""  # the preparation never removed it
 
@@ -660,9 +664,205 @@ class FakeRecorder:
         return (result if isinstance(result, str) else "fake output"), "his-session"
 
 
-def test_the_branch_name_is_the_plan_s_own_stem(stand):
-    assert branch_of(stand.run, stand.factory / "plans" / "07-other-task.md") == "orchestrator/07-other-task"
-    assert (
-        branch_of(stand.run, stand.factory / "plans" / "john-doe" / "07-other-task.md")
-        == "orchestrator/john-doe/07-other-task"
+def test_the_branch_name_is_the_task_s_own_name():
+    assert branch_of("07-other-task") == "orchestrator/07-other-task"
+    assert branch_of("john-doe/07-other-task") == "orchestrator/john-doe/07-other-task"
+
+
+def _linked_stand(tmp_path):
+    """A project whose `.ai-factory` is a tracked link into another repository
+    holding two projects' folders: the run's tree is both, and his clone of
+    each origin builds his branch of each, the other repository's carrying
+    the project's folder."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "README.md").write_text("shared\n")
+    git_in(shared, "init", "-q", "-b", "main", ".")
+    (shared / "ai" / "p1" / "plans").mkdir(parents=True)
+    (shared / "ai" / "p1" / "plans" / "01-slug.md").write_text("# Plan\n")
+    (shared / "ai" / "p1" / "notes.md").write_text("a folder file his work changes\n")
+    (shared / "ai" / "p2").mkdir(parents=True)  # another project's folder of the same repository
+    git_in(shared, "add", "-A")
+    git_in(shared, "commit", "-q", "-m", "the shared base")
+    shared_base = git_in(shared, "rev-parse", "HEAD").strip()
+    shared_origin = tmp_path / "shared-origin.git"
+    git_in(tmp_path, "init", "--bare", "-b", "main", str(shared_origin))
+    git_in(shared, "remote", "add", "origin", str(shared_origin))
+    git_in(shared, "push", "-q", "origin", "HEAD:refs/heads/main")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "code.txt").write_text("base\n")
+    project.joinpath(".ai-factory").symlink_to(shared / "ai" / "p1")
+    git_in(project, "init", "-q", "-b", "main", ".")
+    git_in(project, "add", "-A")
+    git_in(project, "commit", "-q", "-m", "the base")
+    project_base = git_in(project, "rev-parse", "HEAD").strip()
+    project_origin = tmp_path / "project-origin.git"
+    git_in(tmp_path, "init", "--bare", "-b", "main", str(project_origin))
+    git_in(project, "remote", "add", "origin", str(project_origin))
+    git_in(project, "push", "-q", "origin", "HEAD:refs/heads/main")
+
+    his_project = tmp_path / "his-project"
+    git_in(tmp_path, "clone", "-q", str(project_origin), str(his_project))
+    his_shared = tmp_path / "his-shared"
+    git_in(tmp_path, "clone", "-q", str(shared_origin), str(his_shared))
+    factory = project / ".ai-factory"
+    preserved = tuple(
+        factory / name for name in ("plans", "plan-reviews", "reviews", "test-runs", "dispositions")
     )
+    return SimpleNamespace(
+        project=project, shared=shared, factory=factory,
+        project_origin=project_origin, shared_origin=shared_origin,
+        project_base=project_base, shared_base=shared_base,
+        his_project=his_project, his_shared=his_shared,
+        tree=find_run_tree(project), preserved=preserved,
+        plan=factory / "plans" / "01-slug.md",
+    )
+
+
+def test_the_channel_names_each_repository_of_the_tree_and_its_own_branch(tmp_path):
+    """One sentence per repository of the tree from one template: each names
+    its repository by its label and the branch as that repository names it,
+    the other repository's carrying the project's folder, created from the
+    base commit on the first call and continued afterwards."""
+    stand = _linked_stand(tmp_path)
+    assert len(stand.tree) == 2
+    result = HermesResult(stand.project, stand.tree, stand.preserved)
+
+    assert result.channel_text(stand.plan, first=True) == (
+        "Channel: implement on your own branch, in every repository of the "
+        "run's tree, one you did not change included, where it stays at its "
+        "base. In the project's repository, create the branch "
+        "orchestrator/01-slug from the base commit, commit your work to it, "
+        "and push it to origin. In the repository holding `.ai-factory`, its "
+        "folder `ai/p1/`, create the branch orchestrator/ai/p1/01-slug from "
+        "the base commit, commit your work to it, and push it to origin."
+    )
+    assert result.channel_text(stand.plan, first=False) == (
+        "Channel: implement on your own branch, in every repository of the "
+        "run's tree, one you did not change included, where it stays at its "
+        "base. In the project's repository, continue the branch "
+        "orchestrator/01-slug, commit your work to it, and push it to origin. "
+        "In the repository holding `.ai-factory`, its folder `ai/p1/`, "
+        "continue the branch orchestrator/ai/p1/01-slug, commit your work to "
+        "it, and push it to origin."
+    )
+
+
+def test_prepare_removes_each_repository_s_leftover_by_its_own_name(tmp_path):
+    """The removal runs in each repository of the tree with that repository's
+    names: the branch and laid ref in the other repository carry the project's
+    folder, so another project's branch of the same task name in the shared
+    repository stays, as do the iteration's refs."""
+    stand = _linked_stand(tmp_path)
+    git_in(stand.his_project, "push", "-q", "origin", f"{stand.project_base}:refs/heads/orchestrator/01-slug")
+    git_in(stand.his_shared, "push", "-q", "origin", f"{stand.shared_base}:refs/heads/orchestrator/ai/p1/01-slug")
+    git_in(stand.his_shared, "push", "-q", "origin", f"{stand.shared_base}:refs/heads/orchestrator/ai/p2/01-slug")  # another project's
+    git_in(stand.his_project, "push", "-q", "origin", f"{stand.project_base}:refs/orchestrator-iteration/01-slug")
+    git_in(stand.his_shared, "push", "-q", "origin", f"{stand.shared_base}:refs/orchestrator-iteration/ai/p1/01-slug")
+    git_in(stand.project, "update-ref", "refs/orchestrator-laid/01-slug", stand.project_base)
+    git_in(stand.shared, "update-ref", "refs/orchestrator-laid/ai/p1/01-slug", stand.shared_base)
+
+    HermesResult(stand.project, stand.tree, stand.preserved).prepare(stand.plan)
+
+    assert _heads(stand.project_origin, "orchestrator/01-slug") == ""
+    assert _heads(stand.shared_origin, "orchestrator/ai/p1/01-slug") == ""
+    assert _heads(stand.shared_origin, "orchestrator/ai/p2/01-slug")  # another project's branch of the same task name
+    assert _remote_ref(stand.project_origin, "refs/orchestrator-iteration/01-slug")
+    assert _remote_ref(stand.shared_origin, "refs/orchestrator-iteration/ai/p1/01-slug")
+    assert not _ref_held(stand.project, "refs/orchestrator-laid/01-slug")
+    assert not _ref_held(stand.shared, "refs/orchestrator-laid/ai/p1/01-slug")
+
+
+def test_a_lay_in_each_repository_lays_his_changes_and_keeps_the_other_s_artifact_folders(tmp_path):
+    """His branch of each repository lays in its repository, relative to the
+    folder in the other: his change outside the artifact paths lands, his
+    change inside them does not — the run's own artifact folders of that
+    repository are kept — and the project's lay, whose preserved paths all
+    lie in the other repository, lays his code change and raises nothing."""
+    stand = _linked_stand(tmp_path)
+    git_in(stand.his_project, "checkout", "-q", "-B", "orchestrator/01-slug", stand.project_base)
+    (stand.his_project / "code.txt").write_text("his version\n")
+    git_in(stand.his_project, "commit", "-q", "-am", "his project work")
+    git_in(stand.his_project, "push", "-q", "origin", "HEAD:refs/heads/orchestrator/01-slug")
+    git_in(stand.his_shared, "checkout", "-q", "-B", "orchestrator/ai/p1/01-slug", stand.shared_base)
+    (stand.his_shared / "ai" / "p1" / "notes.md").write_text("his folder work\n")
+    (stand.his_shared / "ai" / "p1" / "plans" / "01-slug.md").write_text("# His plan\n")
+    git_in(stand.his_shared, "commit", "-q", "-am", "his shared work")
+    git_in(stand.his_shared, "push", "-q", "origin", "HEAD:refs/heads/orchestrator/ai/p1/01-slug")
+    his_project_tip = git_in(stand.his_project, "rev-parse", "HEAD").strip()
+    his_shared_tip = git_in(stand.his_shared, "rev-parse", "HEAD").strip()
+    (stand.shared / "ai" / "p1" / "plans" / "01-slug.md").write_text("# The run's plan\n")  # the run's own artifact, uncommitted
+
+    HermesResult(stand.project, stand.tree, stand.preserved).lay(stand.plan)
+
+    assert (stand.project / "code.txt").read_text() == "his version\n"
+    assert git_in(stand.project, "rev-parse", "HEAD").strip() == stand.project_base  # HEAD moves nowhere
+    assert (stand.shared / "ai" / "p1" / "notes.md").read_text() == "his folder work\n"
+    assert (stand.factory / "plans" / "01-slug.md").read_text() == "# The run's plan\n"  # his copy never laid over it
+    assert git_in(stand.shared, "rev-parse", "HEAD").strip() == stand.shared_base
+    assert git_in(stand.project, "rev-parse", "refs/orchestrator-laid/01-slug").strip() == his_project_tip
+    assert git_in(stand.shared, "rev-parse", "refs/orchestrator-laid/ai/p1/01-slug").strip() == his_shared_tip
+
+
+def test_a_repository_he_did_not_change_lays_nothing_and_advances_no_laid_ref(tmp_path):
+    """A branch held at its base — a repository he did not change — lays
+    nothing and advances no laid ref, an uncommitted edit left alone, and the
+    project's repository, whose preserved paths all lie in the other, raises
+    nothing the while."""
+    stand = _linked_stand(tmp_path)
+    git_in(stand.his_project, "push", "-q", "origin", f"{stand.project_base}:refs/heads/orchestrator/01-slug")
+    git_in(stand.his_shared, "push", "-q", "origin", f"{stand.shared_base}:refs/heads/orchestrator/ai/p1/01-slug")
+    (stand.shared / "ai" / "p1" / "notes.md").write_text("the run's uncommitted edit\n")
+
+    HermesResult(stand.project, stand.tree, stand.preserved).lay(stand.plan)
+
+    assert (stand.shared / "ai" / "p1" / "notes.md").read_text() == "the run's uncommitted edit\n"
+    assert not _ref_held(stand.shared, "refs/orchestrator-laid/ai/p1/01-slug")  # nothing laid there, no ref advanced
+    assert not _ref_held(stand.project, "refs/orchestrator-laid/01-slug")  # nothing laid there either
+    assert git_in(stand.project, "rev-parse", "HEAD").strip() == stand.project_base
+    assert git_in(stand.shared, "rev-parse", "HEAD").strip() == stand.shared_base
+
+
+@pytest.mark.parametrize("shape", ["files", "a regular file", "an embedded repository"])
+def test_a_project_branch_holding_the_placed_factory_lays_nothing_under_it_and_keeps_the_link(
+    tmp_path, shape,
+):
+    """His clone places the other repository's folder where his clone of the
+    project expects `.ai-factory`, and his project branch may then carry the
+    placed folder as files, as a type change from the tracked link or as a
+    gitlink for an embedded clone: the project repository's lay keeps the
+    run's link exactly as it is — no path at or under `.ai-factory` is ever
+    removed or restored — while his change outside it lands and the laid ref
+    advances as for any other lay."""
+    stand = _linked_stand(tmp_path)
+    (stand.factory / "plans" / "01-slug.md").write_text("# The run's plan\n")  # the run's own, uncommitted
+    his = stand.his_project
+    git_in(his, "checkout", "-q", "-B", "orchestrator/01-slug", stand.project_base)
+    (his / "code.txt").write_text("his version\n")  # outside `.ai-factory`, so the lay has his work
+    factory = his / ".ai-factory"
+    factory.unlink()  # the placed folder replaces the tracked link his clone holds
+    if shape == "files":
+        factory.mkdir()
+        (factory / "notes.md").write_text("his memory\n")
+    elif shape == "a regular file":
+        factory.write_text("his file where the link was\n")
+    else:
+        git_in(his, "init", "-q", "-b", "main", str(factory))
+        git_in(factory, "commit", "-q", "--allow-empty", "-m", "his embedded clone")
+    git_in(his, "add", "-A")
+    git_in(his, "commit", "-q", "-m", "his project work")
+    git_in(his, "push", "-q", "origin", "HEAD:refs/heads/orchestrator/01-slug")
+    git_in(stand.his_shared, "push", "-q", "origin", f"{stand.shared_base}:refs/heads/orchestrator/ai/p1/01-slug")
+    his_project_tip = git_in(his, "rev-parse", "HEAD").strip()
+
+    HermesResult(stand.project, stand.tree, stand.preserved).lay(stand.plan)
+
+    assert (stand.project / "code.txt").read_text() == "his version\n"  # his work outside it lays
+    assert stand.factory.is_symlink()  # the run's link stays a link
+    assert stand.factory.readlink() == stand.shared / "ai" / "p1"  # to where it always led
+    assert (stand.factory / "plans" / "01-slug.md").read_text() == "# The run's plan\n"  # read through the run's link
+    assert git_in(stand.project, "rev-parse", "HEAD").strip() == stand.project_base  # HEAD moves nowhere
+    assert git_in(stand.project, "rev-parse", "refs/orchestrator-laid/01-slug").strip() == his_project_tip
+    assert git_in(stand.shared, "rev-parse", "HEAD").strip() == stand.shared_base  # the other repository's lay is as it is

@@ -27,14 +27,14 @@ A deferred observation is reported once when reviews of the task carry it with i
 
 The rollback resets the orchestrator's own state for the task, and its scope is a contract:
 
-- It acts on the orchestrator's records of the task alone: its step, its reviews and rounds, the implementer's answers, the sessions and the escalation, and at `start` the task's record whole with the run's artifacts.
+- It acts on the orchestrator's records of the task alone: its step, its reviews and rounds, the implementer's answers, the sessions and the escalation, and at `start` the task's record whole with the run's artifacts and its refs in each repository of [the run's tree](../reference/target-project.md#git-repository).
 - It acts on nothing else, the working tree at every position included: a rollback leaves the tree as the head left it, and the next run starts on that tree. What becomes of an attempt's code, kept, repaired or discarded, is the head's own act and a part of the depth of its repair; a head that discards it does so itself with git. The spec and the roadmap line, and what any head wrote during the run, memory included, stay. Deleting a task's roadmap line, its spec or a phase's header, where a task proves wrong and goes, is the skill's own act on its own artifacts, after the rollback to the first position.
 
 A rollback also clears the escalation a task stopped on. A task that is done has no position, and a task that no attempt has begun lists none.
 
 ## Sweeping a phase
 
-`sweep` removes the run's artifacts of every task the roadmap lists under the addressed phase, and nothing a skill owns. Removing one task's run is a rollback to its first position, not a sweep. It refuses a phase that still holds a task that is not done, naming those tasks, so the artifacts of a task in flight are never removed. The command does not decide whether a phase may be pruned: that is the prune's rule, which reads what `show` reports, and the disposition of every deferred observation is what lets a prune proceed.
+`sweep` removes the run's artifacts of every task the roadmap lists under the addressed phase, and the refs of those tasks that remain in each repository of [the run's tree](../reference/target-project.md#git-repository), and nothing a skill owns. Removing one task's run is a rollback to its first position, not a sweep. It refuses a phase that still holds a task that is not done, naming those tasks, so the artifacts of a task in flight are never removed. The command does not decide whether a phase may be pruned: that is the prune's rule, which reads what `show` reports, and the disposition of every deferred observation is what lets a prune proceed.
 
 ## Disposing of deferred observations
 

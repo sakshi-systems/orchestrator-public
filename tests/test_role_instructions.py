@@ -9,7 +9,7 @@ import pytest
 from orchestrator import agents
 from orchestrator.agents import CodeReviewer, Implementer, PlanReviewer, Planner, _load_prompt
 from orchestrator.implementer_result import WorkingTreeResult
-from orchestrator.ports import AgentRole, IterationState
+from orchestrator.ports import AgentRole, IterationState, Repository
 from orchestrator.protocol import _read_sessions
 from tests.fakes import BackendCall, FakeAgentBackend
 
@@ -17,7 +17,8 @@ _PROMPT_NAMES = ("execution", "planner", "test-planner", "reviewer", "implemente
 
 
 
-_ITERATION = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+_ITERATION = IterationState(repository=Repository(directory=Path("project"), folder=None), base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+_ITERATIONS = (_ITERATION,)
 
 def _canary(name: str) -> str:
     return f"<<canary:{name}>>"
@@ -108,8 +109,8 @@ def test_code_reviewer_carries_reviewer_composition_across_review_and_re_review(
     review_1 = project_dir / ".ai-factory" / "x-review-1.md"
     review_2 = project_dir / ".ai-factory" / "x-review-2.md"
 
-    role.review(plan, review_1, iteration_state=_ITERATION)
-    role.review(plan, review_2, prev_review_path=review_1, iteration_state=_ITERATION)
+    role.review(plan, review_1, iteration_states=_ITERATIONS)
+    role.review(plan, review_2, prev_review_path=review_1, iteration_states=_ITERATIONS)
 
     assert len(backend.calls) == 2
     for call in backend.calls:
@@ -132,7 +133,7 @@ def test_test_planner_variant_replaces_planner_fragment_and_review_opens_its_own
     review = project_dir / ".ai-factory" / "x-review-1.md"
 
     planner.plan("Title", "Description", plan)
-    reviewer.review(plan, review, iteration_state=_ITERATION)
+    reviewer.review(plan, review, iteration_states=_ITERATIONS)
 
     plan_call, review_call = backend.calls
     _assert_composition(plan_call.instructions, ["test-planner", "escalation"])
@@ -197,8 +198,8 @@ def test_re_review_assignment_requires_current_file_evidence(project_dir, tmp_pa
     review_1 = project_dir / ".ai-factory" / "x-review-1.md"
     review_2 = project_dir / ".ai-factory" / "x-review-2.md"
 
-    role.review(plan, review_1, iteration_state=_ITERATION)
-    role.review(plan, review_2, prev_review_path=review_1, iteration_state=_ITERATION)
+    role.review(plan, review_1, iteration_states=_ITERATIONS)
+    role.review(plan, review_2, prev_review_path=review_1, iteration_states=_ITERATIONS)
     prompt = backend.calls[-1].prompt
 
     assert "as it is now" in prompt
@@ -219,7 +220,7 @@ def test_packaged_execution_home_reaches_every_role_before_its_own_fragment(proj
 
     planner = Planner(project_dir, backend)
     planner.plan("Title", "Description", plan)
-    CodeReviewer(project_dir, backend).review(plan, review, iteration_state=_ITERATION)
+    CodeReviewer(project_dir, backend).review(plan, review, iteration_states=_ITERATIONS)
     PlanReviewer(project_dir, backend).review_plan(plan, project_dir / ".ai-factory" / "pr-1.md", 1)
     Implementer(project_dir, backend, result=WorkingTreeResult()).implement(plan, tmp_path / "impl-1.md")
 

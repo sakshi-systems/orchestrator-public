@@ -16,6 +16,7 @@ from orchestrator import run_data
 from orchestrator.config import OrchestratorConfig
 from orchestrator.errors import RunDataRefusal
 from orchestrator.iteration_ref import make_iteration_commit, push_iteration_ref
+from orchestrator.ports import Repository
 from tests.conftest import git_environment, git_in
 
 REPO = Path(__file__).resolve().parents[1]
@@ -110,8 +111,8 @@ def _project(tmp_path: Path, *, record: dict | None = RECORD_ON, tree_change: bo
 
     if iteration:
         git_in(project, "add", "-A")
-        state = make_iteration_commit(project, "01-1-1-door", 1)
-        push_iteration_ref(project, state)
+        state = make_iteration_commit(Repository(directory=project, folder=None), "01-1-1-door", 1)
+        push_iteration_ref(state)
         if tree_change:
             # Work the attempt laid after its iteration commit: unstaged dirt
             # and an untracked file no index holds.

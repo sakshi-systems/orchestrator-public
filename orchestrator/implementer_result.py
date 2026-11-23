@@ -13,7 +13,7 @@ from .errors import (
     LeftoverBranchNotRemovedError,
 )
 from .git_runner import _changed_paths, run_git_sync
-from .ports import ImplementerResultProtocol
+from .ports import ImplementerResultProtocol, Repository
 
 
 class WorkingTreeResult:
@@ -43,19 +43,20 @@ def ref_name_of(project_dir: Path, plan_path: Path) -> str:
     return "/".join((*segment.parts, plan_path.stem))
 
 
-def branch_of(project_dir: Path, plan_path: Path) -> str:
-    """The branch a task's implementer pushes: the plan's own name under orchestrator/."""
-    return f"orchestrator/{ref_name_of(project_dir, plan_path)}"
+def branch_of(name: str) -> str:
+    """The branch a task's implementer pushes: the task's own name under orchestrator/."""
+    return f"orchestrator/{name}"
 
 
-def laid_ref_of(project_dir: Path, plan_path: Path) -> str:
-    """The run's own ref that holds the tip the last lay applied.
+def laid_ref_of(name: str) -> str:
+    """The run's own ref that holds the tip the last lay applied, for a task
+    named as its repository names it.
 
     The ref lives in the run's clone alone, under a space the iteration ref
     and the branch share with nothing, is never pushed and is written by no
     fetch — only a lay that has succeeded advances it.
     """
-    return f"refs/orchestrator-laid/{ref_name_of(project_dir, plan_path)}"
+    return f"refs/orchestrator-laid/{name}"
 
 
 def _remove_leftover_branch(cwd: Path, branch: str) -> None:
@@ -101,13 +102,26 @@ def _previous_tip(cwd: Path, laid_ref: str, base: str) -> str:
     return resolved or base
 
 
-def _lay_branch_tree(cwd: Path, branch: str, laid_ref: str, preserved: tuple[Path, ...]) -> None:
+def _lay_branch_tree(
+    cwd: Path,
+    branch: str,
+    laid_ref: str,
+    preserved: tuple[Path, ...],
+    *,
+    as_spelled: tuple[Path, ...] = (),
+) -> None:
     """Lay exactly the paths his work changed, HEAD staying put.
 
     The paths to lay are those that differ between the base and his new tip,
     together with those that differ between the base and the tip the last lay
     of this task's branch applied — the run's own laid ref — minus the run's
-    own artifact paths, all in one coordinate system relative to `cwd`.
+    own artifact paths the repository holds, all in one coordinate system
+    relative to `cwd`; a preserved path that lies in another repository of
+    the run's tree is left out, its lay the only one that keeps it. A path
+    of `as_spelled` is preserved as the project spells it, relative to `cwd`
+    and never through `resolve()` — wherever a link the project holds at it
+    leads — so nothing his branch holds at or under the path itself is laid
+    through or over the run's own.
     Removals precede writes, so a path that turns from a file into a
     directory, or the reverse, lays without error: a path the tip does not
     hold is removed first, then a path the tip holds is written as the tip
@@ -141,9 +155,23 @@ def _lay_branch_tree(cwd: Path, branch: str, laid_ref: str, preserved: tuple[Pat
             f"{branch}\n{base}"
         )
     tip = run_git_sync(["rev-parse", "FETCH_HEAD"], cwd=cwd).stdout.strip()
-    roots = tuple(
-        path.resolve().relative_to(cwd.resolve()).as_posix() for path in preserved
-    )
+    resolved_cwd = cwd.resolve()
+    roots = []
+    for path in preserved:
+        try:
+            roots.append(path.resolve().relative_to(resolved_cwd).as_posix())
+        except ValueError:
+            # A preserved path of another repository of the run's tree: this
+            # repository's lay never touches it.
+            continue
+    for path in as_spelled:
+        try:
+            roots.append(path.relative_to(cwd).as_posix())
+        except ValueError:
+            # A path spelled outside this repository: no path of this lay
+            # lies under it.
+            continue
+    roots = tuple(roots)
     changed = _changed_paths(cwd, base, "FETCH_HEAD") | _changed_paths(cwd, base, previous)
     changed = {
         path for path in changed
@@ -180,48 +208,90 @@ def _lay_branch_tree(cwd: Path, branch: str, laid_ref: str, preserved: tuple[Pat
 
 
 class HermesResult:
-    """The result of an implementer on Hermes: a branch he pushes, laid as the tree.
+    """The result of an implementer on Hermes: a branch he pushes to every
+    origin of the run's tree, laid as each repository's tree.
 
-    His work happens in his own clone on the branch his task's plan names under
-    `orchestrator/` — its roadmap's segment and the plan's stem — the same branch
-    across the task's fix iterations. The task's first call never meets the branch
-    of an earlier attempt, nor the laid ref an earlier attempt's lay left, and his
-    answer's lay fetches the branch's tip and changes exactly the paths his work
-    changed, outside the run's own artifact paths.
+    His work happens in his own clone on the branch his task's plan names
+    under `orchestrator/` — its roadmap's segment and the plan's stem, the
+    other repository's folder before it — the same branch across the task's
+    fix iterations, pushed to every origin of the tree, a repository he did
+    not change holding it at its base. The task's first call never meets the
+    branch of an earlier attempt, nor the laid ref an earlier attempt's lay
+    left, in any repository, and his answer's lay fetches each branch's tip
+    in its repository and changes exactly the paths his work changed there,
+    outside the run's own artifact paths that lie in it. Where the tree
+    holds two repositories, the path `.ai-factory` is preserved in the
+    project repository's lay beside them, as the project spells it and not
+    where its link leads, so nothing his project branch holds under it —
+    files, a type change from the link or an embedded repository — is laid
+    through or over the run's own.
     """
 
-    def __init__(self, project_dir: Path, preserved: tuple[Path, ...]) -> None:
+    def __init__(
+        self,
+        project_dir: Path,
+        tree: tuple[Repository, ...],
+        preserved: tuple[Path, ...],
+    ) -> None:
         self.project_dir = project_dir
+        self.tree = tuple(tree)
         self.preserved = tuple(preserved)
 
     def prepare(self, plan_path: Path) -> None:
-        """Remove a leftover branch of an earlier attempt from origin and its
-        laid tip — the tip the attempt's last lay applied, kept in a ref of
-        the run's own — from the clone, so the task's first call never builds
-        on it silently."""
-        branch = branch_of(self.project_dir, plan_path)
-        _remove_leftover_branch(self.project_dir, branch)
-        _drop_laid_ref(self.project_dir, laid_ref_of(self.project_dir, plan_path))
+        """Remove a leftover branch of an earlier attempt from each
+        repository's origin and its laid tip — the tip the attempt's last lay
+        applied, kept in a ref of the run's own — from each repository's
+        clone, every ref named as its repository names them, so the task's
+        first call never builds on them silently."""
+        name = ref_name_of(self.project_dir, plan_path)
+        for repository in self.tree:
+            repository_name = repository.named(name)
+            _remove_leftover_branch(repository.directory, branch_of(repository_name))
+            _drop_laid_ref(repository.directory, laid_ref_of(repository_name))
 
     def channel_text(self, plan_path: Path, *, first: bool) -> str:
-        """Name the branch to push, and how to reach it: created from the base commit
-        on the task's first call, continued on a call that continues his session."""
-        branch = branch_of(self.project_dir, plan_path)
-        if first:
-            return (
-                f"Channel: implement on your own branch. Create the branch {branch} "
-                "from the base commit, commit your work to it, and push it to origin."
-            )
+        """Name, for each repository of the run's tree, the branch to push —
+        named as that repository names it — and how to reach it: created from
+        that repository's base commit on the task's first call, continued on
+        a call that continues his session."""
+        name = ref_name_of(self.project_dir, plan_path)
+        sentences = []
+        for repository in self.tree:
+            branch = branch_of(repository.named(name))
+            if first:
+                body = (
+                    f"create the branch {branch} from the base commit, "
+                    "commit your work to it, and push it to origin."
+                )
+            else:
+                body = (
+                    f"continue the branch {branch}, "
+                    "commit your work to it, and push it to origin."
+                )
+            sentences.append(f"In {repository.label}, {body}")
         return (
-            f"Channel: implement on your own branch. Continue the branch {branch}, "
-            "commit your work to it, and push it to origin."
+            "Channel: implement on your own branch, in every repository of the "
+            "run's tree, one you did not change included, where it stays at its "
+            f"base. {' '.join(sentences)}"
         )
 
     def lay(self, plan_path: Path) -> None:
-        """Lay the paths his branch changed as the run's working tree, outside the run's own artifacts."""
-        _lay_branch_tree(
-            self.project_dir,
-            branch_of(self.project_dir, plan_path),
-            laid_ref_of(self.project_dir, plan_path),
-            self.preserved,
-        )
+        """Lay, in each repository of the run's tree in order, the paths his
+        branch there changed as its working tree, outside the run's own
+        artifacts that lie in it — and, where the tree holds two
+        repositories, outside `.ai-factory` in the project's repository
+        alone, kept as the project spells it wherever its link leads; a
+        branch an origin does not hold halts as the fetch fault."""
+        name = ref_name_of(self.project_dir, plan_path)
+        for repository in self.tree:
+            repository_name = repository.named(name)
+            as_spelled: tuple[Path, ...] = ()
+            if len(self.tree) > 1 and repository.folder is None:
+                as_spelled = (self.project_dir / ".ai-factory",)
+            _lay_branch_tree(
+                repository.directory,
+                branch_of(repository_name),
+                laid_ref_of(repository_name),
+                self.preserved,
+                as_spelled=as_spelled,
+            )

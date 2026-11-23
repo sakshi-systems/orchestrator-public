@@ -92,7 +92,7 @@ An outcome reaches a human through the notification, and it may not be ambiguous
 
 Three of the four speak about the work — red, blue, and green — and one, yellow, about the machine. Within the three, red and blue stay distinct: red is a verdict about the work, blue makes no verdict but still needs a roadmap or a spec changed. Which token in a configuration enables which alert lives in [configuration.md](../reference/configuration.md).
 
-**One shape, composed in one place.** What a notification looks like is a property of the outcome it reports, never of the site that raised it. Every operator notification the orchestrator sends is composed in one place — the ones that report success no less than the ones that report a fault — so a new outcome cannot introduce a new shape by accident. A review that Sakshi raised and that fails is no run and has no outcome, and its notification is composed there too, from a fixed reason and never from free text, as [Sakshi's reference](../reference/sakshi.md#a-reviews-files-and-its-failure) states.
+**One shape, composed in one place.** What a notification looks like is a property of the outcome it reports, never of the site that raised it. Every operator notification the orchestrator sends is composed in one place — the ones that report success no less than the ones that report a fault — so a new outcome cannot introduce a new shape by accident. A review that Sakshi raised and that fails is no run and has no outcome, and its notification is composed there too, from a fixed reason and never from free text, as Sakshi's reference states.
 
 ## Invariants
 

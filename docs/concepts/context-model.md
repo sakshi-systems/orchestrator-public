@@ -4,10 +4,10 @@ The pipeline passes the agent a minimum: the task's contract line and the path t
 
 ## What the agent receives literally
 
-- **The planner** — the task's title and description (the whole contract line) plus the line `Roadmap: <path> (line N)`; on a revision, the current plan and the plan review inline.
+- **The planner** — the task's title and description (the whole contract line) plus the line `Roadmap: <path> (line N)`, the path relative to the project's root; on a revision, the current plan and the plan review inline.
 - **The plan reviewer** — the plan inline; a fresh session on every attempt.
 - **The reviewer** — the plan inline, the implementer's answer and the previous review, and the changes, which reach it as [Invoking a role](../features/agent-runtime.md#invoking-a-role) states; it runs in a session of its own, never the planner's, fresh per task and continued across the task's fix iterations, so it knows the plan from its message and none of the planner's exploration.
-- **The implementer** — the plan inline, or under planning off the task's spec laid as the plan, plus, on its first message, the line `Roadmap: <path> (line N)` — optional context for what is already done, what comes next, and where a neighbouring task's scope begins, which it is not forced to read; on a fix iteration, the review inline; it holds one session through the whole fix cycle.
+- **The implementer** — the plan inline, or under planning off the task's spec laid as the plan, plus, on its first message, the line `Roadmap: <path> (line N)`, the path relative to the project's root — optional context for what is already done, what comes next, and where a neighbouring task's scope begins, which it is not forced to read; on a fix iteration, the review inline; it holds one session through the whole fix cycle.
 
 Every message is self-contained: an agent that runs in the run's tree may read what it names, and an agent that does not, such as a Hermes instance or a head, needs no path ([Invoking a role](../features/agent-runtime.md#invoking-a-role)).
 

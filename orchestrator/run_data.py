@@ -41,7 +41,9 @@ from .exchange import remove_task
 from .iteration_ref import remove_iteration_refs
 from .layout import _artifact_subdir, _resolve_roadmap_relpath
 from .observations import collect_entries
+from .ports import Repository
 from .protocol import _has_escalation, _read_artifact, _read_sessions, _replace_sessions
+from .repositories import find_run_tree
 from .resume import select_task_group
 from .roadmap import Task, find_task, parse_roadmap
 
@@ -254,7 +256,7 @@ def rollback(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | No
         # goes to standard error for this command, so standard output holds
         # the one JSON object and nothing else.
         with contextlib.redirect_stdout(sys.stderr):
-            remove_iteration_refs(project_dir, group.plan_path)
+            remove_iteration_refs(project_dir, find_run_tree(project_dir), group.plan_path)
         _delete_sidecar(group.plan_path)
     else:
         _replace_sessions(group.plan_path, _rolled_back_record(_read_sessions(group.plan_path), position))
@@ -315,8 +317,11 @@ def sweep(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | None 
             if _read_sessions(plan_path).get("step") != "done":
                 continue
             to_sweep.append(plan_path)
+    # The tree is found once for the whole phase: every group's removal
+    # takes the same repositories the run's own iteration commits went to.
+    tree = find_run_tree(project_dir)
     for plan_path in to_sweep:
-        _sweep_group(project_dir, relpath, plan_path)
+        _sweep_group(project_dir, relpath, plan_path, tree)
     _print_object({"version": RUN_DATA_VERSION, "phase": number})
 
 
@@ -550,11 +555,12 @@ def _verify_listing(relpath: str, seq: str, slug: str) -> tuple[str, str]:
     return (REVIEWS_DIRNAME, review_pattern(seq, slug))
 
 
-def _sweep_group(project_dir: Path, relpath: str, plan_path: Path) -> None:
+def _sweep_group(project_dir: Path, relpath: str, plan_path: Path, tree: tuple[Repository, ...]) -> None:
     """Remove one finished group's run: every plan review, the implementer's
     answers, the verify artifacts of the roadmap's kind and the disposition
     record, then the plan, the task's exchange files and its iteration refs —
-    whose failures only warn, as they do where a task lands — and the sidecar
+    in each repository of `tree`, the run's own tree — whose failures only
+    warn, as they do where a task lands — and the sidecar
     last, so the group stops existing only once every other step has stated
     its end state and a sweep repeated after a crash finishes what the crash
     left. A file that does not exist is not an error."""
@@ -576,7 +582,7 @@ def _sweep_group(project_dir: Path, relpath: str, plan_path: Path) -> None:
     # to standard error for this command, so standard output holds the one
     # JSON object and nothing else.
     with contextlib.redirect_stdout(sys.stderr):
-        remove_iteration_refs(project_dir, plan_path)
+        remove_iteration_refs(project_dir, tree, plan_path)
     sidecar_path(plan_path).unlink(missing_ok=True)
 
 

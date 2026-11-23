@@ -28,7 +28,7 @@ from .git_runner import run_git_sync
 from .implementer_result import ref_name_of
 from .iteration_ref import make_iteration_commit, push_iteration_ref, remove_iteration_refs
 from .notify import Outcome, report
-from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, PlannerProtocol, VerifyKind
+from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, IterationState, PlannerProtocol, Repository, VerifyKind
 from .protocol import _read_artifact, _read_sessions, _write_session, _write_sessions
 from .resume import _attempt_budget, _check_attempt, _detect_step, _interpret_step, _validate_sidecar_step, plan_review_budget
 from .roadmap import mark_done, parse_roadmap
@@ -96,31 +96,38 @@ def _raise_git_failure(result: subprocess.CompletedProcess) -> None:
     result.check_returncode()
 
 
-def _git_commit(project_dir: Path, task_title: str) -> None:
-    """Stage all changes and commit after a completed task."""
-    _raise_git_failure(run_git_sync(["add", "-A"], cwd=project_dir))
-    # Check if there's anything to commit
-    result = run_git_sync(["diff", "--cached", "--quiet"], cwd=project_dir)
-    if result.returncode == 0:
-        print(">>> Nothing to commit, skipping.")
-        return
-    # The commit runs the target project's own hooks, so its duration is
-    # theirs: it takes no bound.  It reads none of git's output either,
-    # so the two streams stay uncaptured — a hook's background job then
-    # holds no pipe the commit waits for.
-    _raise_git_failure(run_git_sync(
-        ["commit", "-m", task_title], cwd=project_dir, timeout=None,
-        capture=False,
-    ))
-    print(f">>> COMMITTED: {task_title}")
+def _git_commit(tree: tuple[Repository, ...], task_title: str) -> None:
+    """Stage, commit and push after a completed task, once for each
+    repository of the run's tree in its order — the project's first.  A
+    repository without a staged change of its own prints the skip line and
+    the loop goes on to the next repository, never skipping it; the other
+    repository's check and commit are scoped to the folder `.ai-factory`
+    resolves to, so another project's staged change stays staged and out of
+    the task's commit."""
+    for repository in tree:
+        _raise_git_failure(run_git_sync(list(repository.stage), cwd=repository.directory))
+        # Check if there's anything to commit
+        result = run_git_sync(["diff", "--cached", "--quiet", *repository.scope], cwd=repository.directory)
+        if result.returncode == 0:
+            print(">>> Nothing to commit, skipping.")
+            continue
+        # The commit runs the target project's own hooks, so its duration is
+        # theirs: it takes no bound.  It reads none of git's output either,
+        # so the two streams stay uncaptured — a hook's background job then
+        # holds no pipe the commit waits for.
+        _raise_git_failure(run_git_sync(
+            ["commit", "-m", task_title, *repository.scope], cwd=repository.directory, timeout=None,
+            capture=False,
+        ))
+        print(f">>> COMMITTED: {task_title}")
 
-    try:
-        push_result = run_git_sync(["push", "-u", "origin", "HEAD"], cwd=project_dir)
-    except subprocess.TimeoutExpired:
-        print(">>> WARNING: git push failed, continuing anyway.")
-        return
-    if push_result.returncode != 0:
-        print(">>> WARNING: git push failed, continuing anyway.")
+        try:
+            push_result = run_git_sync(["push", "-u", "origin", "HEAD"], cwd=repository.directory)
+        except subprocess.TimeoutExpired:
+            print(">>> WARNING: git push failed, continuing anyway.")
+            continue
+        if push_result.returncode != 0:
+            print(">>> WARNING: git push failed, continuing anyway.")
 
 
 def _record_planning(plan_path: Path, runtimes: dict[str, dict[str, str]], attempt: int, session_id: str | None) -> None:
@@ -131,7 +138,7 @@ def _record_planning(plan_path: Path, runtimes: dict[str, dict[str, str]], attem
     _write_sessions(plan_path, updates)
 
 
-def process_task(project_dir: Path, task, task_index: int, config: OrchestratorConfig, mode: Mode = IMPLEMENT_MODE, phase_session_id: str | None = None, *, backend: AgentBackendProtocol, implementer_result: ImplementerResultProtocol) -> str | None:
+def process_task(project_dir: Path, task, task_index: int, config: OrchestratorConfig, mode: Mode = IMPLEMENT_MODE, phase_session_id: str | None = None, *, backend: AgentBackendProtocol, implementer_result: ImplementerResultProtocol, tree: tuple[Repository, ...]) -> str | None:
     """Plan → implement → verify loop for a single task (verify = review, or a real test run in test mode)."""
     max_iterations = config.max_iterations
     runtimes = role_runtimes(config.runtime, config.roles, mode.roles)
@@ -263,9 +270,12 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
             _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
 
         print(f"\n>>> {mode.verify.running_header} (iteration {iteration})...")
-        _raise_git_failure(run_git_sync(["add", "-A"], cwd=project_dir))
-        iteration_state = make_iteration_commit(project_dir, ref_name_of(project_dir, plan_path), iteration)
-        push_iteration_ref(project_dir, iteration_state)
+        iteration_states: list[IterationState] = []
+        for repository in tree:
+            _raise_git_failure(run_git_sync(list(repository.stage), cwd=repository.directory))
+            iteration_state = make_iteration_commit(repository, ref_name_of(project_dir, plan_path), iteration)
+            push_iteration_ref(iteration_state)
+            iteration_states.append(iteration_state)
         out_path = output_dir / (stem + mode.verify.output_suffix.format(n=iteration))
         prev_out_path = None
         if iteration > 1:
@@ -275,7 +285,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
         implementer_answer = reviews_dir / implementer_answer_name(seq, task.slug, iteration)
         passed = verifier.verify(plan_path, out_path, prev_out_path,
                                  implementer_answer if implementer_answer.exists() else None,
-                                 iteration_state)
+                                 tuple(iteration_states))
         _write_session(plan_path, "elapsed", str(int(time.monotonic() - task_start)))
 
         if passed:
@@ -294,8 +304,8 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     mark_done(roadmap_path, task, elapsed)
     state.tasks_done += 1
     _write_session(plan_path, "step", "done")
-    _git_commit(project_dir, task.title)
-    remove_iteration_refs(project_dir, plan_path)
+    _git_commit(tree, task.title)
+    remove_iteration_refs(project_dir, tree, plan_path)
     remove_task(project_dir, plan_path)  # a sweep of the files of a call that never got its answer
     report(config, Outcome.TASK_DONE, project_dir.name, task.title, _run_summary())
 

@@ -14,7 +14,7 @@ from orchestrator.errors import HeadNotReachedError
 from orchestrator.exchange import answer_command, exchange_paths
 from orchestrator.head_backend import HeadAgentBackend
 from orchestrator.locator import HeadIdentity
-from orchestrator.ports import AgentRole
+from orchestrator.ports import AgentRole, Repository
 from tests.conftest import bounded_sleep
 
 IDENTITY = HeadIdentity(repository=Path("/repos/the-project"), owner="max", folder="r-d-head")
@@ -341,7 +341,7 @@ def _run_task(project, config, backend):
     from orchestrator.pipeline import process_task
     from orchestrator.implementer_result import WorkingTreeResult
     process_task(project, _TaskStub(), 1, config, backend=backend,
-                 implementer_result=WorkingTreeResult())
+                 implementer_result=WorkingTreeResult(), tree=(Repository(directory=project, folder=None),))
 
 
 def test_a_task_started_afresh_sends_its_messages_and_returns_no_leftover(tmp_path, monkeypatch):

@@ -22,7 +22,7 @@ The implementer's answer of each iteration is a file of the run's beside the rev
 
 ## Migrating an existing project
 
-1. **Run settings.** Create `<project>/.ai-factory/run-settings/<user-slug>.json` — your own file of run settings, committed with the project, since the project's history shows how each phase ran ([A person's run settings](../reference/configuration.md#a-persons-run-settings)):
+1. **Run settings.** Create `<project>/.ai-factory/run-settings/<user-slug>.json` — your own file of run settings, committed with the project, in the repository `.ai-factory` leads to, since the project's history shows how each phase ran ([A person's run settings](../reference/configuration.md#a-persons-run-settings)):
 
    ```json
    { "roadmap_path": "my" }

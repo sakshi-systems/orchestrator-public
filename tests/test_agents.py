@@ -35,10 +35,11 @@ from orchestrator.protocol import (
     _write_session,
     _write_sessions,
 )
-from orchestrator.ports import AgentRole, IterationState, RoleSetting
+from orchestrator.ports import AgentRole, IterationState, Repository, RoleSetting
 from tests.fakes import FakeAgentBackend
 
-_ITERATION = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+_ITERATION = IterationState(repository=Repository(directory=Path("project"), folder=None), base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+_ITERATIONS = (_ITERATION,)
 
 
 # ---------------------------------------------------------------------------
@@ -1022,7 +1023,7 @@ def test_review_escalation_raises_before_review_pass_check(tmp_path, monkeypatch
     pr = CodeReviewer(tmp_path, backend)
 
     with pytest.raises(EscalationError):
-        pr.review(plan_path, review_path, iteration_state=_ITERATION)
+        pr.review(plan_path, review_path, iteration_states=_ITERATIONS)
 
     assert review_path.read_text() == ESCALATION_ARTIFACT
     sessions = json.loads(plan_path.with_suffix(".json").read_text())
@@ -1082,7 +1083,7 @@ def test_review_regression_no_escalation_returns_bool(tmp_path, monkeypatch):
     backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
     pr = CodeReviewer(tmp_path, backend)
 
-    assert pr.review(plan_path, review_path, iteration_state=_ITERATION) is True
+    assert pr.review(plan_path, review_path, iteration_states=_ITERATIONS) is True
 
     assert review_path.read_text() == "All good\n\nREVIEW_PASS"
     sessions = json.loads(plan_path.with_suffix(".json").read_text())
@@ -1124,7 +1125,7 @@ def test_review_blank_answer_raises_empty_answer_error(tmp_path, monkeypatch):
     pr = CodeReviewer(tmp_path, backend)
 
     with pytest.raises(EmptyAnswerError) as exc_info:
-        pr.review(plan_path, review_path, iteration_state=_ITERATION)
+        pr.review(plan_path, review_path, iteration_states=_ITERATIONS)
 
     lines = str(exc_info.value).splitlines()
     assert lines[0] == "Agent returned an empty answer"
@@ -1179,8 +1180,9 @@ def _artifact_writing_backend(plan_review_text: str = "ok\n\nPLAN_REVIEW_PASS",
 
 def test_review_message_carries_plan_answer_and_no_previous_review_or_diff(tmp_path):
     """A first review carries no diff section, holds the plan and the implementer's
-    answer under their headings with no path of the run's tree, and names the base
-    and the iteration's commit on the run's ref."""
+    answer under their headings with no path of the run's tree, and names the
+    repository — the project's, one-repository tree — with its base and the
+    iteration's commit on its ref."""
     plan_path = tmp_path / ".ai-factory" / "01-slug.md"
     plan_path.write_text("# Plan: The work")
     answer_path = tmp_path / ".ai-factory" / "01-slug-implementer-1.md"
@@ -1188,13 +1190,13 @@ def test_review_message_carries_plan_answer_and_no_previous_review_or_diff(tmp_p
     review_path = tmp_path / ".ai-factory" / "01-slug-review-1.md"
     backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
     pr = CodeReviewer(tmp_path, backend)
-    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+    iteration = IterationState(repository=Repository(directory=Path("project"), folder=None), base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
 
-    assert pr.review(plan_path, review_path, implementer_answer_path=answer_path, iteration_state=iteration) is True
+    assert pr.review(plan_path, review_path, implementer_answer_path=answer_path, iteration_states=(iteration,)) is True
 
     prompt = backend.calls[0].prompt
     assert (
-        f"Run `git diff {iteration.base} {iteration.commit}` to see ALL changes: "
+        f"Run `git diff {iteration.base} {iteration.commit}` to see ALL changes of the project's repository: "
         f"the base is `{iteration.base}`, the iteration's commit is `{iteration.commit}` "
         f"on the ref `{iteration.ref}`."
     ) in prompt
@@ -1209,6 +1211,35 @@ def test_review_message_carries_plan_answer_and_no_previous_review_or_diff(tmp_p
         assert str(path) not in prompt
 
 
+def test_the_review_message_names_each_repository_of_a_tree_of_two(tmp_path):
+    """A run whose tree is two repositories: the message holds one sentence per
+    repository, in the tree's order, each from the same template — naming the
+    repository by its label with its own base, iteration's commit and ref — and
+    the line naming the plan follows the sentences."""
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
+    plan_path.write_text("# Plan")
+    review_path = tmp_path / ".ai-factory" / "01-slug-review-1.md"
+    backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
+    pr = CodeReviewer(tmp_path, backend)
+    project_state = IterationState(repository=Repository(directory=Path("project"), folder=None), base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+    other_state = IterationState(repository=Repository(directory=Path("shared"), folder="ai/p1/"), base="2" * 40, commit="3" * 40, ref="refs/orchestrator-iteration/ai/p1/01-slug")
+
+    assert pr.review(plan_path, review_path, iteration_states=(project_state, other_state)) is True
+
+    prompt = backend.calls[0].prompt
+    sentence_of = lambda state: (
+        f"Run `git diff {state.base} {state.commit}` to see ALL changes of {state.repository.label}: "
+        f"the base is `{state.base}`, the iteration's commit is `{state.commit}` "
+        f"on the ref `{state.ref}`.\n"
+    )
+    first, second = sentence_of(project_state), sentence_of(other_state)
+    assert first in prompt and second in prompt
+    assert prompt.index(first) < prompt.index(second)  # the tree's order
+    assert prompt.index(second) < prompt.index("The plan for context is under `## Plan`.\n")
+    assert "the repository holding `.ai-factory`, its folder `ai/p1/`" in prompt
+    assert prompt.count("to see ALL changes of ") == 2  # one sentence each, always every one
+
+
 def test_re_review_message_keeps_the_quoted_obligations_and_carries_the_previous_review(tmp_path):
     """A re-review message carries the previous review's text under its heading,
     tells the reviewer to see the changes itself, carries no diff section and
@@ -1220,9 +1251,9 @@ def test_re_review_message_keeps_the_quoted_obligations_and_carries_the_previous
     review_2 = tmp_path / ".ai-factory" / "01-slug-review-2.md"
     backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
     pr = CodeReviewer(tmp_path, backend)
-    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+    iteration = IterationState(repository=Repository(directory=Path("project"), folder=None), base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
 
-    assert pr.review(plan_path, review_2, prev_review_path=review_1, iteration_state=iteration) is True
+    assert pr.review(plan_path, review_2, prev_review_path=review_1, iteration_states=(iteration,)) is True
 
     prompt = backend.calls[0].prompt
     assert "This is a RE-REVIEW after fixes were applied to address the previous review under `## The previous review`." in prompt
@@ -1236,7 +1267,7 @@ def test_re_review_message_keeps_the_quoted_obligations_and_carries_the_previous
     assert "Return your full review (per-finding verdicts plus any new issues) as your answer." in prompt
     assert "## The previous review\n\nFinding one." in prompt
     assert (
-        f"Run `git diff {iteration.base} {iteration.commit}` to see ALL changes: "
+        f"Run `git diff {iteration.base} {iteration.commit}` to see ALL changes of the project's repository: "
         f"the base is `{iteration.base}`, the iteration's commit is `{iteration.commit}` "
         f"on the ref `{iteration.ref}`."
     ) in prompt
@@ -1373,8 +1404,8 @@ def test_planner_and_code_reviewer_pass_complete_instructions_in_their_own_sessi
 
     planner.plan("Title", "Description", plan_path)
     planner.plan("Title", "Description", plan_path)
-    assert code_reviewer.review(plan_path, review_1, iteration_state=_ITERATION) is True
-    assert code_reviewer.review(plan_path, review_2, prev_review_path=review_1, iteration_state=_ITERATION) is True
+    assert code_reviewer.review(plan_path, review_1, iteration_states=_ITERATIONS) is True
+    assert code_reviewer.review(plan_path, review_2, prev_review_path=review_1, iteration_states=_ITERATIONS) is True
 
     assert len(backend.calls) == 4
     for call in backend.calls[:2]:
@@ -1470,7 +1501,7 @@ def test_implementer_continuing_session_without_feedback_sends_plan_prompt(tmp_p
     first, second = backend.calls
     assert second.session_id == backend.returned[0]
     assert second.prompt == (
-        f"Roadmap: {roadmap_path} (line 5)\n"
+        f"Roadmap: {roadmap_path.relative_to(tmp_path)} (line 5)\n"
         "Implement the plan below.\n"
         "\n"
         "## Plan\n"
@@ -1497,7 +1528,7 @@ def test_implementer_fresh_session_with_feedback_path_sends_plan_prompt(tmp_path
     call = backend.calls[0]
     assert call.session_id is None
     assert call.prompt == (
-        f"Roadmap: {roadmap_path} (line 5)\n"
+        f"Roadmap: {roadmap_path.relative_to(tmp_path)} (line 5)\n"
         "Implement the plan below.\n"
         "\n"
         "## Plan\n"
@@ -1715,7 +1746,7 @@ def test_each_role_passes_the_exchange_its_artifact_gives(tmp_path):
     review_1 = factory / "reviews" / "john-doe" / "01-slug-review-1.md"
     review_1.write_text("Finding one.")
     review_2 = factory / "reviews" / "john-doe" / "01-slug-review-2.md"
-    iteration = IterationState(base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+    iteration = IterationState(repository=Repository(directory=Path("project"), folder=None), base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
     backend = FakeAgentBackend(on_call=lambda call: {
         AgentRole.PLANNER: "# Plan\n\n## Test Command\n`true`\n",
     }.get(call.role, "REVIEW_PASS\n" if call.role is not AgentRole.IMPLEMENTER else "Did the work.\n"))
@@ -1730,7 +1761,7 @@ def test_each_role_passes_the_exchange_its_artifact_gives(tmp_path):
     assert backend.calls[-1].exchange == "plan-reviews/john-doe/01-slug-plan-review-1"
 
     CodeReviewer(tmp_path, backend).review(plan_path, review_2, prev_review_path=review_1,
-                                           iteration_state=iteration)
+                                           iteration_states=(iteration,))
     assert backend.calls[-1].exchange == "reviews/john-doe/01-slug-review-2"
 
     Implementer(tmp_path, backend, result=WorkingTreeResult()).implement(plan_path, answer_path)

@@ -257,9 +257,17 @@ def _as_text(output: bytes, errors: str) -> str:
     return output.decode(locale.getpreferredencoding(False), errors)
 
 
+def _as_bytes(text: str) -> bytes:
+    """Encode text ``_as_text`` decoded back to the bytes git printed, the
+    standard input of a call that feeds what another call listed."""
+    return text.encode(locale.getpreferredencoding(False), "surrogateescape")
+
+
 def run_git_sync(arguments: Sequence[str], *, cwd: str | Path,
                  timeout: float | None | _DefaultBound = _DEFAULT_BOUND,
                  capture: bool = True,
+                 index: Path | None = None,
+                 stdin: bytes | None = None,
                  ) -> subprocess.CompletedProcess:
     """Run ``git <arguments>`` synchronously in ``cwd`` and return the
     completed process, judging no exit status: each caller decides what
@@ -271,7 +279,9 @@ def run_git_sync(arguments: Sequence[str], *, cwd: str | Path,
     ``GIT_TERMINAL_PROMPT`` as the module holds it, so git never waits
     for a credential no one will type, and ``GIT_LITERAL_PATHSPECS=1``,
     so a path a caller names is a literal path and never a pattern;
-    with the standard input closed; with the standard output and the
+    with the standard input closed, or fed by ``stdin`` where a caller
+    hands one captured call the bytes another call listed; with the
+    standard output and the
     standard error each captured and decoded as text by ``_as_text`` —
     the standard output so a path or a ref name keeps its bytes, the
     standard error so its text stays printable — or, for a caller that
@@ -280,7 +290,15 @@ def run_git_sync(arguments: Sequence[str], *, cwd: str | Path,
     text then reaches the console as it runs, and the wait is on git
     alone, so a background job a hook leaves holds no pipe the call
     waits for; and in a session of its own, so the call is the only
-    member of its process group beside what git itself begins.  The
+    member of its process group beside what git itself begins.  ``index``
+    names one index file for this call alone: the name is the caller's
+    own choice, planted after the stripping, so a caller that builds a
+    tree over a temporary index can name it, while an ambient
+    ``GIT_INDEX_FILE`` from the environment still reaches no call.  ``stdin``
+    feeds a captured call alone — a call that reads none of git's output
+    takes none, the pair being refused before any process runs, for the
+    uncaptured wait never writes the pipe and a call that reads its
+    standard input would outwait any bound.  The
     call waits under ``timeout`` seconds — left out, the module's
     ``SYNC_GIT_TIMEOUT`` read when the call runs; ``None``, no bound at
     all, so a caller whose duration is not the network's runs to git's
@@ -290,12 +308,18 @@ def run_git_sync(arguments: Sequence[str], *, cwd: str | Path,
     ``KeyboardInterrupt`` among them, ends the group the same way and
     propagates as it is.
     """
+    if stdin is not None and not capture:
+        raise ValueError(
+            "stdin feeds a captured call; a call that reads none of git's output takes no stdin"
+        )
     environment = {
         name: value for name, value in os.environ.items()
         if name not in REPOSITORY_LOCATION_VARIABLES
     }
     environment["GIT_TERMINAL_PROMPT"] = GIT_TERMINAL_PROMPT
     environment["GIT_LITERAL_PATHSPECS"] = "1"
+    if index is not None:
+        environment["GIT_INDEX_FILE"] = str(index)
     bound: float | None
     if isinstance(timeout, _DefaultBound):
         bound = SYNC_GIT_TIMEOUT
@@ -305,14 +329,14 @@ def run_git_sync(arguments: Sequence[str], *, cwd: str | Path,
         ["git", *arguments],
         cwd=str(cwd),
         env=environment,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
         start_new_session=True,
     )
     try:
         if capture:
-            stdout, stderr = proc.communicate(timeout=bound)
+            stdout, stderr = proc.communicate(input=stdin, timeout=bound)
         else:
             proc.wait(timeout=bound)
             return subprocess.CompletedProcess(proc.args, proc.returncode)

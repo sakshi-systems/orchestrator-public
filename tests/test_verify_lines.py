@@ -11,7 +11,7 @@ from orchestrator.config import OrchestratorConfig
 from orchestrator.errors import PipelineStopError
 from orchestrator.implementer_result import WorkingTreeResult
 from orchestrator.pipeline import IMPLEMENT_MODE, TEST_MODE, process_task
-from orchestrator.ports import AgentRole
+from orchestrator.ports import AgentRole, Repository
 from tests.fakes import FakeAgentBackend
 
 SLUG = "slug"
@@ -99,7 +99,7 @@ def test_review_pass_line_names_the_review_file(tmp_path, monkeypatch, capsys):
     project, _outside = _project(tmp_path)
 
     process_task(project, _TaskStub(), 1, _config(), IMPLEMENT_MODE,
-                 backend=_run_backend(implement=project / "implemented.txt"), implementer_result=WorkingTreeResult())
+                 backend=_run_backend(implement=project / "implemented.txt"), implementer_result=WorkingTreeResult(), tree=(Repository(directory=project, folder=None),))
     lines = capsys.readouterr().out.splitlines()
 
     review = project / ".ai-factory" / "reviews" / "01-slug-review-1.md"
@@ -112,7 +112,7 @@ def test_test_run_pass_line_names_the_test_output_file(tmp_path, monkeypatch, ca
     project, outside = _project(tmp_path)
     (outside / "ROADMAP_TESTS.md").write_text("# Work\n\n- [ ] **Some task** — Some description\n")
 
-    process_task(project, _TaskStub(), 1, _config(), TEST_MODE, backend=_run_backend(), implementer_result=WorkingTreeResult())
+    process_task(project, _TaskStub(), 1, _config(), TEST_MODE, backend=_run_backend(), implementer_result=WorkingTreeResult(), tree=(Repository(directory=project, folder=None),))
     lines = capsys.readouterr().out.splitlines()
 
     test_output = project / ".ai-factory" / "test-runs" / "01-slug-test-1.txt"
@@ -127,7 +127,7 @@ def test_review_fail_line_names_the_review_file(tmp_path, monkeypatch, capsys):
     with pytest.raises(PipelineStopError):
         process_task(project, _TaskStub(), 1, _config(), IMPLEMENT_MODE,
                      backend=_run_backend(review_text="Actual findings.", implement=project / "implemented.txt"),
-                     implementer_result=WorkingTreeResult())
+                     implementer_result=WorkingTreeResult(), tree=(Repository(directory=project, folder=None),))
     lines = capsys.readouterr().out.splitlines()
 
     review = project / ".ai-factory" / "reviews" / "01-slug-review-1.md"
@@ -142,7 +142,7 @@ def test_test_run_fail_line_names_the_test_output_file(tmp_path, monkeypatch, ca
 
     with pytest.raises(PipelineStopError):
         process_task(project, _TaskStub(), 1, _config(), TEST_MODE,
-                     backend=_run_backend(test_command="exit 1"), implementer_result=WorkingTreeResult())
+                     backend=_run_backend(test_command="exit 1"), implementer_result=WorkingTreeResult(), tree=(Repository(directory=project, folder=None),))
     lines = capsys.readouterr().out.splitlines()
 
     test_output = project / ".ai-factory" / "test-runs" / "01-slug-test-1.txt"

@@ -22,7 +22,8 @@ from orchestrator.iteration_ref import (
     remove_iteration_refs,
 )
 from orchestrator.pipeline import IMPLEMENT_MODE
-from orchestrator.ports import IterationState
+from orchestrator.ports import Repository
+from orchestrator.repositories import find_run_tree
 from tests.conftest import git_in
 from tests.fakes import FakeAgentBackend
 from orchestrator.implementer_result import WorkingTreeResult, ref_name_of
@@ -51,6 +52,16 @@ def _repo(tmp_path):
     git_in(project, "remote", "add", "origin", str(origin))
     git_in(project, "push", "-q", "origin", "HEAD:refs/heads/main")
     return project, base, origin
+
+
+def _tree(project):
+    """The run's tree where the project's repository is the only one."""
+    return (Repository(directory=project, folder=None),)
+
+
+def _repository(project):
+    """The project's repository of the run's tree."""
+    return Repository(directory=project, folder=None)
 
 
 def _paths_of(project, commit):
@@ -86,7 +97,7 @@ def test_the_commit_s_parent_is_the_base_and_its_tree_holds_what_the_add_stages(
     (project / ".ai-factory" / "plans" / "01-slug.json").write_text("{}")
     git_in(project, "add", "-A")
 
-    state = make_iteration_commit(project, "01-slug", 1)
+    state = make_iteration_commit(_repository(project), "01-slug", 1)
 
     assert state.base == base
     assert state.ref == "refs/orchestrator-iteration/01-slug"
@@ -106,11 +117,11 @@ def test_a_second_iteration_moves_the_ref_to_a_commit_whose_parent_is_still_the_
     project, base, origin = _repo(tmp_path)
     (project / "first.txt").write_text("one\n")
     git_in(project, "add", "-A")
-    first = make_iteration_commit(project, "01-slug", 1)
+    first = make_iteration_commit(_repository(project), "01-slug", 1)
 
     (project / "second.txt").write_text("two\n")
     git_in(project, "add", "-A")
-    second = make_iteration_commit(project, "01-slug", 2)
+    second = make_iteration_commit(_repository(project), "01-slug", 2)
 
     assert second.commit != first.commit
     assert _parents_of(project, second.commit) == [second.commit, base]
@@ -127,7 +138,7 @@ def test_a_named_roadmap_s_plan_carries_its_segment_in_the_ref(tmp_path):
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
 
-    state = make_iteration_commit(project, ref_name_of(project, plan), 1)
+    state = make_iteration_commit(_repository(project), ref_name_of(project, plan), 1)
 
     assert state.ref == "refs/orchestrator-iteration/john-doe/01-slug"
     assert git_in(project, "rev-parse", state.ref).strip() == state.commit
@@ -141,8 +152,8 @@ def test_the_branch_s_short_name_reaches_the_branch_and_the_iteration_s_the_iter
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(project, "01-slug", 1)
-    push_iteration_ref(project, state)
+    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    push_iteration_ref(state)
     git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")  # a Hermes task's branch
     git_in(project, "update-ref", "refs/heads/orchestrator/01-slug", base)  # its ref in the run's clone, on another commit
     assert state.commit != base
@@ -158,7 +169,7 @@ def test_a_held_lock_on_the_ref_halts_the_call(tmp_path):
     lock.write_text("")
 
     with pytest.raises(IterationCommitNotMadeError) as caught:
-        make_iteration_commit(project, "01-slug", 1)
+        make_iteration_commit(_repository(project), "01-slug", 1)
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "The iteration's commit could not be made"
@@ -179,8 +190,8 @@ class _RecordingVerifier:
     def __init__(self):
         self.calls = []
 
-    def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path, iteration_state):
-        self.calls.append(("verify", plan_path, out_path, prev_out_path, implementer_answer_path, iteration_state))
+    def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path, iteration_states):
+        self.calls.append(("verify", plan_path, out_path, prev_out_path, implementer_answer_path, iteration_states))
         return True
 
 
@@ -210,7 +221,7 @@ def test_a_halt_of_the_commit_leaves_implemented_recorded_and_calls_no_verify(tm
     with pytest.raises(IterationCommitNotMadeError):
         pipeline_module.process_task(
             project, _TaskStub(), 1, config, mode,
-            backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(),
+            backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(), tree=_tree(project),
         )
 
     assert json.loads(plan.with_suffix(".json").read_text())["step"] == "implemented:1"
@@ -224,13 +235,14 @@ def test_a_resume_at_implemented_makes_the_commit_and_passes_the_state_to_verify
 
     pipeline_module.process_task(
         project, _TaskStub(), 1, config, mode,
-        backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(),
+        backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(), tree=_tree(project),
     )
 
     (kind, *call) = verifier.calls[-1]
     assert kind == "verify"
-    state = call[-1]
-    assert isinstance(state, IterationState)
+    states = call[-1]
+    assert isinstance(states, tuple)
+    state, = states  # the tree is one repository: the tuple holds its state alone
     assert state.base == base
     assert state.ref == "refs/orchestrator-iteration/01-slug"
     assert _parents_of(project, state.commit) == [state.commit, base]
@@ -275,15 +287,15 @@ def test_the_push_puts_the_ref_on_origin_and_a_second_iteration_moves_it(tmp_pat
     project, base, origin = _repo(tmp_path)
     (project / "first.txt").write_text("one\n")
     git_in(project, "add", "-A")
-    first = make_iteration_commit(project, "01-slug", 1)
-    push_iteration_ref(project, first)
+    first = make_iteration_commit(_repository(project), "01-slug", 1)
+    push_iteration_ref(first)
 
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*") == {first.ref}
 
     (project / "second.txt").write_text("two\n")
     git_in(project, "add", "-A")
-    second = make_iteration_commit(project, "01-slug", 2)
-    push_iteration_ref(project, second)
+    second = make_iteration_commit(_repository(project), "01-slug", 2)
+    push_iteration_ref(second)
 
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*") == {second.ref}
     assert _parents_of(project, second.commit) == [second.commit, base]  # a sibling of the first, not a child
@@ -294,10 +306,10 @@ def test_a_repository_with_no_origin_halts_the_push(tmp_path):
     git_in(project, "remote", "remove", "origin")
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(project, "01-slug", 1)
+    state = make_iteration_commit(_repository(project), "01-slug", 1)
 
     with pytest.raises(IterationRefNotPushedError) as caught:
-        push_iteration_ref(project, state)
+        push_iteration_ref(state)
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "The iteration's ref could not be pushed"
@@ -314,7 +326,7 @@ def test_a_push_halting_in_the_flow_leaves_implemented_recorded_and_runs_no_veri
     with pytest.raises(IterationRefNotPushedError):
         pipeline_module.process_task(
             project, _TaskStub(), 1, config, mode,
-            backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(),
+            backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(), tree=_tree(project),
         )
 
     assert json.loads(plan.with_suffix(".json").read_text())["step"] == "implemented:1"
@@ -329,10 +341,10 @@ def test_a_push_against_an_origin_that_never_answers_halts_with_the_bound_s_text
         git_in(project, "remote", "set-url", "origin", f"http://127.0.0.1:{silent.port}/origin.git")
         (project / "work.txt").write_text("work\n")
         git_in(project, "add", "-A")
-        state = make_iteration_commit(project, "01-slug", 1)
+        state = make_iteration_commit(_repository(project), "01-slug", 1)
 
         with pytest.raises(IterationRefNotPushedError) as caught:
-            push_iteration_ref(project, state)
+            push_iteration_ref(state)
 
         lines = str(caught.value).splitlines()
         assert lines[0] == "The iteration's ref could not be pushed"
@@ -346,15 +358,15 @@ def test_the_removal_takes_the_local_ref_the_remote_ref_and_the_task_s_branch(tm
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(project, "01-slug", 1)
-    push_iteration_ref(project, state)
+    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    push_iteration_ref(state)
     git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")  # a Hermes task's branch
     git_in(project, "update-ref", "refs/orchestrator-laid/01-slug", base)  # the run's own laid ref
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
         state.ref, "refs/heads/orchestrator/01-slug",
     }
 
-    remove_iteration_refs(project, project / ".ai-factory" / "plans" / "01-slug.md")
+    remove_iteration_refs(project, _tree(project), project / ".ai-factory" / "plans" / "01-slug.md")
 
     listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/", "refs/orchestrator-laid/")
     assert listed.split() == []
@@ -366,10 +378,10 @@ def test_a_removal_with_no_branch_on_origin_removes_only_the_refs_silently(tmp_p
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(project, "01-slug", 1)
-    push_iteration_ref(project, state)
+    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    push_iteration_ref(state)
 
-    remove_iteration_refs(project, project / ".ai-factory" / "plans" / "01-slug.md")
+    remove_iteration_refs(project, _tree(project), project / ".ai-factory" / "plans" / "01-slug.md")
 
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == set()
     assert capsys.readouterr().out == ""
@@ -385,15 +397,15 @@ def test_a_ref_name_holding_a_unicode_line_boundary_is_removed_whole(tmp_path, c
     plan.write_text("# Plan\n")
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(project, ref_name_of(project, plan), 1)
-    push_iteration_ref(project, state)
+    state = make_iteration_commit(_repository(project), ref_name_of(project, plan), 1)
+    push_iteration_ref(state)
     branch = f"refs/heads/orchestrator/a\u2028b/01-slug"
     git_in(project, "push", "-q", "origin", f"{base}:{branch}")  # a Hermes task's branch
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
         state.ref, branch,
     }
 
-    remove_iteration_refs(project, plan)
+    remove_iteration_refs(project, _tree(project), plan)
 
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/orchestrator-laid/*", "refs/heads/orchestrator/*") == set()
     listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/", "refs/orchestrator-laid/")
@@ -410,12 +422,12 @@ def test_two_roadmaps_sharing_a_stem_never_share_a_ref_or_a_cleanup(tmp_path):
 
     (project / "plain.txt").write_text("plain\n")
     git_in(project, "add", "-A")
-    plain_state = make_iteration_commit(project, ref_name_of(project, plain), 1)
-    push_iteration_ref(project, plain_state)
+    plain_state = make_iteration_commit(_repository(project), ref_name_of(project, plain), 1)
+    push_iteration_ref(plain_state)
     (project / "named.txt").write_text("named\n")
     git_in(project, "add", "-A")
-    named_state = make_iteration_commit(project, ref_name_of(project, named), 1)
-    push_iteration_ref(project, named_state)
+    named_state = make_iteration_commit(_repository(project), ref_name_of(project, named), 1)
+    push_iteration_ref(named_state)
     git_in(project, "push", "-q", "origin",
            f"{base}:refs/heads/orchestrator/01-slug",
            f"{base}:refs/heads/orchestrator/john-doe/01-slug")
@@ -424,7 +436,7 @@ def test_two_roadmaps_sharing_a_stem_never_share_a_ref_or_a_cleanup(tmp_path):
         "refs/heads/orchestrator/01-slug", "refs/heads/orchestrator/john-doe/01-slug",
     }
 
-    remove_iteration_refs(project, plain)  # the default pair's task ends
+    remove_iteration_refs(project, _tree(project), plain)  # the default pair's task ends
 
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
         named_state.ref, "refs/heads/orchestrator/john-doe/01-slug",  # the named roadmap's own stay
@@ -437,8 +449,8 @@ def test_a_refusing_origin_prints_the_one_line_removes_the_local_ref_and_returns
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(project, "01-slug", 1)
-    push_iteration_ref(project, state)
+    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    push_iteration_ref(state)
     hook = origin / "hooks" / "pre-receive"
     hook.write_text(
         "#!/bin/sh\n"
@@ -451,7 +463,7 @@ def test_a_refusing_origin_prints_the_one_line_removes_the_local_ref_and_returns
     )
     hook.chmod(0o755)
 
-    remove_iteration_refs(project, project / ".ai-factory" / "plans" / "01-slug.md")
+    remove_iteration_refs(project, _tree(project), project / ".ai-factory" / "plans" / "01-slug.md")
 
     out = capsys.readouterr().out
     assert out == f">>> WARNING: the iteration's ref {state.ref} could not be removed, continuing anyway.\n"
@@ -467,9 +479,9 @@ def test_an_origin_that_never_answers_prints_the_one_line(tmp_path, monkeypatch,
         git_in(project, "remote", "set-url", "origin", f"http://127.0.0.1:{silent.port}/origin.git")
         (project / "work.txt").write_text("work\n")
         git_in(project, "add", "-A")
-        state = make_iteration_commit(project, "01-slug", 1)
+        state = make_iteration_commit(_repository(project), "01-slug", 1)
 
-        remove_iteration_refs(project, project / ".ai-factory" / "plans" / "01-slug.md")
+        remove_iteration_refs(project, _tree(project), project / ".ai-factory" / "plans" / "01-slug.md")
 
         out = capsys.readouterr().out
         assert out == f">>> WARNING: the iteration's ref {state.ref} could not be removed, continuing anyway.\n"
@@ -520,8 +532,8 @@ def test_a_local_removal_that_times_out_is_the_one_line_and_the_remote_still_run
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(project, "01-slug", 1)
-    push_iteration_ref(project, state)
+    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    push_iteration_ref(state)
     git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")  # a Hermes task's branch
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
         state.ref, "refs/heads/orchestrator/01-slug",
@@ -532,7 +544,7 @@ def test_a_local_removal_that_times_out_is_the_one_line_and_the_remote_still_run
     hook.write_text(f"#!/bin/sh\necho $$ > {shlex.quote(str(pid_file))}\nwhile read old new ref; do :; done\nsleep 30\n")
     hook.chmod(0o755)
 
-    remove_iteration_refs(project, project / ".ai-factory" / "plans" / "01-slug.md")
+    remove_iteration_refs(project, _tree(project), project / ".ai-factory" / "plans" / "01-slug.md")
 
     out = capsys.readouterr().out
     assert out == f">>> WARNING: the iteration's ref {state.ref} could not be removed, continuing anyway.\n"
@@ -544,7 +556,7 @@ def test_a_task_that_stops_before_it_ends_leaves_its_refs(tmp_path, monkeypatch)
     project, plan, config, base = _flow_at_implemented(tmp_path, monkeypatch)
 
     class _FailingVerifier:
-        def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path, iteration_state):
+        def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path, iteration_states):
             out_path.write_text("The work failed the review.")
             return False
 
@@ -556,7 +568,7 @@ def test_a_task_that_stops_before_it_ends_leaves_its_refs(tmp_path, monkeypatch)
     with pytest.raises(PipelineStopError):
         pipeline_module.process_task(
             project, _TaskStub(), 1, config, mode,
-            backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(),
+            backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(), tree=_tree(project),
         )
 
     listed = git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/")
@@ -594,11 +606,253 @@ def test_the_commit_runs_in_the_target_with_git_dir_aimed_elsewhere(tmp_path, mo
     (project / "work.txt").write_text("work\n")
     with monkeypatch.context() as mp:
         mp.setenv("GIT_DIR", str(other / ".git"))
-        pipeline_module._git_commit(project, "The task's title")
+        pipeline_module._git_commit(_tree(project), "The task's title")
 
     assert git_in(project, "log", "-1", "--format=%s").strip() == "The task's title"
     assert "work.txt" in _paths_of(project, git_in(project, "rev-parse", "HEAD").strip())
     assert git_in(other, "rev-parse", "HEAD").strip() == other_head
+
+
+def _linked_project(tmp_path):
+    """A project whose `.ai-factory` is a link into another repository that
+    holds a second project's folder beside it: the run's tree is both."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "README.md").write_text("shared\n")
+    git_in(shared, "init", "-q", "-b", "main", ".")
+    git_in(shared, "config", "user.email", "shared@example.com")
+    git_in(shared, "config", "user.name", "Shared")
+    (shared / "ai" / "p1" / "plans").mkdir(parents=True)
+    (shared / "ai" / "p1" / "plans" / "01-slug.md").write_text("# Plan\n")
+    (shared / "ai" / "p1" / "notes.md").write_text("a folder file an attempt deletes\n")
+    (shared / "ai" / "p2").mkdir(parents=True)
+    git_in(shared, "add", "-A")
+    git_in(shared, "commit", "-q", "-m", "the shared base")
+    shared_base = git_in(shared, "rev-parse", "HEAD").strip()
+    shared_origin = shared.parent / "shared-origin.git"
+    git_in(shared.parent, "init", "--bare", "-b", "main", str(shared_origin))
+    git_in(shared, "remote", "add", "origin", str(shared_origin))
+    git_in(shared, "push", "-q", "origin", "HEAD:refs/heads/main")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "code.txt").write_text("base\n")
+    project.joinpath(".ai-factory").symlink_to(shared / "ai" / "p1")
+    git_in(project, "init", "-q", "-b", "main", ".")
+    git_in(project, "config", "user.email", "test@example.com")
+    git_in(project, "config", "user.name", "Test")
+    git_in(project, "add", "-A")
+    git_in(project, "commit", "-q", "-m", "the base")
+    origin = project.parent / "project-origin.git"
+    git_in(project.parent, "init", "--bare", "-b", "main", str(origin))
+    git_in(project, "remote", "add", "origin", str(origin))
+    git_in(project, "push", "-q", "origin", "HEAD:refs/heads/main")
+    return project, shared, shared_base, shared_origin
+
+
+def test_a_foreign_staged_change_outside_the_folder_stays_out_of_the_commit_and_stays_staged(tmp_path, capsys):
+    """The other repository's index is shared with the other projects it
+    holds: with another head's `ai/p2/y` staged and the folder holding the
+    task's own artifact, the task's commit takes the folder alone, the
+    foreign change stays staged, and both repositories commit and push, the
+    project's first."""
+    project, shared, _base, shared_origin = _linked_project(tmp_path)
+    (project / "work.txt").write_text("work\n")
+    (shared / "ai" / "p2" / "y").write_text("another head's change\n")
+    git_in(shared, "add", "ai/p2/y")  # staged by another head, outside the folder
+    (project / ".ai-factory" / "plans" / "01-slug.json").write_text("{}")  # the task's artifact, inside the folder
+
+    pipeline_module._git_commit(find_run_tree(project), "The task's title")
+
+    assert capsys.readouterr().out.splitlines() == [">>> COMMITTED: The task's title"] * 2
+    assert git_in(project, "log", "-1", "--format=%s").strip() == "The task's title"
+    assert git_in(shared, "log", "-1", "--format=%s").strip() == "The task's title"
+    paths = _paths_of(shared, git_in(shared, "rev-parse", "HEAD").strip())
+    assert "ai/p1/plans/01-slug.json" in paths  # the folder's change is the task's commit
+    assert "ai/p2/y" not in paths  # the foreign staged change is not
+    assert "A  ai/p2/y" in git_in(shared, "status", "--porcelain").splitlines()  # it stays staged, untouched
+    assert git_in(shared, "rev-parse", "HEAD").strip() in git_in(shared, "ls-remote", str(shared_origin), "refs/heads/main")
+
+
+def test_a_staged_change_of_another_project_alone_decides_nothing_to_commit_in_the_other_repository(tmp_path, capsys):
+    """The nothing-to-commit check is scoped like the commit: with another
+    head's `ai/p2/y` staged and the folder unchanged, the other repository
+    names nothing to commit and no commit takes the foreign change, while
+    the project's repository before it still commits its own."""
+    project, shared, shared_base, _origin = _linked_project(tmp_path)
+    (project / "work.txt").write_text("work\n")
+    (shared / "ai" / "p2" / "y").write_text("another head's change\n")
+    git_in(shared, "add", "ai/p2/y")
+
+    pipeline_module._git_commit(find_run_tree(project), "The task's title")
+
+    assert capsys.readouterr().out.splitlines() == [
+        ">>> COMMITTED: The task's title", ">>> Nothing to commit, skipping.",
+    ]
+    assert git_in(project, "log", "-1", "--format=%s").strip() == "The task's title"
+    assert git_in(shared, "rev-parse", "HEAD").strip() == shared_base  # no commit took the foreign change
+    assert "A  ai/p2/y" in git_in(shared, "status", "--porcelain").splitlines()
+
+
+def test_the_other_repository_s_iteration_commit_holds_the_folder_s_state_alone(tmp_path):
+    """The other repository's index is shared with the other projects it
+    holds: with another head's change staged outside the folder, and the
+    folder staged holding a modification, an addition and a deletion, the
+    iteration's commit there is the base's tree with the folder's state
+    alone — another project's change stays out of the ref a reviewer off
+    the machine reads as this task's work, and stays staged."""
+    project, shared, shared_base, shared_origin = _linked_project(tmp_path)
+    factory = project / ".ai-factory"
+    (factory / "plans" / "01-slug.md").write_text("# Plan, changed by the attempt\n")
+    (factory / "plans" / "01-slug.json").write_text("{}")
+    git_in(factory, "rm", "-q", "--", "notes.md")  # a deletion the staging lays
+    git_in(factory, "add", "-A", "--", ".")  # the run's staging of the other repository
+    (shared / "ai" / "p2" / "y").write_text("another head's change\n")
+    git_in(shared, "add", "ai/p2/y")  # staged by another head, outside the folder
+
+    other = find_run_tree(project)[1]
+    state = make_iteration_commit(other, "01-slug", 1)
+
+    assert state.repository.directory == factory
+    assert state.ref == "refs/orchestrator-iteration/ai/p1/01-slug"
+    assert state.base == shared_base
+    assert _parents_of(shared, state.commit) == [state.commit, shared_base]
+    assert _paths_of(shared, state.commit) == {
+        "README.md", "ai/p1/plans/01-slug.md", "ai/p1/plans/01-slug.json",
+    }  # notes.md's deletion is taken; ai/p2/y never enters
+    assert git_in(shared, "show", f"{state.commit}:ai/p1/plans/01-slug.md") == "# Plan, changed by the attempt\n"
+    assert "A  ai/p2/y" in git_in(shared, "status", "--porcelain").splitlines()  # it stays staged
+    assert git_in(shared, "rev-parse", "HEAD").strip() == shared_base  # HEAD does not move
+
+
+def test_two_projects_of_one_repository_never_share_the_iteration_s_refs(tmp_path):
+    """A ref or branch named without its folder is shared by every project
+    the repository holds: the other repository's names carry the folder, so
+    one project's removal never deletes another's refs."""
+    project, shared, shared_base, shared_origin = _linked_project(tmp_path)
+    factory = project / ".ai-factory"
+    (factory / "plans" / "01-slug.json").write_text("{}")
+    git_in(factory, "add", "-A", "--", ".")
+    tree = find_run_tree(project)
+    state = make_iteration_commit(tree[1], "01-slug", 1)
+    push_iteration_ref(state)
+    other_ref = "refs/orchestrator-iteration/ai/p2/02-other"  # another project's task, by its folder
+    other_branch = "refs/heads/orchestrator/ai/p2/02-other"
+    git_in(shared, "update-ref", other_ref, shared_base)
+    git_in(shared, "push", "-q", "origin",
+           f"{shared_base}:{other_ref}",
+           f"{shared_base}:{other_branch}",
+           f"{shared_base}:refs/heads/orchestrator/ai/p1/01-slug")  # this task's Hermes branch
+    assert _remote_refs(shared, shared_origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
+        state.ref, other_ref, other_branch, "refs/heads/orchestrator/ai/p1/01-slug",
+    }
+
+    remove_iteration_refs(project, tree, factory / "plans" / "01-slug.md")
+
+    assert _remote_refs(shared, shared_origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
+        other_ref, other_branch,
+    }
+    listed = git_in(shared, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/")
+    assert listed.split() == [other_ref]  # the other project's local ref stays
+
+
+def test_a_removal_that_fails_in_each_repository_warns_once_per_repository(tmp_path, capsys):
+    """Whichever repository fails, each warning names that repository's own
+    ref, and a failure in one never stops the other's removal: both local
+    refs go whatever their origins answer."""
+    project, shared, shared_base, shared_origin = _linked_project(tmp_path)
+    factory = project / ".ai-factory"
+    (factory / "plans" / "01-slug.json").write_text("{}")
+    git_in(factory, "add", "-A", "--", ".")
+    tree = find_run_tree(project)
+    project_state = make_iteration_commit(tree[0], "01-slug", 1)
+    push_iteration_ref(project_state)
+    other_state = make_iteration_commit(tree[1], "01-slug", 1)
+    push_iteration_ref(other_state)
+    hook_text = (
+        "#!/bin/sh\n"
+        "while read old new ref; do\n"
+        '  if [ "$new" = "0000000000000000000000000000000000000000" ]; then\n'
+        "    exit 1\n"
+        "  fi\n"
+        "done\n"
+        "exit 0\n"
+    )
+    for bare in (project.parent / "project-origin.git", shared_origin):  # both origins refuse a deletion
+        hook = bare / "hooks" / "pre-receive"
+        hook.write_text(hook_text)
+        hook.chmod(0o755)
+
+    remove_iteration_refs(project, tree, factory / "plans" / "01-slug.md")
+
+    assert capsys.readouterr().out.splitlines() == [
+        f">>> WARNING: the iteration's ref {project_state.ref} could not be removed, continuing anyway.",
+        f">>> WARNING: the iteration's ref {other_state.ref} could not be removed, continuing anyway.",
+    ]
+    assert git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/").split() == []
+    assert git_in(shared, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/").split() == []
+
+
+def test_the_flow_makes_and_removes_the_iteration_s_state_in_each_repository(tmp_path, monkeypatch):
+    """A run whose tree is two repositories: the verify loop stages, commits
+    and pushes the iteration's state in each, the verifier reads the states of
+    both — the project's first, the other's after — and the task's end removes
+    the ref and the branch a Hermes implementer pushed in each — the other
+    repository's names carrying the folder, its commit holding the folder's
+    state alone."""
+    project, shared, shared_base, shared_origin = _linked_project(tmp_path)
+    factory = project / ".ai-factory"
+    (factory / "plans" / "01-slug.json").write_text(json.dumps({"runtime": "claude", "step": "implemented:1"}))
+    (factory / "plan-reviews").mkdir()
+    (factory / "plan-reviews" / "01-slug-plan-review-1.md").write_text("PLAN_REVIEW_PASS")
+    (factory / "reviews").mkdir()
+    (shared / "ai" / "p2" / "y").write_text("another head's change\n")
+    git_in(shared, "add", "ai/p2/y")  # staged by another head, outside the folder
+    base = git_in(project, "rev-parse", "HEAD").strip()
+    origin = project.parent / "project-origin.git"
+    # the branches Hermes implementers pushed, one per repository
+    git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")
+    git_in(shared, "push", "-q", "origin", f"{shared_base}:refs/heads/orchestrator/ai/p1/01-slug")
+
+    monkeypatch.setattr(pipeline_module, "mark_done", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline_module, "_git_commit", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline_module, "report", lambda *a, **k: None)
+
+    class _CapturingVerifier:
+        def __init__(self):
+            self.states = []
+            self.other_commit = ""
+
+        def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path, iteration_states):
+            self.states.append(iteration_states)
+            self.other_commit = git_in(shared, "rev-parse", "refs/orchestrator-iteration/ai/p1/01-slug").strip()
+            return True
+
+    verifier = _CapturingVerifier()
+    mode = IMPLEMENT_MODE._replace(
+        verify=IMPLEMENT_MODE.verify._replace(make_verifier=lambda reviewer, project_dir: verifier),
+    )
+    config = OrchestratorConfig(max_iterations=3, usage_threshold_5h=90, usage_threshold_weekly=95, enable_phase_sessions=False)
+
+    pipeline_module.process_task(
+        project, _TaskStub(), 1, config, mode,
+        backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(), tree=find_run_tree(project),
+    )
+
+    states = verifier.states[-1]
+    assert [s.repository.folder for s in states] == [None, "ai/p1/"]  # each repository's state, the project's first
+    assert states[0].ref == "refs/orchestrator-iteration/01-slug"
+    assert states[1].ref == "refs/orchestrator-iteration/ai/p1/01-slug"
+    assert _paths_of(shared, verifier.other_commit) == {
+        "README.md", "ai/p1/notes.md", "ai/p1/plans/01-slug.md", "ai/p1/plans/01-slug.json",
+        "ai/p1/plan-reviews/01-slug-plan-review-1.md",
+    }  # the folder's staged state alone; ai/p2/y never enters
+    assert "A  ai/p2/y" in git_in(shared, "status", "--porcelain").splitlines()  # it stays staged
+    # The task ended: each repository's refs and branches are gone, on origin and in the clone.
+    assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/orchestrator-laid/*", "refs/heads/orchestrator/*") == set()
+    assert _remote_refs(shared, shared_origin, "refs/orchestrator-iteration/*", "refs/orchestrator-laid/*", "refs/heads/orchestrator/*") == set()
+    assert git_in(project, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/", "refs/orchestrator-laid/").split() == []
+    assert git_in(shared, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/", "refs/orchestrator-laid/").split() == []
 
 
 def test_a_flow_with_git_index_file_outside_holds_the_implementer_s_file_in_the_iteration(tmp_path, monkeypatch):
@@ -618,10 +872,10 @@ def test_a_flow_with_git_index_file_outside_holds_the_implementer_s_file_in_the_
         mp.setenv("GIT_INDEX_FILE", str(outside))
         pipeline_module.process_task(
             project, _TaskStub(), 1, config, mode,
-            backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(),
+            backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(), tree=_tree(project),
         )
 
-    state = verifier.calls[-1][-1]
+    (state,) = verifier.calls[-1][-1]
     assert "implementer.txt" in _paths_of(project, state.commit)
     assert not outside.exists()
 
@@ -636,7 +890,7 @@ def test_a_held_index_lock_prints_git_s_text_and_raises_the_called_process_error
     lock.write_text("")
 
     with pytest.raises(subprocess.CalledProcessError) as caught:
-        pipeline_module._git_commit(project, "The task's title")
+        pipeline_module._git_commit(_tree(project), "The task's title")
 
     assert caught.value.returncode != 0
     assert caught.value.cmd[0] == "git"
@@ -654,7 +908,7 @@ def test_a_commit_hook_past_the_bound_still_ends_in_the_commit(tmp_path, monkeyp
     hook.chmod(0o755)
     (project / "work.txt").write_text("work\n")
 
-    pipeline_module._git_commit(project, "The task's title")
+    pipeline_module._git_commit(_tree(project), "The task's title")
 
     assert git_in(project, "log", "-1", "--format=%s").strip() == "The task's title"
     assert git_in(project, "rev-parse", "HEAD").strip() != base
@@ -673,7 +927,7 @@ def test_the_commit_waits_for_git_alone_not_a_hook_s_background_job(tmp_path):
 
     started = time.monotonic()
     try:
-        pipeline_module._git_commit(project, "The task's title")
+        pipeline_module._git_commit(_tree(project), "The task's title")
     finally:
         if pid_file.exists():
             try:
@@ -694,7 +948,7 @@ def test_a_push_an_origin_refuses_prints_the_one_warning_and_raises_nothing(tmp_
     hook.chmod(0o755)
     (project / "work.txt").write_text("work\n")
 
-    pipeline_module._git_commit(project, "The task's title")
+    pipeline_module._git_commit(_tree(project), "The task's title")
 
     lines = capsys.readouterr().out.splitlines()
     assert lines[-1] == ">>> WARNING: git push failed, continuing anyway."
@@ -714,7 +968,7 @@ def test_a_push_an_origin_refuses_with_undecodable_bytes_prints_the_one_warning_
     hook.chmod(0o755)
     (project / "work.txt").write_text("work\n")
 
-    pipeline_module._git_commit(project, "The task's title")
+    pipeline_module._git_commit(_tree(project), "The task's title")
 
     lines = capsys.readouterr().out.splitlines()
     assert lines[-1] == ">>> WARNING: git push failed, continuing anyway."
@@ -729,7 +983,7 @@ def test_a_push_against_an_origin_that_never_answers_prints_the_one_warning_and_
         git_in(project, "remote", "set-url", "origin", f"http://127.0.0.1:{silent.port}/origin.git")
         (project / "work.txt").write_text("work\n")
 
-        pipeline_module._git_commit(project, "The task's title")
+        pipeline_module._git_commit(_tree(project), "The task's title")
 
         lines = capsys.readouterr().out.splitlines()
         assert lines[-1] == ">>> WARNING: git push failed, continuing anyway."

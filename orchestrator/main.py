@@ -36,7 +36,8 @@ from .role_backend import RoleRoutedBackend, backend_key
 from .layout import _artifact_subdir, _external_evidence_path, _resolve_roadmap_relpath, _tests_sibling
 from .notify import Outcome, report
 from .pipeline import IMPLEMENT_MODE, TEST_MODE, Mode, _artifact_dir, _run_dynamic_loop, process_task
-from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol
+from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, Repository
+from .repositories import find_run_tree
 from .resume import plan_review_budget
 from .run_data import dispose, refuse, rollback, show, sweep
 from .runtime import _handle_sigint, _run_summary, _with_caffeinate
@@ -55,37 +56,47 @@ _IMPLEMENTER_RESULT_DIRS = (
 
 
 def _factory_tracked(project_dir: Path) -> bool:
-    """Whether the commit the run is at holds at least one path beneath the
-    project's .ai-factory, which is what his clone, built from commits, holds."""
+    """Whether the repository the project's .ai-factory lies in holds at least
+    one path beneath it at the commit the run is at, in whichever repository
+    it lies — a link's folder and a repository of its own among them — which is
+    what his clone, built from commits, holds."""
     try:
         listed = run_git_sync(
-            ["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", ".ai-factory/"],
-            cwd=project_dir,
+            ["ls-tree", "-r", "--name-only", "-z", "HEAD"],
+            cwd=project_dir / ".ai-factory",
         )
     except OSError:
         return False
     return listed.returncode == 0 and any(listed.stdout.split("\0"))
 
 
-def _implementer_result(config: OrchestratorConfig, project_dir: Path, mode: Mode) -> ImplementerResultProtocol:
+def _implementer_result(
+    config: OrchestratorConfig,
+    project_dir: Path,
+    mode: Mode,
+    tree: tuple[Repository, ...],
+) -> ImplementerResultProtocol:
     """Choose how the implementer's result reaches the run's tree, by its runtime.
 
     An implementer on Hermes works in his own clone: his result is a pushed
-    branch, laid as the tree outside the run's own artifact paths for the
-    roadmap in play. His clone holds only what the project's repository
-    tracks, so a project whose .ai-factory git does not track — gitignored,
-    a nested repository, a symlink out — cannot have him as its implementer.
+    branch in every repository of the tree the loops found, laid as each
+    repository's tree outside the run's own artifact paths for the roadmap in
+    play. His clone holds only what commits hold, so where the repository
+    .ai-factory lies in tracks none of it — a folder git ignores or does not
+    track, in the project's repository or in the other, or an .ai-factory in
+    no repository — it cannot have him as its implementer; a link and a
+    repository of its own that track it can.
     """
     entry = role_runtimes(config.runtime, config.roles)["implementer"]
     if entry["runtime"] != "hermes":
         return WorkingTreeResult()
     if not _factory_tracked(project_dir):
         raise SystemExit(
-            "Invalid 'roles' role 'implementer': .ai-factory is not tracked in the project's "
-            "repository, so his branch holds none of it"
+            "Invalid 'roles' role 'implementer': the repository .ai-factory lies in "
+            "tracks none of it, so his clone holds none of it"
         )
     preserved = tuple(_artifact_dir(project_dir, mode, name) for name in _IMPLEMENTER_RESULT_DIRS)
-    return HermesResult(project_dir, preserved)
+    return HermesResult(project_dir, tree, preserved)
 
 
 def _print_run_choices(config: OrchestratorConfig) -> None:
@@ -95,8 +106,11 @@ def _print_run_choices(config: OrchestratorConfig) -> None:
         print(f"Plan review iterations: {plan_review_budget(config.max_iterations, config.plan_review_iterations)}")
 
 
-def _make_runtime(config: OrchestratorConfig, project_dir: Path, roles: tuple[AgentRole, ...]) -> tuple[AgentBackendProtocol, Callable[[], None]]:
-    """Construct one backend per runtime a role of the run takes and bind the pre-task usage policy."""
+def _make_runtime(config: OrchestratorConfig, project_dir: Path, roles: tuple[AgentRole, ...], tree: tuple[Repository, ...]) -> tuple[AgentBackendProtocol, Callable[[], None]]:
+    """Construct one backend per runtime a role of the run takes and bind the pre-task usage policy.
+
+    The run's tree is handed to the Hermes backend, whose call checks and names
+    each repository of it, as it is handed to the flow."""
     print(f"Agent runtime: {config.runtime}")
     runtimes = role_runtimes(config.runtime, config.roles, roles)
     taken = {entry["runtime"] for entry in runtimes.values()}
@@ -135,7 +149,7 @@ def _make_runtime(config: OrchestratorConfig, project_dir: Path, roles: tuple[Ag
             backends[key] = CodexAgentBackend(config.codex_agents)
         elif runtime == "hermes":
             settings = config.hermes_instances[entry["instance"]]
-            backends[key] = HermesAgentBackend(settings["server"], settings["port"], settings["key_file"])
+            backends[key] = HermesAgentBackend(settings["server"], settings["port"], settings["key_file"], tree)
         else:
             backends[key] = HeadAgentBackend(heads[key])
     backend = RoleRoutedBackend(backends, runtimes)
@@ -175,12 +189,13 @@ def _test_loop(project_dir: Path, config: OrchestratorConfig) -> None:
         # Test mode plans and reviews plans whatever the setting: the run hands
         # on the stage it runs.
         config = dataclasses.replace(config, planning=True)
-    backend, usage_check = _make_runtime(config, project_dir, mode.roles)
-    implementer_result = _implementer_result(config, project_dir, mode)
+    tree = find_run_tree(project_dir)
+    backend, usage_check = _make_runtime(config, project_dir, mode.roles, tree)
+    implementer_result = _implementer_result(config, project_dir, mode, tree)
     _print_run_choices(config)
     _run_dynamic_loop(
         project_dir, roadmap_path, config,
-        lambda m, i, sid: process_task(project_dir, m, i, config, mode, phase_session_id=sid, backend=backend, implementer_result=implementer_result),
+        lambda m, i, sid: process_task(project_dir, m, i, config, mode, phase_session_id=sid, backend=backend, implementer_result=implementer_result, tree=tree),
         mode=mode,
         usage_check=usage_check,
     )
@@ -204,12 +219,13 @@ def _implement_loop(project_dir: Path, config: OrchestratorConfig, planner_promp
             roles=(AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER),
         )
         config = dataclasses.replace(config, plan_review_iterations=0)
-    backend, usage_check = _make_runtime(config, project_dir, mode.roles)
-    implementer_result = _implementer_result(config, project_dir, mode)
+    tree = find_run_tree(project_dir)
+    backend, usage_check = _make_runtime(config, project_dir, mode.roles, tree)
+    implementer_result = _implementer_result(config, project_dir, mode, tree)
     _print_run_choices(config)
     _run_dynamic_loop(
         project_dir, roadmap_path, config,
-        lambda m, i, sid: process_task(project_dir, m, i, config, mode, phase_session_id=sid, backend=backend, implementer_result=implementer_result),
+        lambda m, i, sid: process_task(project_dir, m, i, config, mode, phase_session_id=sid, backend=backend, implementer_result=implementer_result, tree=tree),
         mode=mode,
         usage_check=usage_check,
     )

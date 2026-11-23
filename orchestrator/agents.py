@@ -21,6 +21,14 @@ def _exchange_of(project_dir: Path, artifact: Path) -> str:
     return artifact.with_suffix("").relative_to(project_dir / ".ai-factory").as_posix()
 
 
+def _roadmap_reference(project_dir: Path, roadmap_path: Path) -> str:
+    """The roadmap's place in a message: its path relative to the project's
+    root, written with `/` — valid in the run's tree and in a clone of it.
+    A roadmap outside the project is a defect, raised here, never a path a
+    message carries as it is."""
+    return roadmap_path.relative_to(project_dir).as_posix()
+
+
 def _load_prompt(name: str) -> str:
     return (PROMPTS_DIR / f"{name}.md").read_text()
 
@@ -88,8 +96,9 @@ class Planner:
         """Plan a task. The run writes the planner's answer to plan_path.
 
         The message carries the task and, on a revision, the current plan's and
-        the review's text under their headings; it names no path of the run's
-        tree other than the roadmap line. The planner's session id is written to
+        the review's text under their headings; it names no absolute path of
+        the run's tree, and the roadmap line's path is relative to the
+        project's root. The planner's session id is written to
         the sidecar under ``planner`` as soon as the agent returns, before the
         answer is written. An empty answer halts with EmptyAnswerError, leaves
         the plan file as it was and leaves ``step`` at ``planning:<N>``, so a
@@ -98,7 +107,7 @@ class Planner:
         roadmap_line = ""
         if roadmap_path is not None:
             location = f" (line {line_number + 1})" if line_number is not None else ""
-            roadmap_line = f"Roadmap: {roadmap_path}{location}\n"
+            roadmap_line = f"Roadmap: {_roadmap_reference(self.project_dir, roadmap_path)}{location}\n"
         prompt = (
             f"Create or update an implementation plan for this task:\n\n"
             f"{roadmap_line}"
@@ -202,16 +211,18 @@ class CodeReviewer:
         self.system_prompt = _compose_instructions(_load_prompt("reviewer"), _load_prompt("escalation"))
         self.session_id: str | None = None
 
-    def review(self, plan_path: Path, review_path: Path, prev_review_path: Path | None = None, implementer_answer_path: Path | None = None, *, iteration_state: IterationState) -> bool:
+    def review(self, plan_path: Path, review_path: Path, prev_review_path: Path | None = None, implementer_answer_path: Path | None = None, *, iteration_states: tuple[IterationState, ...]) -> bool:
         """Review code changes in the reviewer's own session.
 
         The message carries the plan, the implementer's answer and, on a
-        re-review, the previous review, each under its heading, and names the
-        base and the iteration's commit on the run's ref, so the reviewer reads
-        the changes as the difference between them wherever it lives. The run
-        writes the reviewer's answer to review_path; an empty answer halts with
-        EmptyAnswerError and leaves ``step`` at ``implemented:<N>``, so a
-        resumed run repeats the review.
+        re-review, the previous review, each under its heading, and names
+        each repository of the run's tree by what it is with its base and
+        the iteration's commit on its ref, so the reviewer reads the
+        changes of each as the difference between its two commits
+        wherever it lives. The run writes the reviewer's answer to
+        review_path; an empty answer halts with EmptyAnswerError and
+        leaves ``step`` at ``implemented:<N>``, so a resumed run repeats
+        the review.
         """
         sections = [
             "## Plan",
@@ -224,12 +235,13 @@ class CodeReviewer:
             sections += ["", "## The previous review", "", _read_artifact(prev_review_path)]
         body = "\n".join(sections)
 
-        naming_lines = (
-            f"Run `git diff {iteration_state.base} {iteration_state.commit}` to see ALL changes: "
-            f"the base is `{iteration_state.base}`, the iteration's commit is `{iteration_state.commit}` "
-            f"on the ref `{iteration_state.ref}`.\n"
-            "The plan for context is under `## Plan`.\n"
+        naming_lines = "".join(
+            f"Run `git diff {state.base} {state.commit}` to see ALL changes of {state.repository.label}: "
+            f"the base is `{state.base}`, the iteration's commit is `{state.commit}` "
+            f"on the ref `{state.ref}`.\n"
+            for state in iteration_states
         )
+        naming_lines += "The plan for context is under `## Plan`.\n"
         if implementer_answer_path is not None:
             naming_lines += "The implementer's answer is under `## The implementer's answer`.\n"
 
@@ -279,8 +291,8 @@ class CodeReviewer:
 
         return _has_signal(answer, REVIEW_VERIFY.pass_signal)
 
-    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None, iteration_state: IterationState) -> bool:
-        return self.review(plan_path, out_path, prev_review_path=prev_out_path, implementer_answer_path=implementer_answer_path, iteration_state=iteration_state)
+    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None, iteration_states: tuple[IterationState, ...]) -> bool:
+        return self.review(plan_path, out_path, prev_review_path=prev_out_path, implementer_answer_path=implementer_answer_path, iteration_states=iteration_states)
 
 
 class PlanReviewer:
@@ -358,8 +370,9 @@ class Implementer:
         ``## Plan`` heading; a fix message, sent when the role holds a session and
         a feedback path, carries the review's text under ``## Review``. Both end
         with the grammar of the answer: what was done, and one ``DEVIATION`` line
-        per point where the file disagreed with the plan. No message names a path
-        of the run's tree other than the roadmap line.
+        per point where the file disagreed with the plan. No message names an
+        absolute path of the run's tree; the roadmap line's path is relative to
+        the project's root.
 
         The implementer's session id is written to the plan's sidecar under
         ``implementer`` as soon as the agent returns, before the answer is
@@ -389,7 +402,7 @@ class Implementer:
         else:
             roadmap_line = ""
             if roadmap_path is not None and line_number is not None:
-                roadmap_line = f"Roadmap: {roadmap_path} (line {line_number + 1})\n"
+                roadmap_line = f"Roadmap: {_roadmap_reference(self.project_dir, roadmap_path)} (line {line_number + 1})\n"
 
             prompt = (
                 f"{roadmap_line}"
@@ -433,11 +446,11 @@ class TestRunner:
     def __init__(self, project_dir: Path) -> None:
         self.project_dir = project_dir
 
-    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None, iteration_state: IterationState) -> bool:
+    def verify(self, plan_path: Path, out_path: Path, prev_out_path: Path | None, implementer_answer_path: Path | None, iteration_states: tuple[IterationState, ...]) -> bool:
         """Extract test command from plan, run it, write output. Returns True if exit code 0.
 
         Reads nothing from prev_out_path, implementer_answer_path or the
-        iteration's state — the test run reads only the plan and the tree."""
+        iteration states — the test run reads only the plan and the tree."""
         cmd = self._extract_test_command(plan_path)
         if not cmd:
             out_path.write_text("ERROR: No '## Test Command' section found in plan.\n", encoding="utf-8")

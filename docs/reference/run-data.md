@@ -52,7 +52,7 @@ A position is a token of the interface's version. `show` lists the ones a task c
 
 | Token | Listed when | What stays | What goes | The next run |
 |---|---|---|---|---|
-| `start` | the task has an attempt and is not done | nothing of the attempt's state | the plan, every plan review, every review and test run, the implementer's answers and the task's record | plans, or lays the spec, afresh |
+| `start` | the task has an attempt and is not done | nothing of the attempt's state | the plan, every plan review, every review and test run, the implementer's answers and the task's record, and the task's refs in each repository of the run's tree | plans, or lays the spec, afresh |
 | `plan-review` | planning is on and the plan exists | the plan | every plan review, review and test run and the implementer's answers; the implementer's session and the code reviewer's session | reviews the plan from its first attempt |
 | `verify` | the plan exists and the attempt has implemented: its record's step shows an implementation, or an implementer's answer stands | the plan, the plan reviews that passed and the implementer's session | every review and test run, the implementer's answers and the code reviewer's session | verifies the change from its first iteration |
 | `implement` | planning is off | the rest of the task's record | every review and test run, the implementer's answers, the implementer's session and the code reviewer's session | implements again from the spec |

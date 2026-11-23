@@ -39,7 +39,7 @@ from orchestrator.implementer_result import HermesResult, WorkingTreeResult
 from orchestrator.role_backend import RoleRoutedBackend
 from orchestrator.usage import _check_usage_limits, _parse_pct
 from orchestrator.agents import _load_prompt
-from orchestrator.ports import AgentRole, RoleSetting
+from orchestrator.ports import AgentRole, Repository, RoleSetting
 from tests.conftest import git_in
 from orchestrator.roadmap import mark_done
 from tests.fakes import FakeAgentBackend
@@ -928,7 +928,7 @@ def test_process_task_escalated_sidecar_raises_without_constructing_agents(tmp_p
         line_number = 0
 
     with pytest.raises(EscalationError, match="pick A or B"):
-        process_task(tmp_path, _TaskStub(), 1, config, backend=FakeAgentBackend(), implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, config, backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
 
 def test_process_task_records_done_after_mark_and_before_commit(tmp_path, monkeypatch):
@@ -945,7 +945,7 @@ def test_process_task_records_done_after_mark_and_before_commit(tmp_path, monkey
         def __init__(self, *args, **kwargs):
             self.session_id = None
 
-        def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path, iteration_state):
+        def verify(self, plan_path, out_path, prev_out_path, implementer_answer_path, iteration_states):
             return True
 
     class _ImplementerStub:
@@ -978,7 +978,7 @@ def test_process_task_records_done_after_mark_and_before_commit(tmp_path, monkey
         description = "Some description"
         line_number = 0
 
-    process_task(tmp_path, _TaskStub(), 1, config, backend=FakeAgentBackend(), implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, config, backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert recorded == ["implemented:1", "done"]
 
@@ -1010,7 +1010,7 @@ def test_process_task_resume_past_max_iterations_raises_halt_error(tmp_path):
 
     backend = FakeAgentBackend()
     with pytest.raises(HaltError):
-        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert backend.calls == []
     assert sidecar.read_bytes() == before
@@ -1419,7 +1419,7 @@ def test_process_task_restores_saved_sessions_from_disk(tmp_path, monkeypatch):
     _neutralize_side_effects(monkeypatch)
     backend = _review_writing_backend(review_2)
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), phase_session_id="phase-sid", backend=backend, implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), phase_session_id="phase-sid", backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     impl_call, review_call = backend.calls
     assert impl_call.role is AgentRole.IMPLEMENTER
@@ -1450,7 +1450,7 @@ def test_process_task_phase_session_never_reaches_the_code_reviewer(tmp_path, mo
     _neutralize_side_effects(monkeypatch)
     backend = _review_writing_backend(review_2)
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), phase_session_id="phase-sid", backend=backend, implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), phase_session_id="phase-sid", backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     impl_call, review_call = backend.calls
     assert impl_call.session_id == "saved-impl"
@@ -1470,7 +1470,7 @@ def test_process_task_test_mode_verifies_by_shell_not_backend(tmp_path, monkeypa
 
     backend = FakeAgentBackend(on_call=_write)
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), TEST_MODE, backend=backend, implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), TEST_MODE, backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert [c.role for c in backend.calls] == [
         AgentRole.PLANNER, AgentRole.PLAN_REVIEWER, AgentRole.IMPLEMENTER,
@@ -1505,7 +1505,7 @@ def test_process_task_runs_each_role_on_its_own_runtime_and_records_the_split(tm
     config = dataclasses.replace(_flow_config(), roles=roles)
     prd, rv, plan_path = _dms_dirs(tmp_path)
 
-    process_task(tmp_path, _TaskStub(), 1, config, backend=routed, implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, config, backend=routed, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert [call.role for call in claude_backend.calls] == [AgentRole.PLANNER, AgentRole.PLAN_REVIEWER]
     assert [call.role for call in codex_backend.calls] == [AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER]
@@ -1552,9 +1552,9 @@ def test_loops_construct_one_backend_and_forward_it(tmp_path, monkeypatch, loop_
     monkeypatch.setattr(main_module, "_check_usage_limits", (lambda c: policy_calls.append((c,))) if selected == "claude" else _unexpected_runtime)
     monkeypatch.setattr(main_module, "_check_codex_usage_limits", (lambda c, p: policy_calls.append((c, p))) if selected == "codex" else _unexpected_runtime)
 
-    def make_runtime(c, p, roles):
-        make_calls.append((c, p, roles))
-        return real_make_runtime(c, p, roles)
+    def make_runtime(c, p, roles, tree):
+        make_calls.append((c, p, roles, tree))
+        return real_make_runtime(c, p, roles, tree)
 
     def capture_loop(project_dir, roadmap_path, config, process_fn, mode, *, usage_check):
         captured.update(process_fn=process_fn, mode=mode, usage_check=usage_check)
@@ -1569,7 +1569,7 @@ def test_loops_construct_one_backend_and_forward_it(tmp_path, monkeypatch, loop_
     captured["usage_check"]()
     captured["process_fn"](_TaskStub(), 1, "sid")
 
-    assert make_calls == [(config, tmp_path, tuple(AgentRole))]
+    assert make_calls == [(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))]
     assert len(constructor_calls) == 1
     assert policy_calls == ([(config,)] if selected == "claude" else [(config, tmp_path)])
     (_, kwargs), = process_calls
@@ -1699,7 +1699,7 @@ def test_loops_apply_and_print_resolved_settings(tmp_path, monkeypatch, capsys, 
 
 def _capture_loop_mode(monkeypatch, project_dir):
     captured = {}
-    monkeypatch.setattr(main_module, "_make_runtime", lambda c, p, roles: (FakeAgentBackend(), lambda: None))
+    monkeypatch.setattr(main_module, "_make_runtime", lambda c, p, roles, tree: (FakeAgentBackend(), lambda: None))
     monkeypatch.setattr(
         main_module, "_run_dynamic_loop",
         lambda project_dir, roadmap_path, config, process_fn, *, mode, usage_check: captured.update(mode=mode),
@@ -1840,7 +1840,7 @@ def test_planning_off_adds_no_claude_usage_check_and_prints_two_role_lines(tmp_p
     checks = []
     monkeypatch.setattr(main_module, "_check_usage_limits", lambda c: checks.append("claude"))
     monkeypatch.setattr(main_module, "HermesAgentBackend",
-                        lambda server, port, key_file: FakeAgentBackend())
+                        lambda server, port, key_file, tree: FakeAgentBackend())
     monkeypatch.setattr(main_module, "_implementer_result", lambda *a: WorkingTreeResult())
     config = dataclasses.replace(
         _flow_config(), planning=False,
@@ -2076,7 +2076,7 @@ def test_runtime_reads_only_selected_block_and_prints_backend_mapping(tmp_path, 
     monkeypatch.setattr(main_module, "_check_usage_limits", _unexpected_runtime)
     monkeypatch.setattr(main_module, "_check_codex_usage_limits", _unexpected_runtime)
 
-    result, usage_check = main_module._make_runtime(SelectedConfig(), tmp_path, tuple(AgentRole))
+    result, usage_check = main_module._make_runtime(SelectedConfig(), tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
 
     assert isinstance(result, RoleRoutedBackend)
     assert result.runtime_of(AgentRole.PLANNER) == selected
@@ -2118,7 +2118,7 @@ def test_make_runtime_builds_each_taken_runtime_and_composes_both_checks_in_orde
         roles={"implementer": {"runtime": "codex"}, "code_reviewer": {"runtime": "codex"}},
     )
 
-    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
+    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
 
     assert constructed == [("claude", {}), ("codex", {})]
     usage_check()
@@ -2149,7 +2149,7 @@ def test_a_roles_runtime_missing_executable_fails_at_assembly(tmp_path, monkeypa
     config = dataclasses.replace(_flow_config(), roles={"implementer": {"runtime": "codex"}})
 
     with pytest.raises(FileNotFoundError):
-        main_module._make_runtime(config, tmp_path, tuple(AgentRole))
+        main_module._make_runtime(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
     assert capsys.readouterr().out == "Agent runtime: claude\n"
 
 
@@ -2166,8 +2166,10 @@ def test_make_runtime_builds_one_hermes_backend_per_named_instance_and_prints_hi
         constructed.append(("claude", agents))
         return local
 
-    def hermes_factory(server, port, key_file):
-        constructed.append(("hermes", server, port, key_file))
+    tree = (Repository(directory=tmp_path, folder=None),)
+
+    def hermes_factory(server, port, key_file, handed_tree):
+        constructed.append(("hermes", server, port, key_file, handed_tree))
         return FakeAgentBackend(sid=f"{server}:{port}")
 
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", claude_factory)
@@ -2188,12 +2190,12 @@ def test_make_runtime_builds_one_hermes_backend_per_named_instance_and_prints_hi
         },
     )
 
-    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
+    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
 
-    assert constructed == [  # one backend per distinct key, in the roles' order
-        ("hermes", "127.0.0.1", 8801, "/stand/keys/main"),
+    assert constructed == [  # one backend per distinct key, in the roles' order, each handed the tree
+        ("hermes", "127.0.0.1", 8801, "/stand/keys/main", tree),
         ("claude", {}),
-        ("hermes", "127.0.0.1", 8802, "/stand/keys/second"),
+        ("hermes", "127.0.0.1", 8802, "/stand/keys/second", tree),
     ]
     usage_check()
     assert checks == ["claude"]
@@ -2216,7 +2218,7 @@ def test_the_implementer_s_result_follows_its_runtime_and_the_mode_s_routing(tmp
     """A local implementer works in the run's tree; an implementer on Hermes lays his
     branch, with the run's own artifact paths for the roadmap in play preserved."""
     assert isinstance(
-        main_module._implementer_result(_flow_config(), tmp_path, IMPLEMENT_MODE),
+        main_module._implementer_result(_flow_config(), tmp_path, IMPLEMENT_MODE, (Repository(directory=tmp_path, folder=None),)),
         WorkingTreeResult,
     )
 
@@ -2228,7 +2230,7 @@ def test_the_implementer_s_result_follows_its_runtime_and_the_mode_s_routing(tmp
     mode = IMPLEMENT_MODE._replace(artifact_subdir="john-doe")
     project = _tracked_factory_project(tmp_path)
 
-    result = main_module._implementer_result(config, project, mode)
+    result = main_module._implementer_result(config, project, mode, (Repository(directory=project, folder=None),))
 
     assert isinstance(result, HermesResult)
     assert result.project_dir == project
@@ -2263,18 +2265,19 @@ def test_a_tracked_factory_passes_hermes_as_the_implementer(tmp_path):
     tracks reaches him and he can be the implementer."""
     project = _tracked_factory_project(tmp_path)
 
-    result = main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE)
+    result = main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE, (Repository(directory=project, folder=None),))
 
     assert isinstance(result, HermesResult)
     assert result.project_dir == project
 
 
-@pytest.mark.parametrize("kind", ["symlink", "gitignored", "nested", "no repository"])
+@pytest.mark.parametrize("kind", ["symlink", "gitignored", "untracked", "no repository"])
 def test_an_untracked_factory_refuses_hermes_as_the_implementer(tmp_path, kind):
-    """His clone holds only what the repository tracks: a .ai-factory that is a
-    symlink out, gitignored, a repository of its own or beside any repository
-    never reaches him, so naming him for the implementer is a startup error
-    naming the role and the reason."""
+    """His clone holds only what commits hold, so a .ai-factory the repository
+    it lies in tracks none of it never reaches him — gitignored, not tracked,
+    a link whose folder lies in no repository or no repository at all — so
+    naming him for the implementer is a startup error naming the role and the
+    reason."""
     project = tmp_path / "project"
     project.mkdir()
     factory = project / ".ai-factory"
@@ -2292,21 +2295,70 @@ def test_an_untracked_factory_refuses_hermes_as_the_implementer(tmp_path, kind):
         git_in(project, "init", "-q", "-b", "main", ".")
         git_in(project, "add", ".gitignore")
         git_in(project, "commit", "-q", "-m", "the ignore")
-    elif kind == "nested":
+    elif kind == "untracked":
         (factory / "plans").mkdir(parents=True)
+        (project / "readme.md").write_text("readme\n")
         git_in(project, "init", "-q", "-b", "main", ".")
-        git_in(factory, "init", "-q", "-b", "main", ".")
+        git_in(project, "add", "readme.md")
+        git_in(project, "commit", "-q", "-m", "the project")
     else:  # no repository at all
         (factory / "plans").mkdir(parents=True)
 
     with pytest.raises(SystemExit) as exc:
-        main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE)
+        main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE, (Repository(directory=project, folder=None),))
 
     message = str(exc.value)
     assert message == (
-        "Invalid 'roles' role 'implementer': .ai-factory is not tracked in the project's "
-        "repository, so his branch holds none of it"
+        "Invalid 'roles' role 'implementer': the repository .ai-factory lies in "
+        "tracks none of it, so his clone holds none of it"
     )
+
+
+def test_a_linked_factory_the_link_s_repository_tracks_passes(tmp_path):
+    """A link is no refusal of its own: the repository the link's folder lies
+    in is what counts, and where that repository tracks the folder's paths his
+    clone holds them, whatever the project's own repository tracks."""
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "plans").mkdir(parents=True)
+    (elsewhere / "plans" / "01-slug.md").write_text("# Plan\n")
+    git_in(elsewhere, "init", "-q", "-b", "main", ".")
+    git_in(elsewhere, "add", "-A")
+    git_in(elsewhere, "commit", "-q", "-m", "the factory")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "readme.md").write_text("readme\n")
+    (project / ".ai-factory").symlink_to(elsewhere, target_is_directory=True)
+    git_in(project, "init", "-q", "-b", "main", ".")
+    git_in(project, "add", "readme.md")
+    git_in(project, "commit", "-q", "-m", "the project")
+
+    result = main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE, (Repository(directory=project, folder=None),))
+
+    assert isinstance(result, HermesResult)
+    assert result.project_dir == project
+
+
+def test_a_factory_repository_of_its_own_that_tracks_it_passes(tmp_path):
+    """A repository of its own is no refusal either: where it tracks the
+    folder's paths his clone holds them, whatever the project's own repository
+    tracks."""
+    project = tmp_path / "project"
+    project.mkdir()
+    factory = project / ".ai-factory"
+    (factory / "plans").mkdir(parents=True)
+    (factory / "plans" / "01-slug.md").write_text("# Plan\n")
+    (project / "readme.md").write_text("readme\n")
+    git_in(project, "init", "-q", "-b", "main", ".")
+    git_in(project, "add", "readme.md")
+    git_in(project, "commit", "-q", "-m", "the project")
+    git_in(factory, "init", "-q", "-b", "main", ".")
+    git_in(factory, "add", "-A")
+    git_in(factory, "commit", "-q", "-m", "the factory")
+
+    result = main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE, (Repository(directory=project, folder=None),))
+
+    assert isinstance(result, HermesResult)
+    assert result.project_dir == project
 
 
 def test_a_factory_staged_and_never_committed_is_refused(tmp_path):
@@ -2323,11 +2375,11 @@ def test_a_factory_staged_and_never_committed_is_refused(tmp_path):
     git_in(project, "add", ".ai-factory/")
 
     with pytest.raises(SystemExit) as exc:
-        main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE)
+        main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE, (Repository(directory=project, folder=None),))
 
     assert str(exc.value) == (
-        "Invalid 'roles' role 'implementer': .ai-factory is not tracked in the project's "
-        "repository, so his branch holds none of it"
+        "Invalid 'roles' role 'implementer': the repository .ai-factory lies in "
+        "tracks none of it, so his clone holds none of it"
     )
 
 
@@ -2343,7 +2395,7 @@ def test_a_factory_committed_in_a_project_s_subdirectory_passes(tmp_path):
     git_in(repo, "add", "-A")
     git_in(repo, "commit", "-q", "-m", "the project")
 
-    result = main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE)
+    result = main_module._implementer_result(_hermes_implementer_config(), project, IMPLEMENT_MODE, (Repository(directory=project, folder=None),))
 
     assert isinstance(result, HermesResult)
     assert result.project_dir == project
@@ -2365,7 +2417,7 @@ def test_a_loop_with_hermes_as_the_implementer_of_an_untracked_factory_exits_bef
     with pytest.raises(SystemExit) as exc:
         getattr(main_module, loop_name)(tmp_path, _hermes_implementer_config())
 
-    assert "is not tracked in the project's repository" in str(exc.value)
+    assert "the repository .ai-factory lies in tracks none of it" in str(exc.value)
     assert "'implementer'" in str(exc.value)
     assert loops == []
     assert backend.calls == []
@@ -2435,7 +2487,7 @@ def test_real_loop_dispatches_selected_policy_before_each_task(tmp_path, monkeyp
     monkeypatch.setattr(usage_module, "_read_rate_limits", acquire if selected == "codex" else _unexpected_runtime)
     monkeypatch.setattr(usage_module, "_run_usage_probe", acquire if selected == "claude" else _unexpected_runtime)
 
-    def process(project_dir, task, index, effective_config, mode, *, phase_session_id, backend, implementer_result):
+    def process(project_dir, task, index, effective_config, mode, *, phase_session_id, backend, implementer_result, tree):
         assert isinstance(backend, RoleRoutedBackend)
         assert backend.runtime_of(AgentRole.IMPLEMENTER) == selected
         assert backend.role_settings == sentinel.role_settings
@@ -2491,7 +2543,7 @@ def test_process_task_exhausted_resume_halts_without_effects(tmp_path, monkeypat
     backend = FakeAgentBackend()
 
     with pytest.raises(HaltError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert backend.calls == []
     assert sidecar.read_bytes() == before_bytes
@@ -2507,7 +2559,7 @@ def test_process_task_inferred_over_budget_halts_without_creating_sidecar(tmp_pa
     backend = FakeAgentBackend()
 
     with pytest.raises(HaltError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert backend.calls == []
     assert not plan_path.with_suffix(".json").exists()
@@ -2537,7 +2589,7 @@ def test_process_task_planned_at_bound_runs_plan_review_at_that_attempt(tmp_path
     plan_path.with_suffix(".json").write_text(json.dumps({"step": "planned:3"}))
     backend = _passing_backend()
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     first = backend.calls[0]
     assert first.role is AgentRole.PLAN_REVIEWER
@@ -2552,7 +2604,7 @@ def test_process_task_plan_review_failed_in_budget_revises_then_reviews_next_att
     _failing_plan_reviews(prd, (1, 2))
     backend = _passing_backend()
 
-    process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     revision, review = backend.calls[0], backend.calls[1]
     assert revision.role is AgentRole.PLANNER
@@ -2566,7 +2618,7 @@ def test_process_task_live_plan_review_exhaustion_is_a_work_failure(tmp_path, mo
     backend = _passing_backend(plan_review_passes=False)
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert [c.role for c in backend.calls] == [
         AgentRole.PLANNER, AgentRole.PLAN_REVIEWER,
@@ -2584,7 +2636,7 @@ def test_process_task_live_code_review_exhaustion_is_a_work_failure(tmp_path, mo
     backend = _passing_backend(code_review_passes=False)
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert _read_sessions(plan_path)["step"] == "review_failed:3"
     implementer_calls = [c for c in backend.calls if c.role is AgentRole.IMPLEMENTER]
@@ -2600,7 +2652,7 @@ def test_process_task_live_test_run_exhaustion_is_a_work_failure(tmp_path, monke
     backend = _passing_backend()
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, _flow_config(), TEST_MODE, backend=backend, implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, _flow_config(), TEST_MODE, backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     plan_path = _artifact_dir(tmp_path, TEST_MODE, "plans") / f"{DMS_SEQ}-{DMS_SLUG}.md"
     assert _read_sessions(plan_path)["step"] == "test_run_failed:3"
@@ -2619,7 +2671,7 @@ def test_process_task_budget_zero_goes_from_planner_to_implementer_without_plan_
     config = _flow_config()
     config.plan_review_iterations = 0
 
-    process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert [c.role for c in backend.calls] == [
         AgentRole.PLANNER, AgentRole.IMPLEMENTER, AgentRole.CODE_REVIEWER,
@@ -2638,7 +2690,7 @@ def test_process_task_planned_1_at_budget_zero_resumes_into_implementer_without_
     config = _flow_config()
     config.plan_review_iterations = 0
 
-    process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert backend.calls[0].role is AgentRole.IMPLEMENTER
     assert AgentRole.PLAN_REVIEWER not in [c.role for c in backend.calls]
@@ -2655,7 +2707,7 @@ def test_process_task_budget_above_max_iterations_runs_that_many_reviews_before_
     config.plan_review_iterations = 5
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     reviews = [c for c in backend.calls if c.role is AgentRole.PLAN_REVIEWER]
     assert len(reviews) == 5
@@ -2705,7 +2757,7 @@ def test_process_task_resume_plan_review_failed_above_max_iterations_revises_wit
     config.max_iterations = 3
     config.plan_review_iterations = 6
 
-    process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
+    process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     revision, review = backend.calls[0], backend.calls[1]
     assert revision.role is AgentRole.PLANNER
@@ -2728,7 +2780,7 @@ def test_process_task_resume_plan_review_failed_past_budget_halts_naming_the_bud
     config.plan_review_iterations = 2
 
     with pytest.raises(HaltError) as exc:
-        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert str(exc.value) == (
         "Resume exceeds the attempt budget\n"
@@ -2750,7 +2802,7 @@ def test_process_task_failing_reviews_keep_the_implement_cycle_at_max_iterations
     config.plan_review_iterations = plan_review_iterations
 
     with pytest.raises(PipelineStopError):
-        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult())
+        process_task(tmp_path, _TaskStub(), 1, config, backend=backend, implementer_result=WorkingTreeResult(), tree=(Repository(directory=tmp_path, folder=None),))
 
     assert [c.role for c in backend.calls].count(AgentRole.IMPLEMENTER) == config.max_iterations
 
@@ -3648,7 +3700,7 @@ def test_the_answer_command_must_exist_before_any_head_is_asked(tmp_path, monkey
     config = dataclasses.replace(_flow_config(), roles=dict(_HEAD_ROLES))
 
     with pytest.raises(HeadNotReachedError) as caught:
-        main_module._make_runtime(config, tmp_path, tuple(AgentRole))
+        main_module._make_runtime(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "A head could not be reached"
@@ -3666,7 +3718,7 @@ def test_an_answer_command_that_is_not_executable_halts_the_same(tmp_path, monke
     config = dataclasses.replace(_flow_config(), roles=dict(_HEAD_ROLES))
 
     with pytest.raises(HeadNotReachedError) as caught:
-        main_module._make_runtime(config, tmp_path, tuple(AgentRole))
+        main_module._make_runtime(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
 
     assert str(caught.value).splitlines()[1] == (
         f"The answer command {command} does not exist or is not executable"
@@ -3679,7 +3731,7 @@ def test_a_run_with_no_head_role_makes_no_such_check(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", lambda agents=None: FakeAgentBackend())
     config = dataclasses.replace(_flow_config())
 
-    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
+    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
 
     assert backend.run(role=AgentRole.PLANNER, prompt="p", cwd="c", instructions="i")[0] != ""
     assert not command.exists()
@@ -3696,7 +3748,7 @@ def test_a_head_whose_address_cannot_be_read_halts_the_assembly_before_any_backe
     config = dataclasses.replace(_flow_config(), roles=dict(_HEAD_ROLES))
 
     with pytest.raises(HeadNotReachedError) as caught:
-        main_module._make_runtime(config, tmp_path, tuple(AgentRole))
+        main_module._make_runtime(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "A head could not be reached"
@@ -3720,7 +3772,7 @@ def test_a_head_role_prints_its_line_and_takes_no_usage_check(tmp_path, monkeypa
     monkeypatch.setattr(main_module, "ClaudeAgentBackend", lambda agents=None: FakeAgentBackend())
     monkeypatch.setattr(main_module, "_check_usage_limits", lambda c: checks.append("claude"))
 
-    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
+    backend, usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
 
     usage_check()
     assert checks == ["claude"]  # a head's role starts no usage check of its own
@@ -3804,7 +3856,7 @@ def test_every_role_reaches_its_own_backend_through_one_routed_assembly(tmp_path
                                    "key_file": str(tmp_path / "k.pem")}},
     )
 
-    backend, _usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole))
+    backend, _usage_check = main_module._make_runtime(config, tmp_path, tuple(AgentRole), (Repository(directory=tmp_path, folder=None),))
 
     assert sorted(built) == ["claude", "codex", "hermes"]  # the head's backend needs no constructor here
     for role, kind in ((AgentRole.PLANNER, "claude"), (AgentRole.PLAN_REVIEWER, "codex"),
