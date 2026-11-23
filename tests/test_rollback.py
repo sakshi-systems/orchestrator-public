@@ -1,7 +1,7 @@
 """The `rollback` command against a real git repository: each position's
-records, artifacts and working tree, the positions `show` lists for each
-state, the refusals, and a crash injected after each step with the command
-repeated to the same end state."""
+records and artifacts with the working tree left standing, the positions
+`show` lists for each state, the refusals, and a crash injected after each
+step with the command repeated to the same end state."""
 
 from __future__ import annotations
 
@@ -75,7 +75,6 @@ def _project(tmp_path: Path, *, record: dict | None = RECORD_ON, tree_change: bo
     git_in(project, "add", "tracked.txt", "gone-after.txt", ".gitignore")
     git_in(project, "add", "-f", "ignored-tracked.txt")  # tracked from the base, though ignored after
     git_in(project, "commit", "-q", "-m", "the base")
-    base = git_in(project, "rev-parse", "HEAD").strip()
     origin = tmp_path / "origin.git"
     git_in(tmp_path, "init", "--bare", "-b", "main", str(origin))
     git_in(project, "remote", "add", "origin", str(origin))
@@ -145,9 +144,9 @@ def _task_of(project: Path, address: str):
     return find_task(parse_roadmap(project / ".ai-factory" / "ROADMAP.md").tasks, address)
 
 
-def _positions(project: Path, address: str = "1.1") -> list[str]:
+def _positions(project: Path, address: str = "1.1", relpath: str = "ROADMAP.md") -> list[str]:
     task = _task_of(project, address)
-    return run_data.positions_of(project, task, run_data.locate_task(project, "ROADMAP.md", task))
+    return run_data.positions_of(project, relpath, task, run_data.locate_task(project, relpath, task))
 
 
 def _factory_files(project: Path) -> set[str]:
@@ -193,40 +192,83 @@ def test_a_done_task_lists_none(tmp_path):
     assert _positions(project) == []
 
 
-def test_a_planning_on_task_with_a_clean_tree_lists_start_and_plan_review(tmp_path):
-    project = _project(tmp_path, tree_change=False, iteration=False)
-    assert _positions(project) == ["start", "plan-review"]
-
-
-def test_a_planning_on_task_with_a_changed_tree_lists_verify_beside(tmp_path):
-    assert _positions(_project(tmp_path)) == ["start", "plan-review", "verify"]
-
-
-def test_a_planning_off_task_with_a_changed_tree_lists_start_verify_implement(tmp_path):
-    assert _positions(_project(tmp_path, record=RECORD_OFF)) == ["start", "verify", "implement"]
-
-
-def test_a_planning_off_task_with_a_clean_tree_lists_start_and_implement(tmp_path):
-    project = _project(tmp_path, record=RECORD_OFF, tree_change=False, iteration=False)
-    assert _positions(project) == ["start", "implement"]
-
-
-def test_a_tracked_change_the_exclude_rules_match_still_lists_verify(tmp_path):
-    """An untracked ignored file is no change git lists; a tracked file the
-    exclude rules match still is, so `verify` reads it as one while `start`
-    never touches the path."""
-    project = _project(tmp_path, tree_change=False, iteration=False)
-    (project / "debug.log").write_text("ignored, the base lacks it\n")
-    (project / "ignored-tracked.txt").write_text("changed though ignored\n")
+@pytest.mark.parametrize("step", ["implemented:1", "implemented:2", "review_failed:1", "test_run_failed:2"])
+def test_a_record_whose_step_shows_an_implementation_lists_verify(tmp_path, step):
+    """`verify` is listed from the records alone: the record's step shows an
+    implementation — the implementer finished an iteration, or the verify
+    that read it failed and waits to run again. The implementer's answer is
+    removed, so the step alone decides."""
+    project = _project(tmp_path, record=dict(RECORD_ON, step=step))
+    (project / ".ai-factory" / "reviews" / "01-1-1-door-implementer-1.md").unlink()
     assert _positions(project) == ["start", "plan-review", "verify"]
 
 
-def test_a_project_git_cannot_read_holds_no_change(tmp_path):
+def test_an_implementer_s_answer_that_stands_lists_verify(tmp_path):
+    """However the record's step reads, an implementer's answer standing
+    among the group's artifacts is an implementation the attempt made."""
+    project = _project(tmp_path, record=dict(RECORD_ON, step="escalated"))
+    assert _positions(project) == ["start", "plan-review", "verify"]
+
+
+def test_a_named_roadmap_s_answer_alone_lists_verify(tmp_path):
+    """The implementer's answer is read in the roadmap's own artifact
+    segment, wherever under `.ai-factory` the roadmap lies: a group whose
+    record shows no implementation still lists `verify` through its answer
+    alone."""
+    from orchestrator.roadmap import find_task, parse_roadmap
+
+    project = tmp_path / "project"
+    factory = project / ".ai-factory"
+    (factory / "roadmaps").mkdir(parents=True)
+    (factory / "roadmaps" / "doors.md").write_text(
+        "# Named roadmap\n\n## Phase 7 — side doors\n\n- [ ] **7.1 — Eta** — the task under a named roadmap\n",
+        encoding="utf-8",
+    )
+    (factory / "plans" / "doors").mkdir(parents=True)
+    (factory / "reviews" / "doors").mkdir(parents=True)
+    (factory / "plans" / "doors" / "01-7-1-eta.md").write_text("# Plan: 7.1 — Eta\n\nThe plan.\n", encoding="utf-8")
+    (factory / "plans" / "doors" / "01-7-1-eta.json").write_text(
+        json.dumps({"planner": "plan-session", "step": "escalated"}, indent=2), encoding="utf-8",
+    )
+    (factory / "reviews" / "doors" / "01-7-1-eta-implementer-1.md").write_text("Implemented Eta.\n", encoding="utf-8")
+
+    task = find_task(parse_roadmap(factory / "roadmaps" / "doors.md").tasks, "7.1")
+    group = run_data.locate_task(project, "roadmaps/doors.md", task)
+    assert run_data.positions_of(project, "roadmaps/doors.md", task, group) == ["start", "plan-review", "verify"]
+
+
+def test_a_record_that_shows_no_implementation_lists_no_verify_whatever_the_tree_holds(tmp_path):
+    """The working tree is never read: a change outside `.ai-factory`,
+    however plain, is no word of where the attempt stands."""
+    project = _project(tmp_path, record=dict(RECORD_ON, step="planned:1"))
+    (project / ".ai-factory" / "reviews" / "01-1-1-door-implementer-1.md").unlink()
+    assert _positions(project) == ["start", "plan-review"]
+
+
+def test_a_clean_tree_still_lists_verify_where_the_record_shows_an_implementation(tmp_path):
+    project = _project(tmp_path, tree_change=False, iteration=False)
+    assert _positions(project) == ["start", "plan-review", "verify"]
+
+
+def test_a_task_rolled_back_to_verify_still_lists_it(tmp_path):
+    """The rollback leaves the record's step at `implemented:1`, so the
+    position stays listed for the task it just rolled back."""
+    project = _project(tmp_path)
+    run_data.rollback(_config(), project, task="1.1", position="verify")
+    assert _positions(project) == ["start", "plan-review", "verify"]
+
+
+def test_a_project_git_cannot_read_still_lists_verify_from_the_records(tmp_path):
     project = _project(tmp_path, tree_change=False, iteration=False)
     git_in(project, "rev-parse", "--verify", "--quiet", "HEAD")  # a repository, then not one
     (project / ".git").rename(tmp_path / "set-aside.git")
     (project / "work.txt").write_text("a change with no repository to read it\n")
-    assert _positions(project) == ["start", "plan-review"]
+    assert _positions(project) == ["start", "plan-review", "verify"]
+
+
+def test_a_planning_off_task_whose_attempt_implemented_lists_verify_beside_implement(tmp_path):
+    project = _project(tmp_path, record=RECORD_OFF, tree_change=False, iteration=False)
+    assert _positions(project) == ["start", "verify", "implement"]
 
 
 # ---------------------------------------------------------------------------
@@ -299,24 +341,32 @@ def test_implement_returns_the_planning_off_record_to_planning(tmp_path):
     assert (project / "untracked.txt").exists()  # the working tree stays
 
 
-def test_start_discards_everything_of_the_attempt_and_restores_the_tree(tmp_path):
+def test_start_leaves_a_tracked_change_an_untracked_file_and_an_ignored_file_as_they_were(tmp_path):
+    """`rollback` resets the orchestrator's own records and touches nothing
+    else, the working tree and the index included: what becomes of an
+    attempt's code, kept, repaired or discarded, is the head's own act with
+    git, never the command's."""
     project = _project(tmp_path)
-    base = git_in(project, "rev-parse", "HEAD").strip()
+    files = ("tracked.txt", "staged.txt", "late.txt", "untracked.txt",
+             "sub/work.txt", "debug.log", ".env", "ignored-tracked.txt")
+    before = {name: (project / name).read_bytes() for name in files}
+    before_status = _status_outside_factory(project)
+    before_head = git_in(project, "rev-parse", "HEAD").strip()
+
     result = _rollback(tmp_path, "--project-dir", str(project), "1.1", "start")
+
     assert result.returncode == 0, result.stderr.decode("utf-8")
     assert result.stdout == b'{\n  "version": 1,\n  "position": "start"\n}\n'
+    # A tracked change, an untracked file and an ignored file stand as they
+    # were, byte for byte — the staged addition and the attempt's work in a
+    # new directory no less.
+    for name in files:
+        assert (project / name).read_bytes() == before[name]
+    assert not (project / "gone-after.txt").exists()  # the attempt's deletion stands
+    assert _status_outside_factory(project) == before_status  # the index untouched too
+    assert git_in(project, "rev-parse", "HEAD").strip() == before_head  # HEAD never moves
+    # The attempt's own state is gone: its artifacts, its record, its refs.
     assert _factory_files(project) == {"ROADMAP.md"}
-    assert (project / "tracked.txt").read_text(encoding="utf-8") == "base\n"
-    assert (project / "gone-after.txt").exists()  # restored: the attempt deleted it
-    assert not (project / "staged.txt").exists()  # the staged addition goes
-    assert not (project / "untracked.txt").exists()  # the untracked work goes
-    assert not (project / "late.txt").exists()
-    assert not (project / "sub").exists()  # the new directory goes, emptied
-    assert (project / "debug.log").exists()  # ignored and untracked: never touched
-    assert (project / ".env").exists()
-    assert (project / "ignored-tracked.txt").read_text(encoding="utf-8") == "tracked though ignored\n"  # tracked: restored, whatever the exclude rules say
-    assert _status_outside_factory(project) == []  # the index restored to the base too
-    assert git_in(project, "rev-parse", "HEAD").strip() == base  # HEAD never moves
     assert git_in(project, "for-each-ref", "--format=%(refname)",
                   "refs/orchestrator-iteration/", "refs/orchestrator-laid/").split() == []
 
@@ -337,63 +387,6 @@ def test_start_also_removes_the_task_s_disposition_record(tmp_path):
     assert (dispositions / "99-another-task.json").read_text(encoding="utf-8") == '{"another-entry": {"kind": "dismissed"}}'
 
 
-def test_start_takes_its_base_from_the_iteration_ref_s_parent(tmp_path):
-    """The ref names the attempt's latest iteration commit, whose parent is
-    the base the attempt began on: where no ref resolves the base is HEAD,
-    and the two restore differently here."""
-    # Without the ref: a commit after the base holds the attempt's staged
-    # work, so HEAD is the base — what it holds stays, what it lacks goes.
-    project = _project(tmp_path, iteration=False)
-    git_in(project, "commit", "-q", "--allow-empty", "-m", "a commit after the base")
-
-    result = _rollback(tmp_path, "--project-dir", str(project), "1.1", "start")
-    assert result.returncode == 0, result.stderr.decode("utf-8")
-    # The unstaged edit of tracked.txt never reached the later commit, so the
-    # base holds the base content of it; the staged addition the commit took
-    # stays; the deletion it took stays; nothing untracked survives.
-    assert (project / "tracked.txt").read_text(encoding="utf-8") == "base\n"
-    assert (project / "staged.txt").exists()  # the later commit holds it
-    assert not (project / "gone-after.txt").exists()  # the later commit holds its deletion
-    assert not (project / "untracked.txt").exists()  # no commit holds it
-    assert not (project / "sub").exists()
-    assert _factory_files(project) == {"ROADMAP.md"}
-    assert _status_outside_factory(project) == []
-
-    # With the ref: its parent — the original base — is the base, and the
-    # attempt's whole work in the tree goes however far HEAD moved.
-    project = _project(tmp_path / "twin")
-    base = git_in(project, "rev-parse", "HEAD").strip()
-    git_in(project, "commit", "-q", "--allow-empty", "-m", "a commit after the base")
-    result = _rollback(tmp_path / "twin", "--project-dir", str(project), "1.1", "start")
-    assert result.returncode == 0, result.stderr.decode("utf-8")
-    assert (project / "tracked.txt").read_text(encoding="utf-8") == "base\n"
-    assert not (project / "staged.txt").exists()
-    assert (project / "gone-after.txt").exists()  # restored: the attempt deleted it
-    changed = [path for path in git_in(project, "diff", "--no-renames", "--name-only", base).splitlines()
-               if not path.startswith(".ai-factory")]
-    assert changed == []  # outside .ai-factory the tree is the base's again
-
-
-def test_an_untracked_ignored_path_the_diff_reaches_is_never_touched(tmp_path):
-    """A file the base tracks, the attempt untracked from the index and filled
-    with local content: the index leg of the diff names it, but git's
-    untracked-ignored listing names it too, so the restore leaves both the
-    file and the staged untracking exactly as the attempt left them."""
-    project = _project(tmp_path)
-    git_in(project, "rm", "-q", "--cached", "ignored-tracked.txt")
-    (project / "ignored-tracked.txt").write_text("local content, untracked and ignored\n", encoding="utf-8")
-
-    result = _rollback(tmp_path, "--project-dir", str(project), "1.1", "start")
-
-    assert result.returncode == 0, result.stderr.decode("utf-8")
-    assert result.stdout == b'{\n  "version": 1,\n  "position": "start"\n}\n'
-    assert (project / "ignored-tracked.txt").read_text(encoding="utf-8") == "local content, untracked and ignored\n"
-    listed = git_in(project, "ls-files", "--", "ignored-tracked.txt").strip()
-    assert listed == ""  # the staged untracking stands, the path never touched
-    assert (project / "tracked.txt").read_text(encoding="utf-8") == "base\n"  # the rest is the base's
-    assert not (project / "untracked.txt").exists()
-
-
 def test_a_ref_removal_warning_never_reaches_the_command_s_standard_output(tmp_path):
     """The ref removal's own warning goes to standard error for this command,
     so standard output holds the one JSON object and nothing else — an origin
@@ -410,29 +403,6 @@ def test_a_ref_removal_warning_never_reaches_the_command_s_standard_output(tmp_p
     assert _factory_files(project) == {"ROADMAP.md"}
     assert git_in(project, "for-each-ref", "--format=%(refname)",
                   "refs/orchestrator-iteration/").split() == []
-
-
-def test_an_untracked_nested_repository_is_removed_by_start(tmp_path):
-    """A repository of its own under the project is one directory entry in
-    git's untracked listing; the restore takes it whole as the untracked work
-    it is, and no failure of the removal escapes as a traceback."""
-    project = _project(tmp_path)
-    nested = project / "nested"
-    nested.mkdir()
-    git_in(nested, "init", "-q", "-b", "main", ".")
-    git_in(nested, "config", "user.email", "nested@example.com")
-    git_in(nested, "config", "user.name", "Nested")
-    (nested / "own.txt").write_text("a repository of its own\n", encoding="utf-8")
-    git_in(nested, "add", "own.txt")
-    git_in(nested, "commit", "-q", "-m", "its own work")
-
-    result = _rollback(tmp_path, "--project-dir", str(project), "1.1", "start")
-
-    assert result.returncode == 0, result.stderr.decode("utf-8")
-    assert result.stdout == b'{\n  "version": 1,\n  "position": "start"\n}\n'
-    assert not nested.exists()
-    assert (project / "tracked.txt").read_text(encoding="utf-8") == "base\n"
-    assert _status_outside_factory(project) == []
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +477,7 @@ _STEPS = {
     "plan-review": ["_replace_sessions", "_remove_artifacts"],
     "verify": ["_replace_sessions", "_remove_artifacts"],
     "implement": ["_replace_sessions", "_remove_artifacts"],
-    "start": ["_remove_artifacts", "_restore_tree", "remove_iteration_refs", "_delete_sidecar"],
+    "start": ["_remove_artifacts", "remove_iteration_refs", "_delete_sidecar"],
 }
 
 # `implement` is a position of a planning-off record alone, which holds no

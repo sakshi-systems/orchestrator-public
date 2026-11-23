@@ -342,24 +342,3 @@ def _changed_paths(cwd: Path, base: str, tip: str) -> set[str]:
     )
     return _paths_of(diff)
 
-
-def _working_changes(cwd: Path, base: str) -> set[str]:
-    """The paths of the working tree and the index that differ from the base
-    commit, relative to `cwd`: a path the working tree holds or the index
-    stages with other content than the base, or holds and the base lacks, or
-    the base holds and neither does."""
-    working = run_git_sync(
-        ["diff", "--no-renames", "--name-only", "-z", "--relative", base], cwd=cwd,
-    )
-    staged = run_git_sync(
-        ["diff", "--no-renames", "--name-only", "-z", "--relative", "--cached", base], cwd=cwd,
-    )
-    return _paths_of(working) | _paths_of(staged)
-
-
-def _untracked_paths(cwd: Path) -> set[str]:
-    """The untracked files git itself lists — untracked and not ignored, as
-    ``git ls-files --others --exclude-standard`` lists them, relative to
-    `cwd`; an ignored path never enters."""
-    listed = run_git_sync(["ls-files", "--others", "--exclude-standard", "-z"], cwd=cwd)
-    return _paths_of(listed)

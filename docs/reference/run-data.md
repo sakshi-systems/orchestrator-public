@@ -23,7 +23,7 @@ Each command exits with status `0` when it acts and prints one JSON object on st
 - a selector is missing or doubled;
 - `rollback` is given a position that `show` did not list for the task, or a task that is done or has no attempt;
 - `sweep` is given a phase that holds a task whose roadmap line is not done, the tasks being named;
-- `dispose` is given input that is not valid UTF-8 or JSON, a `version` it does not support, an entry that no task holds or that the deposit names twice, a disposition that is not an object of `kind` and, for `routed`, `target`, a `kind` outside the three, a `routed` with no `target` or another `kind` with one, a target that is no open task's spec and no phase of the roadmap, for a disposition not already recorded for the entry, or a disposition for an entry that already holds a different recorded one, the refusal naming the one it holds. An entry whose recorded disposition equals the deposit's is accepted whatever its target's state.
+- `dispose` is given input that is not valid UTF-8 or JSON, a `version` it does not support, an entry that no task holds or that the deposit names twice, a disposition that is not an object of `kind` and, for `routed`, `target`, a `kind` outside the three, a `routed` with no `target` or another `kind` with one, a `target` that is not an object of `spec`, a string, or of `roadmap`, a string, and `phase`, an integer, or a disposition for an entry that already holds a different recorded one, the refusal naming the one it holds.
 
 ## The JSON
 
@@ -40,7 +40,7 @@ Every object holds `version`, an integer, `1` at present. The interface changes 
 
 `tasks`, in a phase's object, is a list of each task's `address`, `title`, `state`, `escalation` and `observations`.
 
-`observations` is a list of entries, each of `entry`, a string the orchestrator gives and `dispose` takes back, `affects`, `text`, `sources`, a list of `step` and `round` for each review that repeats it, and `disposition`, `null` or an object of `kind` and, for `routed`, `target`. `target` is an object of `spec`, a repository-root-relative path, or of `roadmap` and `phase`.
+`observations` is a list of entries, each of `entry`, a string the orchestrator gives and `dispose` takes back, `affects`, `text`, `sources`, a list of `step` and `round` for each review that repeats it, and `disposition`, `null` or an object of `kind` and, for `routed`, `target`. `target` is an object of `spec`, the spec's repository-root-relative path, or of `roadmap`, the roadmap's repository-root-relative path, and `phase`, an integer; the orchestrator records the target as given and never opens it.
 
 `rollback` prints `version` and `position`; `sweep` prints `version` and `phase`; `dispose` prints `version` and `disposed`, the list of entries the deposit named, those already disposed the same way included.
 
@@ -52,10 +52,10 @@ A position is a token of the interface's version. `show` lists the ones a task c
 
 | Token | Listed when | What stays | What goes | The next run |
 |---|---|---|---|---|
-| `start` | the task has an attempt and is not done | nothing of the attempt | the plan, every plan review, every review and test run, the implementer's answers and the task's record; the working tree outside `.ai-factory` is restored to the attempt's base, an ignored path never touched | plans, or lays the spec, afresh |
-| `plan-review` | planning is on and the plan exists | the plan and the working tree | every plan review, review and test run and the implementer's answers; the implementer's session and the code reviewer's session | reviews the plan from its first attempt |
-| `verify` | the plan exists and the working tree holds a change outside `.ai-factory` | the plan, the plan reviews that passed, the working tree and the implementer's session | every review and test run, the implementer's answers and the code reviewer's session | verifies the change from its first iteration |
-| `implement` | planning is off | the working tree | every review and test run, the implementer's answers, the implementer's session and the code reviewer's session | implements again from the spec |
+| `start` | the task has an attempt and is not done | nothing of the attempt's state | the plan, every plan review, every review and test run, the implementer's answers and the task's record | plans, or lays the spec, afresh |
+| `plan-review` | planning is on and the plan exists | the plan | every plan review, review and test run and the implementer's answers; the implementer's session and the code reviewer's session | reviews the plan from its first attempt |
+| `verify` | the plan exists and the attempt has implemented: its record's step shows an implementation, or an implementer's answer stands | the plan, the plan reviews that passed and the implementer's session | every review and test run, the implementer's answers and the code reviewer's session | verifies the change from its first iteration |
+| `implement` | planning is off | the rest of the task's record | every review and test run, the implementer's answers, the implementer's session and the code reviewer's session | implements again from the spec |
 
 ## Dispositions
 

@@ -349,24 +349,33 @@ def cli() -> None:
         except ValueError as e:
             parser.error(str(e))
 
-    if args.command in ("show", "rollback", "sweep", "dispose"):
+    if args.command == "dispose":
+        # The command answers from the run's data alone and touches none of
+        # the run's state, handlers or loops: it loads no configuration and
+        # reads no roadmap — the deposit on standard input is its own data,
+        # the dispositions record alone is what it writes, and no target the
+        # deposit names is opened.
+        try:
+            dispose(project_dir)
+        except (RunDataRefusal, HaltError, SystemExit) as e:
+            refuse(e)
+        return
+
+    if args.command in ("show", "rollback", "sweep"):
         # The commands answer from the run's data alone: they load the
         # configuration as a run does and touch none of the run's state,
         # handlers or loops. A rollback changes the run's records, artifacts
         # and working tree — the head's exchange files among the things it
-        # leaves where they stand — a sweep removes the run's artifacts of a
-        # finished phase alone, and a dispose writes the dispositions
-        # record alone, its deposit read from standard input.
+        # leaves where they stand — and a sweep removes the run's artifacts
+        # of a finished phase alone.
         try:
             config = load_config(project_dir=project_dir, user_slug=_run_settings_slug(project_dir))
             if args.command == "show":
                 show(config, project_dir, roadmap=args.roadmap, task=args.task, phase=args.phase)
             elif args.command == "rollback":
                 rollback(config, project_dir, roadmap=args.roadmap, task=args.task, position=args.position)
-            elif args.command == "sweep":
-                sweep(config, project_dir, roadmap=args.roadmap, phase=args.phase)
             else:
-                dispose(config, project_dir)
+                sweep(config, project_dir, roadmap=args.roadmap, phase=args.phase)
         except (RunDataRefusal, HaltError, SystemExit) as e:
             refuse(e)
         return

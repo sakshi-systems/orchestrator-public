@@ -14,13 +14,10 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
-import shutil
 import sys
 from pathlib import Path
 from typing import NamedTuple, NoReturn
 
-from .agents import _SPEC_TAG
 from .artifact_layout import (
     DISPOSITIONS_DIRNAME,
     PLAN_REVIEWS_DIRNAME,
@@ -41,14 +38,12 @@ from .config import OrchestratorConfig, validate_roadmap_path
 from .dispositions import merge_items, read_record, record_path
 from .errors import RunDataRefusal
 from .exchange import remove_task
-from .git_runner import _changed_paths, _paths_of, _untracked_paths, _working_changes, run_git_sync
-from .implementer_result import ref_name_of
-from .iteration_ref import ref_of, remove_iteration_refs
+from .iteration_ref import remove_iteration_refs
 from .layout import _artifact_subdir, _resolve_roadmap_relpath
 from .observations import collect_entries
 from .protocol import _has_escalation, _read_artifact, _read_sessions, _replace_sessions
 from .resume import select_task_group
-from .roadmap import PHASE_HEADING_RE, Task, find_task, parse_roadmap
+from .roadmap import Task, find_task, parse_roadmap
 
 # The version of the JSON the commands print: a field added keeps it, and any
 # change to or removal of a command, a field, a token or a refusal takes the
@@ -73,6 +68,10 @@ _STEP_OF_POSITION = {
 }
 _DROPS_IMPLEMENTER = (_PLAN_REVIEW, _IMPLEMENT)
 _DROPS_CODE_REVIEWER = (_PLAN_REVIEW, _VERIFY, _IMPLEMENT)
+
+# The record's steps that show an implementation: the implementer finished
+# an iteration, or the verify that read it failed and waits to run again.
+_IMPLEMENTED_STEP_PREFIXES = ("implemented:", "review_failed:", "test_run_failed:")
 
 # The role of each step, in the spelling the configuration gives it — the
 # names the `roles` object keys take.
@@ -185,15 +184,17 @@ def _print_object(shown: dict) -> None:
     sys.stdout.buffer.write(b"\n")
 
 
-def positions_of(project_dir: Path, task: Task, group: TaskGroup | None) -> list[str]:
+def positions_of(project_dir: Path, relpath: str, task: Task, group: TaskGroup | None) -> list[str]:
     """The position tokens the task can be taken back to, in the order the
     reference lists them.
 
-    `start` where an attempt exists and the task is not done; `plan-review`
-    where the plan exists and the record holds the planner; `verify` where
-    the plan exists and the working tree holds a change outside `.ai-factory`
-    against HEAD, read by git; `implement` where the record holds no planner.
-    A task that is done and a task no attempt has begun list none."""
+    `relpath` is the roadmap's own path under `.ai-factory`, whose artifact
+    segment holds the group's artifacts. `start` where an attempt exists
+    and the task is not done; `plan-review` where the plan exists and the
+    record holds the planner; `verify` where the plan exists and the
+    attempt has implemented, read from the records alone; `implement` where
+    the record holds no planner. A task that is done and a task no attempt
+    has begun list none."""
     if group is None or task.done:
         return []
     sessions = _read_sessions(group.plan_path)
@@ -202,7 +203,7 @@ def positions_of(project_dir: Path, task: Task, group: TaskGroup | None) -> list
     plan_exists = group.plan_path.is_file()
     if plan_exists and "planner" in sessions:
         positions.append(_PLAN_REVIEW)
-    if plan_exists and _holds_a_change(project_dir):
+    if plan_exists and _attempt_implemented(project_dir, relpath, group, sessions):
         positions.append(_VERIFY)
     if "planner" not in sessions:
         positions.append(_IMPLEMENT)
@@ -222,9 +223,9 @@ def rollback(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | No
     with status 1.
 
     The order is the record first for every position but `start`, then the
-    artifacts; `start` goes on to the tree, the task's iteration refs and the
-    sidecar last. Each step states the end state, so a command repeated after
-    a crash finishes what the crash left: `positions_of` still lists the
+    artifacts; `start` goes on to the task's iteration refs and the sidecar
+    last. Each step states the end state, so a command repeated after a
+    crash finishes what the crash left: `positions_of` still lists the
     position until its last step is done."""
     if task is None or position is None:
         raise RunDataRefusal("A task and a position are required: rollback TASK POSITION")
@@ -241,7 +242,7 @@ def rollback(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | No
     group = locate_task(project_dir, relpath, addressed)
     if group is None:
         raise RunDataRefusal(f"Task '{address}' has no attempt: there is nothing to roll back")
-    positions = positions_of(project_dir, addressed, group)
+    positions = positions_of(project_dir, relpath, addressed, group)
     if position not in positions:
         raise RunDataRefusal(
             f"Position '{position}' is not one task '{address}' can take: "
@@ -249,7 +250,6 @@ def rollback(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | No
         )
     if position == _START:
         _remove_artifacts(project_dir, relpath, group, _START)
-        _restore_tree(project_dir, ref_of(ref_name_of(project_dir, group.plan_path)))
         # The removal's own warning line — a remote that cannot be reached —
         # goes to standard error for this command, so standard output holds
         # the one JSON object and nothing else.
@@ -320,24 +320,23 @@ def sweep(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | None 
     _print_object({"version": RUN_DATA_VERSION, "phase": number})
 
 
-def dispose(config: OrchestratorConfig, project_dir: Path) -> None:
+def dispose(project_dir: Path) -> None:
     """The `dispose` command: take the closure's deposit from standard input —
     the disposition of each deferred observation it names, in the shape
     `show` reports it, as UTF-8 JSON — and keep it in the orchestrator's own
     record, one per task, printing `version` and `disposed`, the entries the
     deposit named.
 
-    `config` is the loaded configuration, taken as the other commands take
-    it. The command takes no roadmap: each entry is resolved by the plan
-    reviews and reviews of every group of the project, an entry id naming
-    its own task; a routed target is checked against the open specs of
-    every roadmap file the project holds and of the roadmap a run of the
-    project takes, which the configuration names. The whole deposit is
-    checked before any record is written, and a deposit that names an entry
-    already disposed the same way changes nothing, so a head resuming its
-    closure re-sends the deposit without harm. Refuses through
-    RunDataRefusal or HaltError, which the dispatch prints as its first
-    line on standard error with status 1.
+    The command takes no configuration and reads no roadmap: each entry is
+    resolved by the plan reviews and reviews of every group of the project,
+    an entry id naming its own task, and a routed target is kept as the head
+    names it — where a routed remark went is the head's judgment, and no
+    target is opened to judge it. The whole deposit is checked before any
+    record is written, and a deposit that names an entry already disposed
+    the same way changes nothing, so a head resuming its closure re-sends
+    the deposit without harm. Refuses through RunDataRefusal or HaltError,
+    which the dispatch prints as its first line on standard error with
+    status 1.
     """
     items = _deposit_items(_read_deposit())
     entries: list[str] = []
@@ -358,7 +357,6 @@ def dispose(config: OrchestratorConfig, project_dir: Path) -> None:
     held: dict[str, dict | None] = {
         entry: records[known[entry]].get(entry) for entry, _kind, _target in items
     }
-    _check_targets(config, project_dir, items, held)
     for entry, kind, target in items:
         if held[entry] is not None and held[entry] != _carried(kind, target):
             raise RunDataRefusal(
@@ -404,7 +402,8 @@ def _deposit_items(deposit: dict) -> list[tuple[str, str, dict | None]]:
     object `show` reports — of `kind` and, for `routed`, `target` — so a
     client passes back what it read. The rules the disposition itself holds:
     its kind one of the three, and its target present exactly where the kind
-    is `routed`, which names one."""
+    is `routed`, which names one of the target's two forms — the target's
+    form and types the whole of its check, for no target is opened."""
     listed = deposit["dispositions"]
     if not isinstance(listed, list):
         raise RunDataRefusal("The deposit's dispositions are not a list")
@@ -422,120 +421,31 @@ def _deposit_items(deposit: dict) -> list[tuple[str, str, dict | None]]:
             raise RunDataRefusal(f"A routed disposition of the deposit names no target: {entry!r}")
         if kind != "routed" and target is not None:
             raise RunDataRefusal(f"A disposition of the deposit that is not routed names a target: {entry!r}")
+        if kind == "routed" and not _target_form(target):
+            raise RunDataRefusal(
+                f"A routed disposition of the deposit names a target that is "
+                f"neither a spec nor a phase of a roadmap: {entry!r}"
+            )
         items.append((entry, kind, target))
     return items
 
 
-def _check_targets(
-    config: OrchestratorConfig,
-    project_dir: Path,
-    items: list[tuple[str, str, dict | None]],
-    held: dict[str, dict | None],
-) -> None:
-    """Check every routed item's target: an existing spec under
-    `.ai-factory/` without a `..` segment that an open task's `Spec:` tag
-    names, or a phase heading present in the named roadmap file. The open
-    specs are read where the deposit holds a routed item, from every
-    roadmap file the project holds and from the roadmap a run of the
-    project takes — the one `_resolve_roadmap_relpath` gives for the
-    configuration with no roadmap value — so a resolution that halts
-    refuses the command as it does for the other commands. An entry whose
-    recorded disposition equals the deposit's is skipped: the deposit is
-    one already taken, sent again by a closure that resumed, so its target
-    is not checked, whatever state the task or file it names is in now."""
-    if not any(kind == "routed" for _entry, kind, _target in items):
-        return
-    open_specs = _open_specs(project_dir, _resolve_roadmap_relpath(config, project_dir))
-    for entry, kind, target in items:
-        if kind != "routed":
-            continue
-        if held.get(entry) == _carried(kind, target):
-            continue
-        if not _valid_target(project_dir, target, open_specs):
-            raise RunDataRefusal(
-                f"The target of an entry of the deposit is neither an open task's spec "
-                f"nor a phase of the roadmap: {entry!r}"
-            )
-
-
-def _valid_target(project_dir: Path, target: object, open_specs: set[str]) -> bool:
-    """True where `target` names an existing spec an open task's `Spec:` tag
-    names, or a phase heading present in the named roadmap file; anything
-    else is no target a closure may route to."""
+def _target_form(target: object) -> bool:
+    """True where `target` is one of the two forms a routed disposition
+    names: an object of `spec`, a string, or of `roadmap`, a string, and
+    `phase`, an integer — its form and types the whole of the check, for
+    the command opens no target and reads no roadmap to judge one."""
     if not isinstance(target, dict):
         return False
     if set(target) == {"spec"}:
-        spec = target["spec"]
-        return (
-            isinstance(spec, str)
-            and spec.startswith(".ai-factory/")
-            and ".." not in spec.split("/")
-            and (project_dir / spec).is_file()
-            and spec in open_specs
-        )
+        return isinstance(target["spec"], str)
     if set(target) == {"roadmap", "phase"}:
-        roadmap, phase = target["roadmap"], target["phase"]
-        if not isinstance(roadmap, str) or not roadmap.startswith(".ai-factory/") or ".." in roadmap.split("/"):
-            return False
-        path = project_dir / roadmap
         return (
-            isinstance(phase, int) and not isinstance(phase, bool)
-            and path.is_file()
-            and _holds_phase(path, phase)
+            isinstance(target["roadmap"], str)
+            and isinstance(target["phase"], int)
+            and not isinstance(target["phase"], bool)
         )
     return False
-
-
-def _holds_phase(path: Path, phase: int) -> bool:
-    """True where the roadmap file holds a heading naming `phase`, read as
-    the roadmap's own task lines read the section they sit under. A file
-    that cannot be read or decoded holds no heading, so the target naming it
-    is no phase of the roadmap."""
-    try:
-        text = path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        return False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("## ") or stripped.startswith("### "):
-            found = PHASE_HEADING_RE.match(stripped.lstrip("#").strip())
-            if found is not None and int(found.group(1)) == phase:
-                return True
-    return False
-
-
-def _open_specs(project_dir: Path, roadmap_relpath: str) -> set[str]:
-    """The specs the project's open tasks name: every roadmap file's tasks
-    whose line is not checked, each its `Spec:` tag's path — the last tag a
-    line carries, the one a run lays — reading beside them the roadmap a
-    run of the project takes, `roadmap_relpath` the relpath the
-    configuration resolves to, wherever under `.ai-factory/` it lies. A
-    roadmap file that cannot be read or decoded names no spec, whatever the
-    deposit names."""
-    specs: set[str] = set()
-    for path in [project_dir / ".ai-factory" / roadmap_relpath, *_roadmap_files(project_dir)]:
-        try:
-            listed = parse_roadmap(path, keep_after_breakpoint=True)
-        except (OSError, UnicodeDecodeError):
-            continue
-        for task in listed.tasks:
-            if task.done:
-                continue
-            tags = _SPEC_TAG.findall(task.description)
-            if tags:
-                specs.add(tags[-1])
-    return specs
-
-
-def _roadmap_files(project_dir: Path) -> list[Path]:
-    """Every roadmap file the project holds: the default pair and every file
-    under `roadmaps/`."""
-    factory = project_dir / ".ai-factory"
-    candidates = [factory / "ROADMAP.md", factory / "ROADMAP_TESTS.md"]
-    roads = factory / "roadmaps"
-    if roads.is_dir():
-        candidates.extend(sorted(roads.rglob("*.md")))
-    return [path for path in candidates if path.is_file()]
 
 
 def _entry_groups(project_dir: Path) -> dict[str, tuple[str | None, str]]:
@@ -670,139 +580,19 @@ def _sweep_group(project_dir: Path, relpath: str, plan_path: Path) -> None:
     sidecar_path(plan_path).unlink(missing_ok=True)
 
 
-def _holds_a_change(project_dir: Path) -> bool:
-    """True where the working tree holds a change outside `.ai-factory`
-    against HEAD, read by git: a path of the working tree or the index that
-    differs from HEAD, or an untracked file git lists. A project git cannot
-    read holds no change."""
-    changed = _working_changes(project_dir, "HEAD") | _untracked_paths(project_dir)
-    return bool(_outside_factory(changed))
-
-
-def _outside_factory(paths: set[str]) -> set[str]:
-    """The paths that lie outside `.ai-factory`, in git's coordinate system
-    relative to the project directory."""
-    return {
-        path for path in paths
-        if not (path == ".ai-factory" or path.startswith(".ai-factory/"))
-    }
-
-
-def _restore_tree(project_dir: Path, ref: str) -> None:
-    """Restore the working tree and the index outside `.ai-factory` to the
-    commit the attempt began on — the implementer's result discarded,
-    whichever implementer made it.
-
-    The paths to change are those of the working tree and the index that
-    differ from the base, with the untracked files git lists — untracked and
-    not ignored — and the paths HEAD moved over since the base, all outside
-    `.ai-factory`, less the files git lists as untracked and ignored: a
-    `.venv`, build output or a `.env` is never touched. A path the index
-    tracks is restored whatever the exclude rules say, tracked files being
-    the change the restore covers. A path the base lacks is removed — a file
-    by `git rm` and the unlink of what no index holds, a nested repository,
-    which the untracked listing names as one directory entry, whole — and a
-    path the base holds is restored from it, removals first, HEAD never
-    moving; each step states the end state, so a command repeated after a
-    crash finishes what the crash left."""
-    base = _attempt_base(project_dir, ref)
-    changed = (
-        _changed_paths(project_dir, base, "HEAD")
-        | _working_changes(project_dir, base)
-        | _untracked_paths(project_dir)
-    )
-    changed = _outside_factory(changed)
-    changed -= _ignored_paths(project_dir, changed)
-    if not changed:
-        return
-    held = run_git_sync(["ls-tree", "-r", "--name-only", "-z", base], cwd=project_dir)
-    if held.returncode != 0:
-        raise RunDataRefusal("The attempt's base commit could not be read")
-    in_base = {path for path in held.stdout.split("\0") if path}
-    removed = sorted(changed - in_base)
-    written = sorted(changed & in_base)
-    if removed:
-        gone = run_git_sync(["rm", "-f", "--ignore-unmatch", "--", *removed], cwd=project_dir)
-        if gone.returncode != 0:
-            raise RunDataRefusal("The working tree could not be restored")
-        for path in removed:
-            # What `git rm` cannot take — a path no index holds — goes by
-            # hand, and a directory the base does not hold empties.
-            try:
-                _remove_path(project_dir / path)
-                parent = (project_dir / path).parent
-                while parent != project_dir and parent.is_dir():
-                    try:
-                        parent.rmdir()
-                    except OSError:
-                        break
-                    parent = parent.parent
-            except OSError as e:
-                raise RunDataRefusal(f"The working tree could not be restored\n{path}\n{e}") from e
-    if written:
-        restored = run_git_sync(
-            ["restore", f"--source={base}", "--staged", "--worktree", "--", *written],
-            cwd=project_dir,
-        )
-        if restored.returncode != 0:
-            raise RunDataRefusal("The working tree could not be restored")
-
-
-def _attempt_base(project_dir: Path, ref: str) -> str:
-    """The commit the task's attempt began on: the parent of the commit the
-    task's iteration ref names — the ref holds the attempt's latest iteration
-    commit, whose parent is the base every iteration of the attempt shares —
-    and HEAD where the ref does not resolve, an attempt that reached no
-    iteration commit never having gained one."""
-    resolved = run_git_sync(["rev-parse", "--verify", "--quiet", f"{ref}^"], cwd=project_dir)
-    if resolved.returncode == 0 and resolved.stdout.strip():
-        return resolved.stdout.strip()
-    head = run_git_sync(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=project_dir)
-    if head.returncode == 0 and head.stdout.strip():
-        return head.stdout.strip()
-    raise RunDataRefusal("The attempt's base commit could not be read")
-
-
-def _remove_path(path: Path) -> None:
-    """Remove an untracked path the base lacks: a file or a symbolic link by
-    the unlink, a directory — a nested repository, which the untracked
-    listing names as one entry — whole, its read-only object store chmod'd
-    through: each directory made traversable from the top down before
-    ``rmtree`` meets it, an OSError on a chmod or a listing leaving the
-    subtree for ``rmtree`` to answer for."""
-    if path.is_dir() and not path.is_symlink():
-        def walk(current: Path) -> None:
-            try:
-                os.chmod(current, 0o700)
-            except OSError:
-                pass
-            try:
-                with os.scandir(current) as entries:
-                    children = list(entries)
-            except OSError:
-                return
-            for entry in children:
-                child = Path(entry.path)
-                if child.is_dir() and not child.is_symlink():
-                    walk(child)
-
-        walk(path)
-        shutil.rmtree(path)
-    else:
-        path.unlink(missing_ok=True)
-
-
-def _ignored_paths(project_dir: Path, paths: set[str]) -> set[str]:
-    """The paths of `paths` git itself lists as untracked and ignored — the
-    files ``git ls-files --others --ignored --exclude-standard`` names, so a
-    `.venv`, build output, a `.env` or a base `orchestrator.json` at a
-    checkout's root is never touched. A file the index tracks is not among
-    them: tracked files are the change the restore covers, whatever the
-    exclude rules say."""
-    listed = run_git_sync(
-        ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"], cwd=project_dir,
-    )
-    return _paths_of(listed) & paths
+def _attempt_implemented(project_dir: Path, relpath: str, group: TaskGroup, sessions: dict) -> bool:
+    """True where the attempt has implemented, read from the records alone:
+    the record's step shows an implementation — `implemented:N`, or a verify
+    that failed and waits to run again (`review_failed:N`,
+    `test_run_failed:N`) — or an implementer's answer stands among the
+    group's artifacts, in the roadmap's own artifact segment. The working
+    tree is never read: `rollback` touches it at no position, so it holds
+    no word of where the attempt stands."""
+    step = sessions.get("step")
+    if isinstance(step, str) and step.startswith(_IMPLEMENTED_STEP_PREFIXES):
+        return True
+    answers = artifact_dir(project_dir, REVIEWS_DIRNAME, _artifact_subdir(relpath))
+    return bool(_rounds(answers, implementer_answer_pattern(group.seq, group.slug)))
 
 
 def _task_object(project_dir: Path, relpath: str, task: Task) -> dict:
@@ -825,7 +615,7 @@ def _task_object(project_dir: Path, relpath: str, task: Task) -> dict:
         "steps": steps,
         "escalation": _escalation(sessions, rounds),
         "observations": _observations(project_dir, _artifact_subdir(relpath), group, rounds),
-        "positions": positions_of(project_dir, task, group),
+        "positions": positions_of(project_dir, relpath, task, group),
     }
 
 

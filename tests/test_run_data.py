@@ -223,6 +223,7 @@ BETA = r"""{
   ],
   "positions": [
     "start",
+    "verify",
     "implement"
   ]
 }
@@ -270,6 +271,7 @@ GAMMA = r"""{
   "observations": [],
   "positions": [
     "start",
+    "verify",
     "implement"
   ]
 }
@@ -548,6 +550,7 @@ COVER = r"""{
   "observations": [],
   "positions": [
     "start",
+    "verify",
     "implement"
   ]
 }
@@ -608,6 +611,7 @@ ETA = r"""{
   ],
   "positions": [
     "start",
+    "verify",
     "implement"
   ]
 }
