@@ -6,16 +6,28 @@ ids taken from `show` as the head that runs a closure takes them."""
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 
+from tests.conftest import git_environment
 from tests.run_tree import build
 
 REPO = Path(__file__).resolve().parents[1]
 
 SPEC_0300 = ".ai-factory/specs/trickster77777/0300-a-spec-a-routed-remark-lands-in.md"
+SPEC_0301 = ".ai-factory/specs/trickster77777/0301-a-spec-of-the-run-s-own-roadmap-s-open-task.md"
+
+# The roadmap the configuration names, a file outside the default pair and
+# `roadmaps/`: its open task's spec is the target only a run of the project
+# can name.
+RUN_ROADMAP = (
+    "# The run's roadmap\n"
+    "\n"
+    "## Phase 4 — the run's own doors\n"
+    "\n"
+    f"- [ ] **4.1 — Iota** — the open task of the run's own roadmap — Spec: `{SPEC_0301}`\n"
+)
 
 # The tree's entries, each by the affects and text show reports it under.
 ALPHA_LICENCE = ("unknown", "The greeting module holds no word of the licence its helper wraps.")
@@ -36,9 +48,11 @@ ETA_OBSERVATION = ("Phase 2", "the doorway's width belongs to a later phase's pl
 
 def _command(root: Path, command: str, payload: bytes | None, *arguments: str) -> subprocess.CompletedProcess[bytes]:
     """Run a command over a run's data as a client runs it, against the tree
-    built under `root`, with the machine's base the tree carries and, for
-    `dispose`, the deposit on standard input."""
-    environment = dict(os.environ)
+    built under `root`, with the machine's base the tree carries, git's
+    configuration files silenced so the command reads no config of the
+    machine it runs on, and, for `dispose`, the deposit on standard
+    input."""
+    environment = git_environment()
     environment["ORCHESTRATOR_CONFIG"] = str(root / "base.json")
     return subprocess.run(
         [sys.executable, "-m", "orchestrator.main", command, *arguments],
@@ -84,11 +98,14 @@ def _deposit(*items: dict) -> bytes:
     return json.dumps({"version": 1, "dispositions": list(items)}).encode("utf-8")
 
 
-def _item(entry: str, disposition: str, target: object = None) -> dict:
-    item: dict = {"entry": entry, "disposition": disposition}
+def _item(entry: str, kind: str, target: object = None) -> dict:
+    """A deposit's item in the shape the interface takes: the entry id, and
+    the disposition as one object of its `kind` and, where it is routed, its
+    `target` — the object `show` reports, passed back as it was read."""
+    disposition: dict = {"kind": kind}
     if target is not None:
-        item["target"] = target
-    return item
+        disposition["target"] = target
+    return {"entry": entry, "disposition": disposition}
 
 
 def _records(project: Path) -> dict[str, bytes]:
@@ -102,6 +119,22 @@ def _records(project: Path) -> dict[str, bytes]:
         for path in sorted(directory.rglob("*"))
         if path.is_file()
     }
+
+
+def _with_run_settings(project: Path, settings: dict) -> None:
+    """Give the project a person's run settings, the only place a value that
+    shapes a run — `roadmap_path` among them — is read from: a git identity
+    the slug derives from, run@example.com → `run`, and the settings file
+    under that slug."""
+    environment = git_environment()
+    subprocess.run(["git", "init", "-q", str(project)], env=environment, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "run@example.com"],
+        cwd=project, env=environment, check=True, capture_output=True,
+    )
+    directory = project / ".ai-factory" / "run-settings"
+    directory.mkdir()
+    (directory / "run.json").write_text(json.dumps(settings), encoding="utf-8")
 
 
 def _assert_disposed(project: Path, expected_entries: list[str], payload: bytes) -> None:
@@ -163,6 +196,57 @@ def test_a_routed_deposit_names_the_open_task_s_spec(tmp_path):
     }
 
 
+def test_a_routed_deposit_names_a_spec_of_the_roadmap_the_run_takes(tmp_path):
+    project = _project(tmp_path)
+    # The person's settings name a roadmap outside the default pair and
+    # `roadmaps/`, whose open task's spec no other roadmap file names: the
+    # roadmap a run of the project takes, and only it, holds the target.
+    (project / SPEC_0301).write_text(
+        "# A spec of the run's roadmap's open task\n\nThe run's roadmap holds the task.\n",
+        encoding="utf-8",
+    )
+    (project / ".ai-factory" / "run.md").write_text(RUN_ROADMAP, encoding="utf-8")
+    _with_run_settings(project, {"roadmap_path": "run.md"})
+    arguments = ("--project-dir", str(project), "--roadmap", "ROADMAP.md", "1.1")
+
+    entry = _entry_of(project.parent, *ALPHA_PROMOTED, *arguments)
+    target = {"spec": SPEC_0301}
+    _assert_disposed(project, [entry], _deposit(_item(entry, "routed", target)))
+
+    record = json.loads((project / ".ai-factory" / "dispositions" / "01-1-1-alpha.json").read_text(encoding="utf-8"))
+    assert record[entry] == {"kind": "routed", "target": target}
+    assert _disposition_of(project.parent, *ALPHA_PROMOTED, *arguments) == {"kind": "routed", "target": target}
+
+
+def test_a_routed_deposit_refuses_where_the_run_s_roadmap_cannot_be_resolved(tmp_path):
+    project = _project(tmp_path)
+    # The person's settings name the literal "my", whose roadmap the
+    # project holds nowhere — a resolution that halts, which the deposit's
+    # route refuses on as the other commands do.
+    _with_run_settings(project, {"roadmap_path": "my"})
+    entry = _entry_of(project.parent, *ALPHA_PROMOTED, "--project-dir", str(project), "--roadmap", "ROADMAP.md", "1.1")
+    before = _records(project)
+
+    _assert_refused(
+        project,
+        "Named roadmap not found",
+        _deposit(_item(entry, "routed", {"spec": SPEC_0300})),
+    )
+
+    assert _records(project) == before
+
+
+def test_a_deposit_with_no_routed_entry_does_not_resolve_the_run_s_roadmap(tmp_path):
+    project = _project(tmp_path)
+    # The same unresolvable "my", a deposit with no routed entry in it: the
+    # roadmap is resolved only where a routed disposition asks for the open
+    # specs, so this deposit is taken as it stands.
+    _with_run_settings(project, {"roadmap_path": "my"})
+    entry = _entry_of(project.parent, *ALPHA_LICENCE, "--project-dir", str(project), "--roadmap", "ROADMAP.md", "1.1")
+
+    _assert_disposed(project, [entry], _deposit(_item(entry, "fixed")))
+
+
 def test_a_routed_deposit_names_a_phase_of_the_roadmap(tmp_path):
     project = _project(tmp_path)
     entry = _entry_of(project.parent, *BETA_SPECCED, "--project-dir", str(project), "1.2")
@@ -206,6 +290,30 @@ def test_a_deposit_spanning_two_tasks_writes_each_task_s_record(tmp_path):
     assert beta[dismissed] == {"kind": "dismissed"}
 
 
+def test_a_disposition_read_from_show_is_taken_as_the_deposit_s_own(tmp_path):
+    project = _project(tmp_path)
+    arguments = ("--project-dir", str(project), "1.1")
+    # A client passes back what it read: the disposition object `show`
+    # reports — a marker's dismissed, a record's routed — is deposited as it
+    # stands, taken apart by no one; the marker-read entry is a fresh
+    # deposit, and the record's own object one already held.
+    dismissed = _disposition_of(project.parent, *ALPHA_LICENCE, *arguments)
+    routed = _disposition_of(project.parent, *ALPHA_SPECCED, *arguments)
+    assert dismissed == {"kind": "dismissed"}
+    assert routed == {"kind": "routed", "target": {"spec": SPEC_0300}}
+    licence = _entry_of(project.parent, *ALPHA_LICENCE, *arguments)
+    specced = _entry_of(project.parent, *ALPHA_SPECCED, *arguments)
+
+    _assert_disposed(
+        project, [licence, specced],
+        _deposit({"entry": licence, "disposition": dismissed}, {"entry": specced, "disposition": routed}),
+    )
+
+    record = json.loads((project / ".ai-factory" / "dispositions" / "01-1-1-alpha.json").read_text(encoding="utf-8"))
+    assert record[licence] == {"kind": "dismissed"}
+    assert record[specced] == {"kind": "routed", "target": {"spec": SPEC_0300}}
+
+
 # ---------------------------------------------------------------------------
 # --- idempotence ---
 # ---------------------------------------------------------------------------
@@ -220,6 +328,59 @@ def test_the_same_deposit_sent_twice_changes_nothing(tmp_path):
     _assert_disposed(project, [entry], payload)
 
     assert (project / ".ai-factory" / "dispositions" / "02-1-2-beta.json").read_bytes() == record
+
+
+def test_a_routed_deposit_replayed_once_its_task_is_done_is_accepted(tmp_path):
+    project = _project(tmp_path)
+    entry = _entry_of(project.parent, *ALPHA_PROMOTED, "--project-dir", str(project), "1.1")
+    target = {"spec": SPEC_0300}
+    _assert_disposed(project, [entry], _deposit(_item(entry, "routed", target)))
+
+    # Theta, the open task whose spec the deposit routed to, has since run.
+    roadmap = project / ".ai-factory" / "ROADMAP.md"
+    roadmap.write_text(
+        roadmap.read_text(encoding="utf-8").replace("- [ ] **3.1 — Theta**", "- [x] **3.1 — Theta**"),
+        encoding="utf-8",
+    )
+    before = _records(project)
+
+    _assert_disposed(project, [entry], _deposit(_item(entry, "routed", target)))
+
+    assert _records(project) == before
+
+
+def test_a_replayed_routed_deposit_is_not_checked_against_its_target_at_all(tmp_path):
+    project = _project(tmp_path)
+    entry = _entry_of(project.parent, *ALPHA_PROMOTED, "--project-dir", str(project), "1.1")
+    target = {"spec": SPEC_0300}
+    _assert_disposed(project, [entry], _deposit(_item(entry, "routed", target)))
+
+    # The spec the deposit named is gone whole, and no open task names it.
+    (project / SPEC_0300).unlink()
+    before = _records(project)
+
+    _assert_disposed(project, [entry], _deposit(_item(entry, "routed", target)))
+
+    assert _records(project) == before
+
+
+def test_a_first_routing_to_the_spec_of_a_done_task_refuses(tmp_path):
+    project = _project(tmp_path)
+    entry = _entry_of(project.parent, *BETA_LEGACY, "--project-dir", str(project), "1.2")
+    roadmap = project / ".ai-factory" / "ROADMAP.md"
+    roadmap.write_text(
+        roadmap.read_text(encoding="utf-8").replace("- [ ] **3.1 — Theta**", "- [x] **3.1 — Theta**"),
+        encoding="utf-8",
+    )
+    before = _records(project)
+
+    _assert_refused(
+        project,
+        f"The target of an entry of the deposit is neither an open task's spec "
+        f"nor a phase of the roadmap: {entry!r}",
+        _deposit(_item(entry, "routed", {"spec": SPEC_0300})),
+    )
+    assert _records(project) == before
 
 
 def test_a_different_disposition_for_a_disposed_entry_refuses_naming_the_one_it_holds(tmp_path):
@@ -307,7 +468,21 @@ def test_an_item_that_is_not_an_object_of_entry_and_disposition_refuses(tmp_path
     _assert_refused(project, "A disposition of the deposit is not an object of entry and disposition",
                     b'{"version": 1, "dispositions": [{"entry": "x"}]}')
     _assert_refused(project, "A disposition of the deposit is not an object of entry and disposition",
-                    b'{"version": 1, "dispositions": [{"disposition": "fixed"}]}')
+                    b'{"version": 1, "dispositions": [{"disposition": {"kind": "fixed"}}]}')
+    assert _records(project) == before
+
+
+def test_a_disposition_that_is_not_the_object_show_reports_refuses(tmp_path):
+    project = _project(tmp_path)
+    entry = _fresh_entry(project)
+    before = _records(project)
+    line = "A disposition of the deposit is not an object of kind and, for routed, target"
+
+    # A string — the shape an older deposit sent — and every other value that
+    # is not the object `show` reports, an object without its `kind` among
+    # them.
+    for disposition in ("fixed", ["fixed"], 5, None, True, {"target": {"spec": SPEC_0300}}):
+        _assert_refused(project, line, _deposit({"entry": entry, "disposition": disposition}))
     assert _records(project) == before
 
 
@@ -318,7 +493,7 @@ def test_an_entry_no_task_holds_refuses(tmp_path):
                     _deposit(_item("0" * 64, "fixed")))
     # An entry that is no name at all is an entry no task holds.
     _assert_refused(project, "The deposit names an entry no task holds: ['not a name']",
-                    b'{"version": 1, "dispositions": [{"entry": ["not a name"], "disposition": "fixed"}]}')
+                    b'{"version": 1, "dispositions": [{"entry": ["not a name"], "disposition": {"kind": "fixed"}}]}')
     assert _records(project) == before
 
 

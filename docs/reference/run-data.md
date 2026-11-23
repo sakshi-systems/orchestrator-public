@@ -14,7 +14,7 @@ orchestrator sweep    [--project-dir DIR] [--roadmap VALUE] --phase N
 orchestrator dispose  [--project-dir DIR]
 ```
 
-`TASK` is the task's `N.M`, or, for a flat task, its title exactly as its roadmap line gives it. `dispose` reads its deposit from standard input as UTF-8.
+`TASK` is the task's number as its contract line writes it, `N.M`, a split child's `N.M.k` or a fix line's `N.Ma`, or, for a flat task, its title exactly as its roadmap line gives it. `dispose` reads its deposit from standard input as UTF-8.
 
 Each command exits with status `0` when it acts and prints one JSON object on standard output. It exits with status `1`, prints one line on standard error, prints nothing on standard output and changes nothing when it refuses. A refusal is any of these:
 
@@ -23,7 +23,7 @@ Each command exits with status `0` when it acts and prints one JSON object on st
 - a selector is missing or doubled;
 - `rollback` is given a position that `show` did not list for the task, or a task that is done or has no attempt;
 - `sweep` is given a phase that holds a task whose roadmap line is not done, the tasks being named;
-- `dispose` is given input that is not valid UTF-8 or JSON, a `version` it does not support, an entry that no task holds or that the deposit names twice, a disposition outside the three, a `routed` with no target or another disposition with one, a target that is no open task's spec and no phase of the roadmap, or a disposition for an entry that already holds a different recorded one, the refusal naming the one it holds.
+- `dispose` is given input that is not valid UTF-8 or JSON, a `version` it does not support, an entry that no task holds or that the deposit names twice, a disposition that is not an object of `kind` and, for `routed`, `target`, a `kind` outside the three, a `routed` with no `target` or another `kind` with one, a target that is no open task's spec and no phase of the roadmap, for a disposition not already recorded for the entry, or a disposition for an entry that already holds a different recorded one, the refusal naming the one it holds. An entry whose recorded disposition equals the deposit's is accepted whatever its target's state.
 
 ## The JSON
 
@@ -44,7 +44,7 @@ Every object holds `version`, an integer, `1` at present. The interface changes 
 
 `rollback` prints `version` and `position`; `sweep` prints `version` and `phase`; `dispose` prints `version` and `disposed`, the list of entries the deposit named, those already disposed the same way included.
 
-The deposit `dispose` reads is an object of `version` and `dispositions`, a list of `entry` and `disposition`, with `target` where the disposition is `routed`.
+The deposit `dispose` reads is an object of `version` and `dispositions`, a list of `entry` and `disposition`, the disposition being the object `show` reports: `kind` and, for `routed`, `target`.
 
 ## Positions
 

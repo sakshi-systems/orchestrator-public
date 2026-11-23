@@ -141,11 +141,11 @@ def show(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | None =
     `version` first and its keys in the order the reference gives them.
 
     `roadmap` is the ``--roadmap`` option's value, taking the roadmap a run of
-    the project would take where none is given; `task` is the task's ``N.M``
-    or a flat task's title, and `phase` a phase's number as written — exactly
-    one of the two. Refuses through RunDataRefusal, HaltError or the
-    configuration's SystemExit, which the dispatch prints as its first line on
-    standard error with status 1.
+    the project would take where none is given; `task` is the task's ``N.M``,
+    ``N.M.k`` or fix line's ``N.Ma``, or a flat task's title, and `phase` a
+    phase's number as written — exactly one of the two. Refuses through
+    RunDataRefusal, HaltError or the configuration's SystemExit, which the
+    dispatch prints as its first line on standard error with status 1.
     """
     if task is not None:
         if phase is not None:
@@ -214,8 +214,9 @@ def rollback(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | No
     `show` listed for it and print `version` and `position`.
 
     `roadmap` is the ``--roadmap`` option's value, taking the roadmap a run of
-    the project would take where none is given; `task` is the task's ``N.M``
-    or a flat task's title, and `position` one of the tokens `show` lists.
+    the project would take where none is given; `task` is the task's ``N.M``,
+    ``N.M.k`` or fix line's ``N.Ma``, or a flat task's title, and `position`
+    one of the tokens `show` lists.
     Refuses through RunDataRefusal, HaltError or the configuration's
     SystemExit, which the dispatch prints as its first line on standard error
     with status 1.
@@ -319,19 +320,24 @@ def sweep(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | None 
     _print_object({"version": RUN_DATA_VERSION, "phase": number})
 
 
-def dispose(project_dir: Path) -> None:
+def dispose(config: OrchestratorConfig, project_dir: Path) -> None:
     """The `dispose` command: take the closure's deposit from standard input —
-    the disposition of each deferred observation it names, as UTF-8 JSON —
-    and keep it in the orchestrator's own record, one per task, printing
-    `version` and `disposed`, the entries the deposit named.
+    the disposition of each deferred observation it names, in the shape
+    `show` reports it, as UTF-8 JSON — and keep it in the orchestrator's own
+    record, one per task, printing `version` and `disposed`, the entries the
+    deposit named.
 
-    The command takes no roadmap: each entry is resolved by the plan reviews
-    and reviews of every group of the project, an entry id naming its own
-    task. The whole deposit is checked before any record is written, and a
-    deposit that names an entry already disposed the same way changes
-    nothing, so a head resuming its closure re-sends the deposit without
-    harm. Refuses through RunDataRefusal or HaltError, which the dispatch
-    prints as its first line on standard error with status 1.
+    `config` is the loaded configuration, taken as the other commands take
+    it. The command takes no roadmap: each entry is resolved by the plan
+    reviews and reviews of every group of the project, an entry id naming
+    its own task; a routed target is checked against the open specs of
+    every roadmap file the project holds and of the roadmap a run of the
+    project takes, which the configuration names. The whole deposit is
+    checked before any record is written, and a deposit that names an entry
+    already disposed the same way changes nothing, so a head resuming its
+    closure re-sends the deposit without harm. Refuses through
+    RunDataRefusal or HaltError, which the dispatch prints as its first
+    line on standard error with status 1.
     """
     items = _deposit_items(_read_deposit())
     entries: list[str] = []
@@ -343,17 +349,20 @@ def dispose(project_dir: Path) -> None:
     for entry, _kind, _target in items:
         if not isinstance(entry, str) or entry not in known:
             raise RunDataRefusal(f"The deposit names an entry no task holds: {entry!r}")
-    _check_targets(project_dir, items)
     records: dict[tuple[str | None, str], dict] = {}
-    for entry, kind, target in items:
+    for entry, _kind, _target in items:
         group = known[entry]
         if group not in records:
             seq, _, slug = group[1].partition("-")
             records[group] = read_record(record_path(project_dir, group[0], seq, slug))
-        held = records[group].get(entry)
-        if held is not None and held != _carried(kind, target):
+    held: dict[str, dict | None] = {
+        entry: records[known[entry]].get(entry) for entry, _kind, _target in items
+    }
+    _check_targets(config, project_dir, items, held)
+    for entry, kind, target in items:
+        if held[entry] is not None and held[entry] != _carried(kind, target):
             raise RunDataRefusal(
-                f"Entry {entry!r} already holds the disposition {json.dumps(held, ensure_ascii=False)}"
+                f"Entry {entry!r} already holds the disposition {json.dumps(held[entry], ensure_ascii=False)}"
             )
     additions: dict[tuple[str | None, str], dict[str, dict]] = {}
     for entry, kind, target in items:
@@ -390,10 +399,12 @@ def _read_deposit() -> dict:
 
 
 def _deposit_items(deposit: dict) -> list[tuple[str, str, dict | None]]:
-    """The deposit's items as (entry, disposition, target), each checked for
-    its own form: an object of `entry` and `disposition`, the disposition one
-    of the three, and a `target` only where the disposition is `routed`,
-    which names one."""
+    """The deposit's items as (entry, kind, target), each checked for
+    its own form: an object of `entry` and `disposition`, the disposition the
+    object `show` reports — of `kind` and, for `routed`, `target` — so a
+    client passes back what it read. The rules the disposition itself holds:
+    its kind one of the three, and its target present exactly where the kind
+    is `routed`, which names one."""
     listed = deposit["dispositions"]
     if not isinstance(listed, list):
         raise RunDataRefusal("The deposit's dispositions are not a list")
@@ -401,7 +412,10 @@ def _deposit_items(deposit: dict) -> list[tuple[str, str, dict | None]]:
     for given in listed:
         if not isinstance(given, dict) or "entry" not in given or "disposition" not in given:
             raise RunDataRefusal("A disposition of the deposit is not an object of entry and disposition")
-        entry, kind, target = given["entry"], given["disposition"], given.get("target")
+        disposition = given["disposition"]
+        if not isinstance(disposition, dict) or "kind" not in disposition:
+            raise RunDataRefusal("A disposition of the deposit is not an object of kind and, for routed, target")
+        entry, kind, target = given["entry"], disposition["kind"], disposition.get("target")
         if kind not in _KINDS:
             raise RunDataRefusal(f"A disposition of the deposit is none of fixed, routed and dismissed: {kind!r}")
         if kind == "routed" and target is None:
@@ -412,15 +426,32 @@ def _deposit_items(deposit: dict) -> list[tuple[str, str, dict | None]]:
     return items
 
 
-def _check_targets(project_dir: Path, items: list[tuple[str, str, dict | None]]) -> None:
+def _check_targets(
+    config: OrchestratorConfig,
+    project_dir: Path,
+    items: list[tuple[str, str, dict | None]],
+    held: dict[str, dict | None],
+) -> None:
     """Check every routed item's target: an existing spec under
     `.ai-factory/` without a `..` segment that an open task's `Spec:` tag
-    names, or a phase heading present in the named roadmap file."""
+    names, or a phase heading present in the named roadmap file. The open
+    specs are read where the deposit holds a routed item, from every
+    roadmap file the project holds and from the roadmap a run of the
+    project takes — the one `_resolve_roadmap_relpath` gives for the
+    configuration with no roadmap value — so a resolution that halts
+    refuses the command as it does for the other commands. An entry whose
+    recorded disposition equals the deposit's is skipped: the deposit is
+    one already taken, sent again by a closure that resumed, so its target
+    is not checked, whatever state the task or file it names is in now."""
     if not any(kind == "routed" for _entry, kind, _target in items):
         return
-    open_specs = _open_specs(project_dir)
+    open_specs = _open_specs(project_dir, _resolve_roadmap_relpath(config, project_dir))
     for entry, kind, target in items:
-        if kind == "routed" and not _valid_target(project_dir, target, open_specs):
+        if kind != "routed":
+            continue
+        if held.get(entry) == _carried(kind, target):
+            continue
+        if not _valid_target(project_dir, target, open_specs):
             raise RunDataRefusal(
                 f"The target of an entry of the deposit is neither an open task's spec "
                 f"nor a phase of the roadmap: {entry!r}"
@@ -473,13 +504,16 @@ def _holds_phase(path: Path, phase: int) -> bool:
     return False
 
 
-def _open_specs(project_dir: Path) -> set[str]:
+def _open_specs(project_dir: Path, roadmap_relpath: str) -> set[str]:
     """The specs the project's open tasks name: every roadmap file's tasks
     whose line is not checked, each its `Spec:` tag's path — the last tag a
-    line carries, the one a run lays. A roadmap file that cannot be read or
-    decoded names no spec, whatever the deposit names."""
+    line carries, the one a run lays — reading beside them the roadmap a
+    run of the project takes, `roadmap_relpath` the relpath the
+    configuration resolves to, wherever under `.ai-factory/` it lies. A
+    roadmap file that cannot be read or decoded names no spec, whatever the
+    deposit names."""
     specs: set[str] = set()
-    for path in _roadmap_files(project_dir):
+    for path in [project_dir / ".ai-factory" / roadmap_relpath, *_roadmap_files(project_dir)]:
         try:
             listed = parse_roadmap(path, keep_after_breakpoint=True)
         except (OSError, UnicodeDecodeError):

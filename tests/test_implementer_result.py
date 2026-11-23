@@ -96,7 +96,7 @@ def _push_his_branch(stand, change):
     git_in(stand.his, "push", "origin", BRANCH)
 
 
-def _result(stand, mode_dirs=("plans", "plan-reviews", "reviews", "test-runs")):
+def _result(stand, mode_dirs=("plans", "plan-reviews", "reviews", "test-runs", "dispositions")):
     preserved = tuple(stand.factory / name for name in mode_dirs)
     return HermesResult(stand.run, preserved)
 
@@ -227,6 +227,40 @@ def test_the_lay_changes_exactly_the_paths_his_work_changed(stand):
     status = git_in(stand.run, "status", "--porcelain")
     assert "M  a.txt" in status and "D  sub/s.txt" in status and "A  new/dir/n.sh" in status
     assert "M  mode.sh" in status and " M run.sh" in status
+
+
+def test_a_lay_of_his_changes_and_deletions_of_records_leaves_the_local_records(stand):
+    """A task's disposition record is the run's own artifact, preserved like the
+    plans and the reviews: a change, an addition or a deletion of a path beneath
+    the dispositions directory never lays, so the local records stand exactly as
+    the run wrote them."""
+    records = stand.factory / "dispositions"
+    records.mkdir()
+    (records / "00-earlier.json").write_text('{"earlier": "the base"}\n')
+    (records / "00-gone.json").write_text('{"gone": "the base"}\n')
+    git_in(stand.run, "add", ".ai-factory/dispositions")
+    git_in(stand.run, "commit", "-m", "earlier records")
+    stand.base = git_in(stand.run, "rev-parse", "HEAD").strip()
+    git_in(stand.run, "push", "origin", f"{stand.base}:refs/heads/main")
+    git_in(stand.his, "fetch", "-q", "origin")
+    # the run's own state during the task: an edited earlier record, and the task's record the run wrote
+    (records / "00-earlier.json").write_text('{"earlier": "the run\'s edit"}\n')
+    (records / "01-slug.json").write_text('{"task": "the run\'s record"}\n')
+
+    def change(his):
+        (his / "a.txt").write_text("his version\n")  # outside the artifact paths, so the lay runs
+        (his / ".ai-factory" / "dispositions" / "00-earlier.json").write_text('{"earlier": "his version"}\n')
+        git_in(his, "rm", "-q", ".ai-factory/dispositions/00-gone.json")
+        (his / ".ai-factory" / "dispositions" / "01-slug.json").write_text('{"task": "his version"}\n')
+    _push_his_branch(stand, change)
+
+    _result(stand).lay(stand.factory / "plans" / "01-slug.md")
+
+    assert (stand.run / "a.txt").read_text() == "his version\n"  # his work outside the artifacts lays
+    assert (records / "00-earlier.json").read_text() == '{"earlier": "the run\'s edit"}\n'  # his change never lays
+    assert (records / "00-gone.json").read_text() == '{"gone": "the base"}\n'  # his deletion never lays
+    assert (records / "01-slug.json").read_text() == '{"task": "the run\'s record"}\n'  # his addition never lays
+    assert git_in(stand.run, "rev-parse", "HEAD").strip() == stand.base
 
 
 def test_a_fix_iteration_s_lay_reverts_his_first_changes_through_the_previous_tip(stand):

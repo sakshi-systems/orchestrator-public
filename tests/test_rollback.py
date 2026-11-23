@@ -6,7 +6,6 @@ repeated to the same end state."""
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +16,7 @@ from orchestrator import run_data
 from orchestrator.config import OrchestratorConfig
 from orchestrator.errors import RunDataRefusal
 from orchestrator.iteration_ref import make_iteration_commit, push_iteration_ref
-from tests.conftest import git_in
+from tests.conftest import git_environment, git_in
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -126,8 +125,9 @@ def _project(tmp_path: Path, *, record: dict | None = RECORD_ON, tree_change: bo
 
 def _rollback(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
     """Run the command as a client runs it, with the machine's base the tree
-    carries."""
-    environment = dict(os.environ)
+    carries and git's configuration files silenced, so the command reads no
+    config of the machine it runs on."""
+    environment = git_environment()
     environment["ORCHESTRATOR_CONFIG"] = str(root / "base.json")
     return subprocess.run(
         [sys.executable, "-m", "orchestrator.main", "rollback", *arguments],

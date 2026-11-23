@@ -12,8 +12,9 @@ CHECKBOX_RE = re.compile(r"^- \[([ x])\] \*\*(.+?)\*\*\s*[—–-]\s*(.+)$")
 PHASE_HEADING_RE = re.compile(r"^Phase (\d+)\b")
 # The number is anchored to the contract line's own form: it is followed by
 # the dash that joins it to the rest of the title, so a flat title that
-# begins like a number ("2.0 migration notes") carries no number.
-NUMBER_RE = re.compile(r"(\d+(?:\.\d+){1,2})(?=\s+[—–-]\s)")
+# begins like a number ("2.0 migration notes") carries no number. One
+# lowercase letter may close the number — a fix line's own ("104.1a").
+NUMBER_RE = re.compile(r"(\d+(?:\.\d+){1,2}[a-z]?)(?=\s+[—–-]\s)")
 
 
 @dataclass
@@ -33,9 +34,10 @@ class Task:
 
     @property
     def number(self) -> str | None:
-        """The leading ``N.M`` or ``N.M.k`` of the title as the contract line
-        writes it — a number the line's own dash follows — or None where the
-        title carries none, a flat task."""
+        """The leading ``N.M``, ``N.M.k`` or fix line's ``N.Ma`` of the title
+        as the contract line writes it — a number the line's own dash
+        follows, one closing letter where the line is a fix line — or None
+        where the title carries none, a flat task."""
         found = NUMBER_RE.match(self.title)
         return found.group(1) if found else None
 
@@ -99,8 +101,8 @@ def parse_roadmap(path: Path, *, keep_after_breakpoint: bool = False) -> ParseRe
 
 
 def find_task(tasks: list[Task], address: str) -> Task:
-    """The task an address names: its ``N.M``, or a flat task's title as its
-    line gives it.
+    """The task an address names: its ``N.M``, ``N.M.k`` or fix line's
+    ``N.Ma``, or a flat task's title as its line gives it.
 
     Raises RunDataRefusal where no line of the roadmap matches the address,
     and where a flat title stands on more than one line, naming each line's

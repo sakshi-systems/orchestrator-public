@@ -22,6 +22,7 @@ ROADMAP = """# Roadmap
 ## Phase 1 — first doors
 
 - [x] **1.1 — Alpha** — the done task
+- [x] **1.1a — Refit Alpha's bell** — the landed fix line
 - [ ] **1.2 — Beta** — the escalated task
 - [ ] **1.3 — Gamma** — the underway task
 - [ ] **1.4 — Delta** — the unstarted task

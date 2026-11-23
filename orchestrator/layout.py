@@ -35,6 +35,13 @@ def _resolve_roadmap_relpath(config: OrchestratorConfig, project_dir: Path, road
     The value is `roadmap` — the ``--roadmap`` option's — where one is given,
     and the configured `roadmap_path` where none is, so a run of the project
     and a command over its data take the same roadmap.
+
+    An explicit path is returned in its normalized form: redundant separators
+    and ``.`` components come off, so the alias ``./ROADMAP.md`` is the
+    default roadmap and selects the flat artifact namespace the plain
+    spelling does, and a path already normal, a named roadmap's among them,
+    is returned unchanged. ``..`` segments stay for the guard to refuse, not
+    for the normalization to rewrite.
     """
     value = roadmap if roadmap is not None else config.roadmap_path
     if value is None:
@@ -69,7 +76,7 @@ def _resolve_roadmap_relpath(config: OrchestratorConfig, project_dir: Path, road
             )
         return relpath
 
-    return value
+    return str(Path(value))
 
 
 def _tests_sibling(relpath: str) -> str:

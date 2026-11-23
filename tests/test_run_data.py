@@ -5,11 +5,11 @@ byte, and the refusals' lines and status."""
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 
+from tests.conftest import git_environment
 from tests.run_tree import build
 
 REPO = Path(__file__).resolve().parents[1]
@@ -291,6 +291,22 @@ DELTA = r"""{
 }
 """
 
+FIX_ALPHA = r"""{
+  "version": 1,
+  "scope": "task",
+  "roadmap": "ROADMAP.md",
+  "task": {
+    "address": "1.1a",
+    "title": "1.1a — Refit Alpha's bell",
+    "state": "done"
+  },
+  "steps": [],
+  "escalation": null,
+  "observations": [],
+  "positions": []
+}
+"""
+
 ZETA = r"""{
   "version": 1,
   "scope": "task",
@@ -369,6 +385,13 @@ PHASE_ONE = r"""{
           }
         }
       ]
+    },
+    {
+      "address": "1.1a",
+      "title": "1.1a — Refit Alpha's bell",
+      "state": "done",
+      "escalation": null,
+      "observations": []
     },
     {
       "address": "1.2",
@@ -639,8 +662,10 @@ GAMMA_AGAIN = r"""{
 
 def _show(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
     """Run the command as a client runs it, against the tree built under
-    `root`, with the machine's base the tree carries."""
-    environment = dict(os.environ)
+    `root`, with the machine's base the tree carries and git's
+    configuration files silenced, so the command reads no config of the
+    machine it runs on."""
+    environment = git_environment()
     environment["ORCHESTRATOR_CONFIG"] = str(root / "base.json")
     return subprocess.run(
         [sys.executable, "-m", "orchestrator.main", "show", *arguments],
@@ -683,6 +708,30 @@ def test_a_task_past_the_breakpoint_is_addressed(tmp_path):
     _assert_shown(project, ZETA, "--project-dir", str(project), "2.2")
 
 
+def test_a_fix_line_is_addressed_by_its_number(tmp_path):
+    """A fix line's number — one lowercase letter closing it, directly
+    before the line's dash — is the task's address, as `N.M` is."""
+    project = _project(tmp_path)
+    _assert_shown(project, FIX_ALPHA, "--project-dir", str(project), "1.1a")
+
+
+def test_a_phase_lists_a_fix_line_by_its_number(tmp_path):
+    project = _project(tmp_path)
+    result = _show(project.parent, "--project-dir", str(project), "--phase", "1")
+    assert result.returncode == 0, result.stderr.decode("utf-8")
+    shown = json.loads(result.stdout)
+    listed = [task for task in shown["tasks"] if task["address"] == "1.1a"]
+    assert listed == [
+        {
+            "address": "1.1a",
+            "title": "1.1a — Refit Alpha's bell",
+            "state": "done",
+            "escalation": None,
+            "observations": [],
+        }
+    ]
+
+
 def test_a_phase_shows_each_task_s_standing(tmp_path):
     project = _project(tmp_path)
     _assert_shown(project, PHASE_ONE, "--project-dir", str(project), "--phase", "1")
@@ -710,6 +759,14 @@ def test_the_flat_task_of_the_test_sibling_shows_its_test_run(tmp_path):
 def test_a_named_roadmap_s_task_shows_its_own_artifacts(tmp_path):
     project = _project(tmp_path)
     _assert_shown(project, ETA, "--project-dir", str(project), "--roadmap", "roadmaps/named.md", "7.1")
+
+
+def test_the_dotted_alias_of_the_default_roadmap_reaches_its_run_data(tmp_path):
+    """The alias './ROADMAP.md' answers with the object the plain spelling
+    answers with: the default roadmap's flat namespace, the 'roadmap' field
+    itself the normalized spelling."""
+    project = _project(tmp_path)
+    _assert_shown(project, ALPHA, "--project-dir", str(project), "--roadmap", "./ROADMAP.md", "1.1")
 
 
 def test_a_flat_title_that_begins_like_a_number_is_addressed_by_its_title(tmp_path):

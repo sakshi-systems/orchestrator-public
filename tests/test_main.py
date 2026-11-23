@@ -1144,10 +1144,30 @@ def test_resolve_roadmap_relpath_my_no_derivable_slug_raises_identity_halt(tmp_p
     assert lines[2] == "or set roadmap_path to an explicit path."
 
 
-def test_resolve_roadmap_relpath_explicit_returned_verbatim(tmp_path):
-    """Should return an explicit value verbatim, with no owner check."""
+def test_resolve_roadmap_relpath_explicit_already_normal_returned_unchanged(tmp_path):
+    """Should return an explicit path already normal unchanged, with no owner check."""
     config = _config_with_roadmap_path("roadmaps/alice.md")
     assert _resolve_roadmap_relpath(config, tmp_path) == "roadmaps/alice.md"
+
+
+def test_resolve_roadmap_relpath_dotted_default_alias_selects_the_flat_namespace(tmp_path):
+    """Should normalize './ROADMAP.md' to 'ROADMAP.md', so the dotted alias and
+    the plain spelling select the same roadmap, flat artifact namespace and
+    test sibling."""
+    config = _config_with_roadmap_path("./ROADMAP.md")
+    relpath = _resolve_roadmap_relpath(config, tmp_path)
+    assert relpath == "ROADMAP.md"
+    assert _artifact_subdir(relpath) is None
+    assert _tests_sibling(relpath) == "ROADMAP_TESTS.md"
+
+
+def test_resolve_roadmap_relpath_dotted_tests_alias_selects_the_flat_namespace(tmp_path):
+    """Should normalize the test pair's dotted alias the same way — the roadmap
+    argument's leg, over a config that reads the default."""
+    config = _config_with_roadmap_path(None)
+    relpath = _resolve_roadmap_relpath(config, tmp_path, "./ROADMAP_TESTS.md")
+    assert relpath == "ROADMAP_TESTS.md"
+    assert _artifact_subdir(relpath) is None
 
 
 # ---------------------------------------------------------------------------
@@ -2214,7 +2234,7 @@ def test_the_implementer_s_result_follows_its_runtime_and_the_mode_s_routing(tmp
     assert result.project_dir == project
     assert result.preserved == tuple(
         project / ".ai-factory" / name / "john-doe"
-        for name in ("plans", "plan-reviews", "reviews", "test-runs")
+        for name in ("plans", "plan-reviews", "reviews", "test-runs", "dispositions")
     )
 
 

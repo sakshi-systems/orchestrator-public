@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Callable, NoReturn
 
 from .agents import SpecLayer
-from .artifact_layout import PLAN_REVIEWS_DIRNAME, PLANS_DIRNAME, REVIEWS_DIRNAME, TEST_RUNS_DIRNAME
+from .artifact_layout import (
+    DISPOSITIONS_DIRNAME,
+    PLAN_REVIEWS_DIRNAME,
+    PLANS_DIRNAME,
+    REVIEWS_DIRNAME,
+    TEST_RUNS_DIRNAME,
+)
 from .claude_cli import ClaudeAgentBackend
 from .codex_cli import CodexAgentBackend
 from .config import OrchestratorConfig, load_config, role_runtimes
@@ -39,7 +45,13 @@ from .user_slug import USER_SLUG_MISSING, user_slug
 from . import state
 
 
-_IMPLEMENTER_RESULT_DIRS = (PLANS_DIRNAME, PLAN_REVIEWS_DIRNAME, REVIEWS_DIRNAME, TEST_RUNS_DIRNAME)
+_IMPLEMENTER_RESULT_DIRS = (
+    PLANS_DIRNAME,
+    PLAN_REVIEWS_DIRNAME,
+    REVIEWS_DIRNAME,
+    TEST_RUNS_DIRNAME,
+    DISPOSITIONS_DIRNAME,
+)
 
 
 def _factory_tracked(project_dir: Path) -> bool:
@@ -354,7 +366,7 @@ def cli() -> None:
             elif args.command == "sweep":
                 sweep(config, project_dir, roadmap=args.roadmap, phase=args.phase)
             else:
-                dispose(project_dir)
+                dispose(config, project_dir)
         except (RunDataRefusal, HaltError, SystemExit) as e:
             refuse(e)
         return

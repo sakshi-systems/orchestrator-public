@@ -7,11 +7,11 @@ and the flat pair both, an unfinished group of the same slug staying."""
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 
+from tests.conftest import git_environment
 from tests.run_tree import build
 
 REPO = Path(__file__).resolve().parents[1]
@@ -19,8 +19,10 @@ REPO = Path(__file__).resolve().parents[1]
 
 def _sweep(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
     """Run the sweep command as a client runs it, against the tree built
-    under `root`, with the machine's base the tree carries."""
-    environment = dict(os.environ)
+    under `root`, with the machine's base the tree carries and git's
+    configuration files silenced, so the command reads no config of the
+    machine it runs on."""
+    environment = git_environment()
     environment["ORCHESTRATOR_CONFIG"] = str(root / "base.json")
     return subprocess.run(
         [sys.executable, "-m", "orchestrator.main", "sweep", *arguments],
