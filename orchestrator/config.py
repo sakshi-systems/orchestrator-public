@@ -51,13 +51,12 @@ RUN_KEYS = (
     "roles",
     "claude_agents",
     "codex_agents",
-    "telegram_alerts",
 )
 
 # What the machine's base holds, and all it holds: the instances a role may
-# name and the notification credentials. Every key found in it that is neither
-# one of these nor a run key above is ignored.
-_BASE_KEYS = ("hermes_instances", "telegram_bot_token", "telegram_chat_id")
+# name, the notification credentials and the event types. Every key found in
+# it that is neither one of these nor a run key above is ignored.
+_BASE_KEYS = ("hermes_instances", "telegram_bot_token", "telegram_chat_id", "telegram_alerts")
 
 _ALL_ROLES = tuple(AgentRole)
 
@@ -252,17 +251,17 @@ def load_config(project_dir: Path | None = None, user_slug: str | None = None) -
     at call time, unless `ORCHESTRATOR_CONFIG` names another path. A path the environment
     variable names must hold a file — a missing one exits naming it — while the default
     path's absence means no base and every key takes its default. A base that is not valid
-    JSON, or not a JSON object, exits naming its path. The base holds `hermes_instances`
-    and the Telegram credentials and nothing else: a key of `RUN_KEYS` found in it exits
-    naming the key, the base and the person's file the key belongs in, and every other key
-    it carries that is not one of the machine's own is ignored.
+    JSON, or not a JSON object, exits naming its path. The base holds `hermes_instances`,
+    the Telegram credentials and `telegram_alerts` and nothing else: a key of `RUN_KEYS`
+    found in it exits naming the key, the base and the person's file the key belongs in,
+    and every other key it carries that is not one of the machine's own is ignored.
 
     When `project_dir` and `user_slug` are given, the person's run settings
     `<project_dir>/.ai-factory/run-settings/<user_slug>.json` layer shallowly onto the
     base (a key of the person's file replaces the value below it wholesale; a run key
     it omits takes its default, and a missing file loads the base and the defaults
-    alone). The file refuses any key outside `RUN_KEYS`, `hermes_instances` and the
-    Telegram credentials, naming itself and the key; a legacy
+    alone). The file refuses any key outside `RUN_KEYS`, `hermes_instances`, the
+    Telegram credentials and `telegram_alerts`, naming itself and the key; a legacy
     `<project_dir>/.ai-factory/orchestrator.json` that exists exits naming itself and
     the person's file, and is never read.
     """
@@ -334,6 +333,11 @@ def load_config(project_dir: Path | None = None, user_slug: str | None = None) -
             raise SystemExit(
                 f"Invalid '{key}' in {person_path} "
                 "(the machine's credentials, which the base file holds)"
+            )
+        if key == "telegram_alerts":
+            raise SystemExit(
+                f"Invalid 'telegram_alerts' in {person_path} "
+                "(the machine's list of event types, which the base file holds)"
             )
         if key not in RUN_KEYS:
             raise SystemExit(f"Invalid '{key}' in {person_path} (unknown key)")

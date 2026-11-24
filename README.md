@@ -22,7 +22,7 @@ It also needs the command-line tool of the runtime it runs on, installed and aut
 
 ## Configure
 
-Two files configure a run. The machine's base, `~/.local/state/orchestrator/orchestrator.json`, is optional and holds the machine's facts, the Hermes instances and the Telegram credentials; it stays outside every repository. Your run settings are one file of your own in the project, `.ai-factory/run-settings/<your-slug>.json`, committed with the project, and hold everything that shapes a run: the `runtime` key selects Claude or Codex, `roadmap_path` selects which roadmap to run (empty means the default `ROADMAP.md`), and the thresholds and iteration limits bound the usage and the length of a run. A key the files leave out takes its default. Every key and its default are in the [configuration reference](docs/reference/configuration.md).
+Two files configure a run. The machine's base, `~/.local/state/orchestrator/orchestrator.json`, is optional and holds the machine's facts, the Hermes instances, the Telegram credentials and the event types a run notifies on; it stays outside every repository. Your run settings are one file of your own in the project, `.ai-factory/run-settings/<your-slug>.json`, committed with the project, and hold everything that shapes a run: the `runtime` key selects Claude or Codex, `roadmap_path` selects which roadmap to run (empty means the default `ROADMAP.md`), and the thresholds and iteration limits bound the usage and the length of a run. A key the files leave out takes its default. Every key and its default are in the [configuration reference](docs/reference/configuration.md).
 
 ## Modes
 

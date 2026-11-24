@@ -10,7 +10,7 @@ The shape follows `orchestrator-answer`: a head answers a run through that comma
 
 ## Addressing a task and a phase
 
-A command names the roadmap and, within it, a task or a phase. The roadmap is the one a run of the project would take, and `--roadmap` names another exactly as it does for a run ([Named roadmaps — What it is](named-roadmaps.md#what-it-is)). A task is addressed by the number its roadmap line carries: `N.M`, a split child's `N.M.k` or a fix line's `N.Ma`. A flat task, one with no number, as the test roadmap and legacy roadmaps hold, is addressed by its title as the line gives it; a title that stands on more than one line of the roadmap makes the address ambiguous, and the command refuses it, naming the lines. A phase is addressed by its number.
+A command names the roadmap and, within it, a task or a phase. The roadmap is the one a run of the project would take, and `--roadmap` names another exactly as it does for a run ([Named roadmaps — What it is](named-roadmaps.md#what-it-is)). A task is addressed by the number its roadmap line carries: `N.M` or a split child's `N.M.k`. A flat task, one with no number, as the test roadmap and legacy roadmaps hold, is addressed by its title as the line gives it; a title that stands on more than one line of the roadmap makes the address ambiguous, and the command refuses it, naming the lines. A phase is addressed by its number.
 
 ## What show gives
 

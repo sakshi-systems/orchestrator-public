@@ -84,6 +84,7 @@ def test_absent_default_base_is_no_base(tmp_path, monkeypatch):
     assert config.hermes_instances == {}
     assert config.telegram_bot_token is None
     assert config.telegram_chat_id is None
+    assert config.telegram_alerts == []
 
 
 def test_a_file_at_the_state_root_path_is_read(tmp_path, monkeypatch):
@@ -108,6 +109,19 @@ def test_a_file_at_the_state_root_path_is_read(tmp_path, monkeypatch):
     assert config.telegram_bot_token == "token"
     assert config.telegram_chat_id == "chat"
     assert config.hermes_instances == {"main": {"server": "127.0.0.1", "port": 8801, "key_file": "/stand/keys/main"}}
+
+
+def test_the_base_s_telegram_alerts_load_as_given(tmp_path, monkeypatch):
+    """The base's telegram_alerts list loads as the base holds it; a base without the key gives []."""
+    _write_config(tmp_path, monkeypatch, {"telegram_alerts": ["task-fail", "stop", "done"]})
+
+    config = load_config()
+
+    assert config.telegram_alerts == ["task-fail", "stop", "done"]
+
+    _write_config(tmp_path, monkeypatch, {})
+
+    assert load_config().telegram_alerts == []
 
 
 def test_an_explicit_path_with_no_file_exits_naming_it(tmp_path, monkeypatch):
@@ -254,18 +268,6 @@ def test_a_one_key_person_s_file_leaves_the_rest_at_their_defaults(tmp_path, mon
     assert config.enable_phase_sessions is False
 
 
-def test_the_person_s_telegram_alerts_load_as_given(tmp_path, monkeypatch):
-    """Should load the person's telegram_alerts list exactly as the file holds it."""
-    _write_config(tmp_path, monkeypatch)
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
-    _write_run_settings(project_dir, "alice", {"telegram_alerts": ["task-fail"]})
-
-    config = load_config(project_dir, "alice")
-
-    assert config.telegram_alerts == ["task-fail"]
-
-
 def test_the_person_s_file_roadmap_path_absolute_raises_system_exit(tmp_path, monkeypatch):
     """Should raise SystemExit naming the offending value when the person's roadmap_path is absolute."""
     _write_config(tmp_path, monkeypatch)
@@ -335,7 +337,6 @@ def test_run_keys_is_the_list_of_keys_a_person_s_file_holds():
         "roles",
         "claude_agents",
         "codex_agents",
-        "telegram_alerts",
     )
 
 
@@ -356,7 +357,6 @@ def test_every_run_key_is_accepted_from_the_person_s_file(tmp_path, monkeypatch)
         "roles": {"planner": {"runtime": "codex"}},
         "claude_agents": {"planner": {"model": "m1", "effort": "high"}},
         "codex_agents": {"implementer": {"model": "m2", "effort": "low"}},
-        "telegram_alerts": ["task-fail", "stop", "done"],
     }
     assert set(settings) == set(RUN_KEYS)
     _write_run_settings(project_dir, "alice", settings)
@@ -374,7 +374,6 @@ def test_every_run_key_is_accepted_from_the_person_s_file(tmp_path, monkeypatch)
     assert config.roles == {"planner": {"runtime": "codex"}}
     assert config.claude_agents == {"planner": {"model": "m1", "effort": "high"}}
     assert config.codex_agents == {"implementer": {"model": "m2", "effort": "low"}}
-    assert config.telegram_alerts == ["task-fail", "stop", "done"]
 
 
 def test_an_unknown_key_in_the_person_s_file_is_refused_naming_file_and_key(tmp_path, monkeypatch):
@@ -408,9 +407,16 @@ def test_a_misspelled_credential_key_is_refused_without_printing_its_value(tmp_p
     assert token not in message
 
 
-@pytest.mark.parametrize("key", ["telegram_bot_token", "telegram_chat_id"])
-def test_the_person_s_file_refuses_the_telegram_credentials(tmp_path, monkeypatch, key):
-    """The machine's credentials never enter a committed file; the refusal names file and key."""
+@pytest.mark.parametrize(
+    "key, reason",
+    [
+        ("telegram_bot_token", "the machine's credentials, which the base file holds"),
+        ("telegram_chat_id", "the machine's credentials, which the base file holds"),
+        ("telegram_alerts", "the machine's list of event types, which the base file holds"),
+    ],
+)
+def test_the_person_s_file_refuses_the_telegram_credentials(tmp_path, monkeypatch, key, reason):
+    """The machine's notification keys never enter a committed file; the refusal names file and key."""
     _write_config(tmp_path, monkeypatch)
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -420,10 +426,7 @@ def test_the_person_s_file_refuses_the_telegram_credentials(tmp_path, monkeypatc
         load_config(project_dir, "alice")
 
     message = str(exc.value)
-    assert message == (
-        f"Invalid '{key}' in {person_path} "
-        "(the machine's credentials, which the base file holds)"
-    )
+    assert message == f"Invalid '{key}' in {person_path} ({reason})"
     assert "secret" not in message
 
 

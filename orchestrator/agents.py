@@ -241,6 +241,11 @@ class CodeReviewer:
             f"on the ref `{state.ref}`.\n"
             for state in iteration_states
         )
+        naming_lines += (
+            "Read the iteration with `git show` or `git diff` of the commits named above, "
+            "or in a worktree of your own, and never move the run's HEAD: "
+            "check out no commit or branch in the run's tree.\n"
+        )
         naming_lines += "The plan for context is under `## Plan`.\n"
         if implementer_answer_path is not None:
             naming_lines += "The implementer's answer is under `## The implementer's answer`.\n"

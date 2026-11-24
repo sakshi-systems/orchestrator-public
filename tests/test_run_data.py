@@ -293,22 +293,6 @@ DELTA = r"""{
 }
 """
 
-FIX_ALPHA = r"""{
-  "version": 1,
-  "scope": "task",
-  "roadmap": "ROADMAP.md",
-  "task": {
-    "address": "1.1a",
-    "title": "1.1a — Refit Alpha's bell",
-    "state": "done"
-  },
-  "steps": [],
-  "escalation": null,
-  "observations": [],
-  "positions": []
-}
-"""
-
 ZETA = r"""{
   "version": 1,
   "scope": "task",
@@ -389,7 +373,7 @@ PHASE_ONE = r"""{
       ]
     },
     {
-      "address": "1.1a",
+      "address": "1.1a — Refit Alpha's bell",
       "title": "1.1a — Refit Alpha's bell",
       "state": "done",
       "escalation": null,
@@ -712,22 +696,17 @@ def test_a_task_past_the_breakpoint_is_addressed(tmp_path):
     _assert_shown(project, ZETA, "--project-dir", str(project), "2.2")
 
 
-def test_a_fix_line_is_addressed_by_its_number(tmp_path):
-    """A fix line's number — one lowercase letter closing it, directly
-    before the line's dash — is the task's address, as `N.M` is."""
-    project = _project(tmp_path)
-    _assert_shown(project, FIX_ALPHA, "--project-dir", str(project), "1.1a")
-
-
-def test_a_phase_lists_a_fix_line_by_its_number(tmp_path):
+def test_a_phase_lists_a_letter_closed_done_line_by_its_whole_title(tmp_path):
+    """A done line a letter closes carries no number, so the phase lists
+    it by its whole title as its address, as a flat task."""
     project = _project(tmp_path)
     result = _show(project.parent, "--project-dir", str(project), "--phase", "1")
     assert result.returncode == 0, result.stderr.decode("utf-8")
     shown = json.loads(result.stdout)
-    listed = [task for task in shown["tasks"] if task["address"] == "1.1a"]
+    listed = [task for task in shown["tasks"] if task["address"] == "1.1a — Refit Alpha's bell"]
     assert listed == [
         {
-            "address": "1.1a",
+            "address": "1.1a — Refit Alpha's bell",
             "title": "1.1a — Refit Alpha's bell",
             "state": "done",
             "escalation": None,

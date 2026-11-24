@@ -142,8 +142,8 @@ def show(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | None =
     `version` first and its keys in the order the reference gives them.
 
     `roadmap` is the ``--roadmap`` option's value, taking the roadmap a run of
-    the project would take where none is given; `task` is the task's ``N.M``,
-    ``N.M.k`` or fix line's ``N.Ma``, or a flat task's title, and `phase` a
+    the project would take where none is given; `task` is the task's ``N.M``
+    or split child's ``N.M.k``, or a flat task's title, and `phase` a
     phase's number as written — exactly one of the two. Refuses through
     RunDataRefusal, HaltError or the configuration's SystemExit, which the
     dispatch prints as its first line on standard error with status 1.
@@ -217,8 +217,8 @@ def rollback(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | No
     `show` listed for it and print `version` and `position`.
 
     `roadmap` is the ``--roadmap`` option's value, taking the roadmap a run of
-    the project would take where none is given; `task` is the task's ``N.M``,
-    ``N.M.k`` or fix line's ``N.Ma``, or a flat task's title, and `position`
+    the project would take where none is given; `task` is the task's ``N.M``
+    or split child's ``N.M.k``, or a flat task's title, and `position`
     one of the tokens `show` lists.
     Refuses through RunDataRefusal, HaltError or the configuration's
     SystemExit, which the dispatch prints as its first line on standard error

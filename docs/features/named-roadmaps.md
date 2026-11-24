@@ -28,7 +28,7 @@ The implementer's answer of each iteration is a file of the run's beside the rev
    { "roadmap_path": "my" }
    ```
 
-   The orchestrator derives your roadmap from your git identity. Move every key you kept in `<project>/.ai-factory/orchestrator.json` into this file and delete that file: where it exists the run stops at its start, naming it and the file its values move to. The machine's base keeps only the machine's keys, the Hermes instances and the Telegram credentials: every run key it holds moves into this file, and a base that still carries one stops the run at its start, naming the file the key belongs in. A project without the person's file runs on the defaults. Commit the file before the run starts. Each person has a file of their own, and a project's people share none.
+   The orchestrator derives your roadmap from your git identity. Move every key you kept in `<project>/.ai-factory/orchestrator.json` into this file, `telegram_alerts` excepted, which belongs in the machine's base, and delete that file: where it exists the run stops at its start, naming it and the file its values move to. The machine's base keeps only the machine's keys, the Hermes instances, the Telegram credentials and the Telegram alerts: every run key it holds moves into this file, and a base that still carries one stops the run at its start, naming the file the key belongs in. A project without the person's file runs on the defaults. Commit the file before the run starts. Each person has a file of their own, and a project's people share none.
 
 2. **Roadmaps** → `.ai-factory/roadmaps/`:
    - `.ai-factory/ROADMAP.md` → `.ai-factory/roadmaps/<user-slug>.md`

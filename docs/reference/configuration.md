@@ -2,11 +2,11 @@
 
 ## Configuration files
 
-Two files configure the orchestrator, and a key neither sets takes its default ([Settings keys](#settings-keys)). The machine's base holds what the machine has, the Hermes instances and the notification credentials, and a person's run settings hold every value that shapes a run. The layers, lowest to highest, are the defaults, the base and the person's file, and [A person's run settings](#a-persons-run-settings) states how they merge.
+Two files configure the orchestrator, and a key neither sets takes its default ([Settings keys](#settings-keys)). The machine's base holds what the machine has, the Hermes instances and the notifications' credentials and event types, and a person's run settings hold every value that shapes a run. The layers, lowest to highest, are the defaults, the base and the person's file, and [A person's run settings](#a-persons-run-settings) states how they merge.
 
 The orchestrator runs from a copy installed as a tool from a release tag, in an environment of its own outside every repository. The base lies outside that copy, so installing the next release leaves it as it is.
 
-The machine's base is `~/.local/state/orchestrator/orchestrator.json`, in the orchestrator's state root beside its other machine state, in a directory only its owner reads. It is optional: a machine that reaches no Hermes instance and sends no notification has none. It holds `hermes_instances`, `telegram_bot_token` and `telegram_chat_id` and nothing else:
+The machine's base is `~/.local/state/orchestrator/orchestrator.json`, in the orchestrator's state root beside its other machine state, in a directory only its owner reads. It is optional: a machine that reaches no Hermes instance and sends no notification has none. It holds `hermes_instances`, `telegram_bot_token`, `telegram_chat_id` and `telegram_alerts` and nothing else:
 
 ```json
 {
@@ -14,7 +14,8 @@ The machine's base is `~/.local/state/orchestrator/orchestrator.json`, in the or
     "hermes4": { "server": "127.0.0.1", "port": 8642, "key_file": "/path/to/hermes4.key" }
   },
   "telegram_bot_token": "1234567890:AAF...",
-  "telegram_chat_id": "-1001234567890"
+  "telegram_chat_id": "-1001234567890",
+  "telegram_alerts": ["task-fail", "stop", "done"]
 }
 ```
 
@@ -44,7 +45,7 @@ ORCHESTRATOR_CONFIG=/path/to/my-base.json orchestrator implement /path/to/projec
 | `codex_agents` | per role, below | the person's file | Model and effort of each role when the runtime is `codex`: an object keyed by role. See [Agent defaults](#agent-defaults). |
 | `telegram_bot_token` | absent | the base | The bot's credential for notifications. See [Telegram notifications](#telegram-notifications). |
 | `telegram_chat_id` | absent | the base | The chat the notifications go to. See [Telegram notifications](#telegram-notifications). |
-| `telegram_alerts` | absent, no events | the person's file | The event types the person is told of. See [Telegram notifications](#telegram-notifications). |
+| `telegram_alerts` | absent, no events | the base | The event types a run notifies on. See [Telegram notifications](#telegram-notifications). |
 
 `max_iterations`, `usage_threshold_5h`, `usage_threshold_weekly` and `enable_phase_sessions` take their defaults when no file sets them, and are validated after the merge and never converted: `max_iterations` is an integer, not a boolean, of at least 1; `usage_threshold_5h` and `usage_threshold_weekly` are finite numbers, integer or fractional, not booleans, `null` or strings, so `NaN` and `Infinity` are errors, and no range is required of them; `enable_phase_sessions` is a JSON boolean and nothing else, so `"false"`, `0` and `1` are errors. A quoted number is a string and is rejected. A violation exits naming the key, the value, the requirement and the file that supplies it, the base or the person's file. No key is required of either file: where neither supplies a key, its default stands.
 
@@ -117,7 +118,7 @@ The pre-task usage check runs for each local runtime, Claude and Codex, that any
 
 ## A person's run settings
 
-A person's run settings are the one home of every value that shapes a run: `max_iterations`, `plan_review_iterations`, `planning`, `usage_threshold_5h`, `usage_threshold_weekly`, `enable_phase_sessions`, `roadmap_path`, `runtime`, `roles`, `claude_agents`, `codex_agents` and `telegram_alerts`. They are one JSON file for each person who runs the project, `<project>/.ai-factory/run-settings/<slug>.json`, committed with the project, in the repository `.ai-factory` leads to, so that the project's history shows which executor, reviewer and limits each phase ran under and two executors can be compared on the same phases. The slug is the one `roadmap_path: "my"` derives from the git identity ([named-roadmaps.md](../features/named-roadmaps.md#what-it-is)).
+A person's run settings are the one home of every value that shapes a run: `max_iterations`, `plan_review_iterations`, `planning`, `usage_threshold_5h`, `usage_threshold_weekly`, `enable_phase_sessions`, `roadmap_path`, `runtime`, `roles`, `claude_agents` and `codex_agents`. They are one JSON file for each person who runs the project, `<project>/.ai-factory/run-settings/<slug>.json`, committed with the project, in the repository `.ai-factory` leads to, so that the project's history shows which executor, reviewer and limits each phase ran under and two executors can be compared on the same phases. The slug is the one `roadmap_path: "my"` derives from the git identity ([named-roadmaps.md](../features/named-roadmaps.md#what-it-is)).
 
 The run looks for the person's file under the slug derived as [named-roadmaps.md](../features/named-roadmaps.md#what-it-is) states, and a missing file runs on the base and the defaults. Only where `.ai-factory/run-settings/` exists and no slug can be derived does the run halt, and no other file stands in for the person's. No layer shared by the project's people stands beside the file: it is the one home of the values, and a second file would be a second home.
 
@@ -127,21 +128,20 @@ Priority, lowest to highest:
 2. The machine's base, which supplies the machine's facts alone.
 3. The person's file.
 
-Example — a person who runs their own roadmap, with the implementer on a Hermes instance, a Claude code reviewer, planning off, and a notification on a failure, a stop and the end of the run:
+Example — a person who runs their own roadmap, with the implementer on a Hermes instance, a Claude code reviewer and planning off:
 
 ```json
 {
   "roadmap_path": "my",
   "planning": false,
   "roles": { "implementer": { "runtime": "hermes", "instance": "hermes4" } },
-  "claude_agents": { "code_reviewer": { "model": "opus", "effort": "high" } },
-  "telegram_alerts": ["task-fail", "stop", "done"]
+  "claude_agents": { "code_reviewer": { "model": "opus", "effort": "high" } }
 }
 ```
 
 Everything else takes its default, and `hermes4` is an instance the base's map holds.
 
-The file refuses, each naming the file and the key: a key the configuration does not know; `hermes_instances`, which the base alone holds ([Hermes instances](#hermes-instances)); and `telegram_bot_token` and `telegram_chat_id`, the machine's credentials, which never enter a committed file. A project's `.ai-factory/orchestrator.json` is a startup error naming it and the person's file its values move to; the run never reads it.
+The file refuses, each naming the file and the key: a key the configuration does not know; `hermes_instances`, which the base alone holds ([Hermes instances](#hermes-instances)); `telegram_bot_token` and `telegram_chat_id`, the machine's credentials, which never enter a committed file; and `telegram_alerts`, the machine's list of event types, which the base alone holds. A project's `.ai-factory/orchestrator.json` is a startup error naming it and the person's file its values move to; the run never reads it.
 
 An invalid-setting diagnostic names the configuration file that supplies the effective value after the merge.
 
@@ -153,24 +153,19 @@ Merge rules:
 
 ## Telegram notifications
 
-Optional keys for sending Telegram notifications when the orchestrator halts, a task completes, or the whole run finishes. The credentials are the machine's, in the base; the event types are the person's, in the run settings:
+Optional keys for sending Telegram notifications when the orchestrator halts, a task completes, or the whole run finishes. All three are the machine's, in the base, and a person's run settings that carry any of them are a configuration error naming the file and the key:
 
 ```json
 {
   "telegram_bot_token": "1234567890:AAF...",
-  "telegram_chat_id": "-1001234567890"
-}
-```
-
-```json
-{
+  "telegram_chat_id": "-1001234567890",
   "telegram_alerts": ["task-fail", "stop", "task", "done"]
 }
 ```
 
-`telegram_bot_token` and `telegram_chat_id` are the bot's credentials. If either is empty or absent, notifications are not sent (a silent no-op, not an error). A person's file that carries either is a configuration error.
+`telegram_bot_token` and `telegram_chat_id` are the bot's credentials. If either is empty or absent, notifications are not sent (a silent no-op, not an error).
 
-`telegram_alerts` is the list of event types to notify on. Absent, it is empty and nothing is sent, so a machine with credentials in its base and a person's file without the key sends no notification. What each colour says lives in [fault-handling.md](../concepts/fault-handling.md)'s own table:
+`telegram_alerts` is the list of event types to notify on. Absent from the base, it is empty and nothing is sent, so a machine with credentials and no list sends no notification. What each colour says lives in [fault-handling.md](../concepts/fault-handling.md)'s own table:
 
 | Type | Colour |
 |---|---|

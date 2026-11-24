@@ -54,6 +54,11 @@ _IMPLEMENTER_RESULT_DIRS = (
     DISPOSITIONS_DIRNAME,
 )
 
+# The one help text for the `task` positional of `show` and `rollback`, so the
+# two cannot differ: it names a task's two forms and a flat task's title, as
+# docs/reference/run-data.md reads for `TASK`.
+_TASK_HELP = "The task's N.M or a split child's N.M.k, or a flat task's title as its line gives it"
+
 
 def _factory_tracked(project_dir: Path) -> bool:
     """Whether the repository the project's .ai-factory lies in holds at least
@@ -316,14 +321,14 @@ def cli() -> None:
     show_parser.error = _refuse_usage
     show_parser.add_argument("--project-dir", help="Path to the project directory")
     show_parser.add_argument("--roadmap", help="The roadmap to read, as the run's roadmap_path takes it")
-    show_parser.add_argument("task", nargs="?", help="The task's N.M, or a flat task's title as its line gives it")
+    show_parser.add_argument("task", nargs="?", help=_TASK_HELP)
     show_parser.add_argument("--phase", help="The phase's number")
 
     rollback_parser = subparsers.add_parser("rollback", help="Take a task back to a position show listed for it")
     rollback_parser.error = _refuse_usage
     rollback_parser.add_argument("--project-dir", help="Path to the project directory")
     rollback_parser.add_argument("--roadmap", help="The roadmap to read, as the run's roadmap_path takes it")
-    rollback_parser.add_argument("task", help="The task's N.M, or a flat task's title as its line gives it")
+    rollback_parser.add_argument("task", help=_TASK_HELP)
     rollback_parser.add_argument("position", help="The position show lists for the task")
 
     sweep_parser = subparsers.add_parser("sweep", help="Remove the run's artifacts of a phase whose every task is done")

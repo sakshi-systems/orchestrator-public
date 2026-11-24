@@ -40,6 +40,11 @@ from tests.fakes import FakeAgentBackend
 
 _ITERATION = IterationState(repository=Repository(directory=Path("project"), folder=None), base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
 _ITERATIONS = (_ITERATION,)
+_READ_SENTENCE = (
+    "Read the iteration with `git show` or `git diff` of the commits named above, "
+    "or in a worktree of your own, and never move the run's HEAD: "
+    "check out no commit or branch in the run's tree.\n"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1200,6 +1205,7 @@ def test_review_message_carries_plan_answer_and_no_previous_review_or_diff(tmp_p
         f"the base is `{iteration.base}`, the iteration's commit is `{iteration.commit}` "
         f"on the ref `{iteration.ref}`."
     ) in prompt
+    assert _READ_SENTENCE in prompt
     assert "git diff HEAD" not in prompt
     assert "## Diff against the base" not in prompt
     assert "## Plan\n\n# Plan: The work" in prompt
@@ -1235,7 +1241,9 @@ def test_the_review_message_names_each_repository_of_a_tree_of_two(tmp_path):
     first, second = sentence_of(project_state), sentence_of(other_state)
     assert first in prompt and second in prompt
     assert prompt.index(first) < prompt.index(second)  # the tree's order
-    assert prompt.index(second) < prompt.index("The plan for context is under `## Plan`.\n")
+    assert prompt.index(second) < prompt.index(_READ_SENTENCE)  # after the last repository's sentence
+    assert prompt.index(_READ_SENTENCE) < prompt.index("The plan for context is under `## Plan`.\n")
+    assert prompt.count(_READ_SENTENCE) == 1  # once for the whole message, not once per repository
     assert "the repository holding `.ai-factory`, its folder `ai/p1/`" in prompt
     assert prompt.count("to see ALL changes of ") == 2  # one sentence each, always every one
 
@@ -1271,9 +1279,38 @@ def test_re_review_message_keeps_the_quoted_obligations_and_carries_the_previous
         f"the base is `{iteration.base}`, the iteration's commit is `{iteration.commit}` "
         f"on the ref `{iteration.ref}`."
     ) in prompt
+    assert _READ_SENTENCE in prompt
     assert "git diff HEAD" not in prompt
     assert "## Diff against the base" not in prompt
     assert str(review_1) not in prompt and str(review_2) not in prompt
+
+
+def test_the_sentence_on_how_the_iteration_is_read_is_in_the_first_review_and_the_re_review(tmp_path):
+    """The sentence saying how the iteration is read — `git show` or `git diff`
+    of the commits named above, or a worktree of the reviewer's own, never
+    moving the run's HEAD — stands between the repository sentences and the
+    plan line in the first review's message and in the re-review's."""
+    plan_path = tmp_path / ".ai-factory" / "01-slug.md"
+    plan_path.write_text("# Plan")
+    review_1 = tmp_path / ".ai-factory" / "01-slug-review-1.md"
+    review_2 = tmp_path / ".ai-factory" / "01-slug-review-2.md"
+    backend = FakeAgentBackend(on_call=lambda call: "All good\n\nREVIEW_PASS", sid="sid-1")
+    pr = CodeReviewer(tmp_path, backend)
+    iteration = IterationState(repository=Repository(directory=Path("project"), folder=None), base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+
+    assert pr.review(plan_path, review_1, iteration_states=(iteration,)) is True
+    assert pr.review(plan_path, review_2, prev_review_path=review_1, iteration_states=(iteration,)) is True
+
+    repository_sentence = (
+        f"Run `git diff {iteration.base} {iteration.commit}` to see ALL changes of the project's repository: "
+        f"the base is `{iteration.base}`, the iteration's commit is `{iteration.commit}` "
+        f"on the ref `{iteration.ref}`.\n"
+    )
+    first_review_prompt, re_review_prompt = backend.calls[0].prompt, backend.calls[1].prompt
+    for prompt in (first_review_prompt, re_review_prompt):
+        assert prompt.count(_READ_SENTENCE) == 1
+        assert prompt.index(repository_sentence) < prompt.index(_READ_SENTENCE)
+        assert prompt.index(_READ_SENTENCE) < prompt.index("The plan for context is under `## Plan`.\n")
 
 
 def test_plan_messages_carry_the_task_and_the_revision_context(tmp_path):

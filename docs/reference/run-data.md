@@ -14,7 +14,7 @@ orchestrator sweep    [--project-dir DIR] [--roadmap VALUE] --phase N
 orchestrator dispose  [--project-dir DIR]
 ```
 
-`TASK` is the task's number as its contract line writes it, `N.M`, a split child's `N.M.k` or a fix line's `N.Ma`, or, for a flat task, its title exactly as its roadmap line gives it. `dispose` reads its deposit from standard input as UTF-8.
+`TASK` is the task's number as its contract line writes it, `N.M` or a split child's `N.M.k`, or, for a flat task, its title exactly as its roadmap line gives it. `dispose` reads its deposit from standard input as UTF-8.
 
 Each command exits with status `0` when it acts and prints one JSON object on standard output. It exits with status `1`, prints one line on standard error, prints nothing on standard output and changes nothing when it refuses. A refusal is any of these:
 
