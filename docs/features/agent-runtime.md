@@ -22,7 +22,7 @@ The agent retains any running cell or session identifier returned by a tool and 
 
 Role instructions preserve mandatory project-context walks, full-file reads and the obligations of the role's answer. Re-review reopens current files, quotes the current content relevant to each earlier finding and records a verdict for each finding. Review substance, [completion signals](../pipeline.md#completion-signals) and [escalation](escalation.md) retain their requirements.
 
-Structural updates follow the target project's governing documentation homes. The module map belongs in its architecture document where present; AGENTS.md and CLAUDE.md retain their established routing and symlink arrangement.
+The implementer reads the target project's architecture document where present and writes into it only what its task names, never on its own initiative; AGENTS.md and CLAUDE.md retain their established routing and symlink arrangement.
 
 Foreground completion is an instruction contract. Native settings govern local execution policy; they do not establish a universal absence of background-capable tools, an operating-system security boundary or unattended access to every plugin. Native option values remain in [Agent defaults](../reference/configuration.md#agent-defaults) and [Codex invocation forms](../reference/codex-runtime.md#invocation-forms).
 

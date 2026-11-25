@@ -16,6 +16,7 @@ class BackendCall:
     instructions: str
     session_id: str | None
     exchange: str | None = None
+    bases: tuple[str, ...] | None = None
 
 
 class FakeAgentBackend:
@@ -44,8 +45,9 @@ class FakeAgentBackend:
         instructions: str,
         session_id: str | None = None,
         exchange: str | None = None,
+        bases: tuple[str, ...] | None = None,
     ) -> tuple[str, str]:
-        call = BackendCall(role, prompt, cwd, instructions, session_id, exchange)
+        call = BackendCall(role, prompt, cwd, instructions, session_id, exchange, bases)
         self.calls.append(call)
         new_sid = self.sid or f"{role.value}-sid-{len(self.calls)}"
         self.returned.append(new_sid)

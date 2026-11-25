@@ -539,6 +539,7 @@ class CodexAgentBackend:
         instructions: str,
         session_id: str | None = None,
         exchange: str | None = None,
+        bases: tuple[str, ...] | None = None,
     ) -> tuple[str, str]:
         """Carry out the role's turn and return (final agent message, thread identity).
 

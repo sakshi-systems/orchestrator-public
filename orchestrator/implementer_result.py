@@ -10,10 +10,12 @@ from .artifact_layout import PLANS_DIRNAME, artifact_dir
 from .errors import (
     BranchNotFetchedError,
     BranchNotFromBaseError,
+    HaltError,
     LeftoverBranchNotRemovedError,
 )
 from .git_runner import _changed_paths, run_git_sync
 from .ports import ImplementerResultProtocol, Repository
+from .protocol import _read_bases
 
 
 class WorkingTreeResult:
@@ -108,9 +110,12 @@ def _lay_branch_tree(
     laid_ref: str,
     preserved: tuple[Path, ...],
     *,
+    base: str,
     as_spelled: tuple[Path, ...] = (),
 ) -> None:
-    """Lay exactly the paths his work changed, HEAD staying put.
+    """Lay exactly the paths his work changed, HEAD staying put, `base` the
+    commit the task began on in this repository, as the task's record
+    holds it.
 
     The paths to lay are those that differ between the base and his new tip,
     together with those that differ between the base and the tip the last lay
@@ -135,7 +140,6 @@ def _lay_branch_tree(
     was and its retry restores every path again, whatever the run fetched
     from origin in between.
     """
-    base = run_git_sync(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
     previous = _previous_tip(cwd, laid_ref, base)
     try:
         fetched = run_git_sync(["fetch", "--refmap=", "origin", f"refs/heads/{branch}"], cwd=cwd)
@@ -281,9 +285,19 @@ class HermesResult:
         artifacts that lie in it — and, where the tree holds two
         repositories, outside `.ai-factory` in the project's repository
         alone, kept as the project spells it wherever its link leads; a
-        branch an origin does not hold halts as the fetch fault."""
+        branch an origin does not hold halts as the fetch fault.
+
+        Each repository's base is the one the task's record holds for it,
+        read once here, so a commit that lands in a repository while the
+        run works there moves no base and adds no path to the lay; a record
+        that holds none halts, for the run writes them at the task's start
+        and their absence is a task with no record to lay from.
+        """
+        bases = _read_bases(plan_path)
+        if bases is None:
+            raise HaltError(f"The task's base is not recorded\n{plan_path}")
         name = ref_name_of(self.project_dir, plan_path)
-        for repository in self.tree:
+        for index, repository in enumerate(self.tree):
             repository_name = repository.named(name)
             as_spelled: tuple[Path, ...] = ()
             if len(self.tree) > 1 and repository.folder is None:
@@ -293,5 +307,6 @@ class HermesResult:
                 branch_of(repository_name),
                 laid_ref_of(repository_name),
                 self.preserved,
+                base=bases[index],
                 as_spelled=as_spelled,
             )

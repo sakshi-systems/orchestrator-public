@@ -19,10 +19,11 @@ from .artifact_layout import (
     implementer_answer_name,
     plan_name,
     plan_review_name,
+    sidecar_path,
     task_stem,
 )
 from .config import _ALL_ROLES, OrchestratorConfig, role_runtimes
-from .errors import EscalationError, PipelineStopError
+from .errors import EscalationError, HaltError, PipelineStopError
 from .exchange import remove_task
 from .git_runner import run_git_sync
 from .implementer_result import ref_name_of
@@ -130,9 +131,26 @@ def _git_commit(tree: tuple[Repository, ...], task_title: str) -> None:
             print(">>> WARNING: git push failed, continuing anyway.")
 
 
-def _record_planning(plan_path: Path, runtimes: dict[str, dict[str, str]], attempt: int, session_id: str | None) -> None:
+def _task_bases(tree: tuple[Repository, ...]) -> tuple[str, ...]:
+    """The commit each repository of the run's tree is at now, in the tree's
+    order — the task's base where the record holds none yet, as a start's
+    is taken. A repository whose `HEAD` cannot be read halts naming the
+    repository and git's own text."""
+    bases = []
+    for repository in tree:
+        head = run_git_sync(["rev-parse", "HEAD"], cwd=repository.directory)
+        if head.returncode != 0:
+            raise HaltError(
+                "The task's base could not be recorded\n"
+                f"{repository.label}\n{head.stderr.strip()[:500]}"
+            )
+        bases.append(head.stdout.strip())
+    return tuple(bases)
+
+
+def _record_planning(plan_path: Path, runtimes: dict[str, dict[str, str]], attempt: int, session_id: str | None, bases: tuple[str, ...]) -> None:
     """Persist pending intent and the effective continuation before invoking planning."""
-    updates = {"runtime": runtimes, "step": f"planning:{attempt}"}
+    updates = {"runtime": runtimes, "step": f"planning:{attempt}", "bases": list(bases)}
     if session_id is not None:
         updates["planner"] = session_id
     _write_sessions(plan_path, updates)
@@ -182,6 +200,21 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
 
     _check_attempt(step, counter, *_attempt_budget(step, max_iterations, config.plan_review_iterations, config.planning))
 
+    # The task's base in each repository: what the record holds, or the
+    # commit each repository is at now where it holds none — a task begun
+    # by an older run taking its base as a start does — written with the
+    # record's first write below and through every iteration kept as it is.
+    # One commit per repository of the tree, in its order: a record whose
+    # count no longer matches the tree — a task whose `.ai-factory` link
+    # changed beneath it among them — halts here, before any work is spent.
+    recorded = sessions.get("bases")
+    bases = tuple(recorded) if recorded is not None else _task_bases(tree)
+    if len(bases) != len(tree):
+        raise HaltError(
+            "The task's recorded bases do not match the run's tree\n"
+            f"{sidecar_path(plan_path)}\n{len(bases)} recorded, {len(tree)} repositories"
+        )
+
     raw_boundary = sessions.get("step", "")
     valid_boundary = _interpret_step(raw_boundary, mode.verify) is not None and _validate_sidecar_step(
         raw_boundary, seq, task.slug, plan_reviews_dir, output_dir,
@@ -194,7 +227,13 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     }[step]
     # Inferred planning is adopted by the pending write immediately before its call.
     if ("runtime" not in sessions or boundary != raw_boundary) and not (step == "plan" and not valid_boundary):
-        _write_sessions(plan_path, {"runtime": runtimes, "step": boundary})
+        _write_sessions(plan_path, {"runtime": runtimes, "step": boundary, "bases": list(bases)})
+    elif "runtime" in sessions and "bases" not in sessions:
+        # A record this run found holding no bases: it takes them on its own
+        # write, merged into the runtime it already holds. A record without
+        # runtime never takes them alone — the runtime write above carries
+        # them, so a resume never meets a bases-only record.
+        _write_sessions(plan_path, {"bases": list(bases)})
 
     # Create agents
     planner = mode.make_planner(project_dir, backend, mode.planner_prompt_name)
@@ -212,7 +251,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     # Step 1: Plan
     if step == "plan":
         print("\n>>> PLANNING...")
-        _record_planning(plan_path, runtimes, counter, planner.session_id)
+        _record_planning(plan_path, runtimes, counter, planner.session_id, bases)
         if counter > 1:
             prev_plan_review = plan_reviews_dir / plan_review_name(seq, task.slug, counter - 1)
             planner.plan(task.title, task.description, plan_path, roadmap_path=roadmap_path, line_number=task.line_number, plan_review_path=prev_plan_review)
@@ -247,7 +286,7 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
             _check_attempt("plan", attempt + 1, *_attempt_budget("plan", max_iterations, config.plan_review_iterations, config.planning))
             print(">>> Plan has issues — revising plan...")
             _write_session(plan_path, "step", f"plan_review_failed:{attempt}")
-            _record_planning(plan_path, runtimes, attempt + 1, planner.session_id)
+            _record_planning(plan_path, runtimes, attempt + 1, planner.session_id, bases)
             planner.plan(
                 task.title, task.description, plan_path,
                 plan_review_path=plan_review_path,
@@ -271,9 +310,11 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
 
         print(f"\n>>> {mode.verify.running_header} (iteration {iteration})...")
         iteration_states: list[IterationState] = []
-        for repository in tree:
+        for index, repository in enumerate(tree):
             _raise_git_failure(run_git_sync(list(repository.stage), cwd=repository.directory))
-            iteration_state = make_iteration_commit(repository, ref_name_of(project_dir, plan_path), iteration)
+            iteration_state = make_iteration_commit(
+                repository, ref_name_of(project_dir, plan_path), iteration, bases[index],
+            )
             push_iteration_ref(iteration_state)
             iteration_states.append(iteration_state)
         out_path = output_dir / (stem + mode.verify.output_suffix.format(n=iteration))

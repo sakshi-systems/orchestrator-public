@@ -28,10 +28,12 @@ def _halted(result, ref: str) -> None:
         )
 
 
-def make_iteration_commit(repository: Repository, task_name: str, iteration: int) -> IterationState:
+def make_iteration_commit(repository: Repository, task_name: str, iteration: int, base: str) -> IterationState:
     """Write the iteration's state as a commit on the task's ref in one
     repository of the run's tree, `task_name` named as that repository names
-    it — the project's own name, the folder before it in another.
+    it — the project's own name, the folder before it in another — `base`
+    the commit the task began on in that repository, as the task's record
+    holds it.
 
     The tree is the repository's own: the real index's, as the run's staging
     left it, in the project's repository, and — where the repository is one
@@ -50,11 +52,9 @@ def make_iteration_commit(repository: Repository, task_name: str, iteration: int
     ref = ref_of(repository.named(task_name))
     directory = repository.directory
 
-    base = run_git_sync(["rev-parse", "HEAD"], cwd=directory)
-    _halted(base, ref)
-    tree = _iteration_tree(repository, base.stdout.strip(), ref)
+    tree = _iteration_tree(repository, base, ref)
     commit = run_git_sync(
-        ["commit-tree", tree, "-p", base.stdout.strip(), "-m", f"{task_name}: iteration {iteration}"],
+        ["commit-tree", tree, "-p", base, "-m", f"{task_name}: iteration {iteration}"],
         cwd=directory,
     )
     _halted(commit, ref)
@@ -62,7 +62,7 @@ def make_iteration_commit(repository: Repository, task_name: str, iteration: int
     _halted(updated, ref)
     return IterationState(
         repository=repository,
-        base=base.stdout.strip(),
+        base=base,
         commit=commit.stdout.strip(),
         ref=ref,
     )

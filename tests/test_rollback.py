@@ -42,6 +42,7 @@ RECORD_ON = {
     "elapsed": "42",
     "step": "implemented:1",
     "escalation": "reviewer: a stop the position clears (reviews/01-1-1-door-review-1.md)",
+    "bases": ["the-commit-the-task-began-on"],
 }
 
 RECORD_OFF = {
@@ -50,6 +51,7 @@ RECORD_OFF = {
     "code-reviewer": "review-session",
     "elapsed": "7",
     "step": "implemented:1",
+    "bases": ["the-commit-the-task-began-on"],
     "escalation": "reviewer: a stop the position clears (reviews/01-1-1-door-review-1.md)",
 }
 
@@ -111,7 +113,10 @@ def _project(tmp_path: Path, *, record: dict | None = RECORD_ON, tree_change: bo
 
     if iteration:
         git_in(project, "add", "-A")
-        state = make_iteration_commit(Repository(directory=project, folder=None), "01-1-1-door", 1)
+        state = make_iteration_commit(
+            Repository(directory=project, folder=None), "01-1-1-door", 1,
+            git_in(project, "rev-parse", "HEAD").strip(),
+        )
         push_iteration_ref(state)
         if tree_change:
             # Work the attempt laid after its iteration commit: unstaged dirt
@@ -289,6 +294,7 @@ def test_plan_review_leaves_the_plan_and_the_tree_and_rewrites_the_record(tmp_pa
         "plan-reviewer-1": "plan-review-session",
         "elapsed": "42",
         "step": "planned:1",
+        "bases": RECORD_ON["bases"],
     }
     assert (project / ".ai-factory" / "plans" / "01-1-1-door.md").exists()  # the plan stays
     assert _factory_files(project) == {
@@ -314,6 +320,7 @@ def test_verify_keeps_the_plan_reviews_and_the_implementer_s_session(tmp_path):
         "plan-reviewer-1": "plan-review-session",
         "elapsed": "42",
         "step": "implemented:1",
+        "bases": RECORD_ON["bases"],
     }
     assert _factory_files(project) == {
         "ROADMAP.md", "plans/01-1-1-door.md", "plans/01-1-1-door.json",
@@ -333,6 +340,7 @@ def test_implement_returns_the_planning_off_record_to_planning(tmp_path):
         "runtime": RECORD_OFF["runtime"],
         "elapsed": "7",
         "step": "planning:1",
+        "bases": RECORD_OFF["bases"],
     }
     assert _factory_files(project) == {
         "ROADMAP.md", "plans/01-1-1-door.md", "plans/01-1-1-door.json",

@@ -83,6 +83,7 @@ class RoleRoutedBackend:
         instructions: str,
         session_id: str | None = None,
         exchange: str | None = None,
+        bases: tuple[str, ...] | None = None,
     ) -> tuple[str, str]:
         return self._backend_of(role).run(
             role=role,
@@ -91,4 +92,5 @@ class RoleRoutedBackend:
             instructions=instructions,
             session_id=session_id,
             exchange=exchange,
+            bases=bases,
         )

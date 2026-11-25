@@ -44,6 +44,7 @@ class HeadAgentBackend:
         instructions: str,
         session_id: str | None = None,
         exchange: str | None = None,
+        bases: tuple[str, ...] | None = None,
     ) -> tuple[str, str]:
         if exchange is None:
             raise ValueError("exchange")

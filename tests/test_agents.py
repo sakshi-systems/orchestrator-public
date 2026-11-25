@@ -1805,6 +1805,45 @@ def test_each_role_passes_the_exchange_its_artifact_gives(tmp_path):
     assert backend.calls[-1].exchange is None  # the implementer passes none
 
 
+def test_each_role_passes_the_task_s_recorded_bases(tmp_path):
+    """The record's `bases` — the commit each repository of the run's tree was
+    at when the task started — reach the backend on every role's call, in the
+    tree's order, so a runtime that works from the recorded base is handed it
+    on the planner's, the plan reviewer's, the implementer's and the code
+    reviewer's calls alike."""
+    factory = tmp_path / ".ai-factory"
+    plans = factory / "plans" / "john-doe"
+    plans.mkdir(parents=True)
+    (factory / "plan-reviews" / "john-doe").mkdir(parents=True)
+    (factory / "reviews" / "john-doe").mkdir(parents=True)
+    plan_path = plans / "01-slug.md"
+    plan_path.write_text("# Plan")
+    bases = ("0" * 40, "1" * 40)
+    plan_path.with_suffix(".json").write_text(json.dumps({"bases": list(bases)}), encoding="utf-8")
+    answer_path = factory / "reviews" / "john-doe" / "01-slug-implementer-1.md"
+    plan_review_path = factory / "plan-reviews" / "john-doe" / "01-slug-plan-review-1.md"
+    review_1 = factory / "reviews" / "john-doe" / "01-slug-review-1.md"
+    review_1.write_text("Finding one.")
+    review_2 = factory / "reviews" / "john-doe" / "01-slug-review-2.md"
+    iteration = IterationState(repository=Repository(directory=Path("project"), folder=None), base="0" * 40, commit="1" * 40, ref="refs/orchestrator-iteration/01-slug")
+    backend = FakeAgentBackend(on_call=lambda call: {
+        AgentRole.PLANNER: "# Plan\n\n## Test Command\n`true`\n",
+    }.get(call.role, "REVIEW_PASS\n" if call.role is not AgentRole.IMPLEMENTER else "Did the work.\n"))
+
+    Planner(tmp_path, backend).plan("T", "D", plan_path)
+    assert backend.calls[-1].bases == bases
+
+    PlanReviewer(tmp_path, backend).review_plan(plan_path, plan_review_path, 1)
+    assert backend.calls[-1].bases == bases
+
+    CodeReviewer(tmp_path, backend).review(plan_path, review_2, prev_review_path=review_1,
+                                           iteration_states=(iteration,))
+    assert backend.calls[-1].bases == bases
+
+    Implementer(tmp_path, backend, result=WorkingTreeResult()).implement(plan_path, answer_path)
+    assert backend.calls[-1].bases == bases
+
+
 # ---------------------------------------------------------------------------
 # SpecLayer: the plan stage without a planner
 # ---------------------------------------------------------------------------

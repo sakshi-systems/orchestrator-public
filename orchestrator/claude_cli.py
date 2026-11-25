@@ -399,6 +399,7 @@ class ClaudeAgentBackend:
         instructions: str,
         session_id: str | None = None,
         exchange: str | None = None,
+        bases: tuple[str, ...] | None = None,
     ) -> tuple[str, str]:
         settings = self.role_settings[role]
         return _run_claude(

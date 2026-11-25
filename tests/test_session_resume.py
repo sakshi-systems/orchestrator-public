@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from orchestrator.errors import HaltError
-from orchestrator.protocol import _read_sessions, _write_artifact, _write_session, _write_sessions
+from orchestrator.protocol import _read_bases, _read_sessions, _write_artifact, _write_session, _write_sessions
 from orchestrator import pipeline
 from orchestrator.agents import Planner, SpecLayer, _load_prompt
 from orchestrator.config import OrchestratorConfig, role_runtimes
@@ -47,7 +47,11 @@ INVALID_FIELDS = [
     for value in (None, "", " \t\n", 0, {}, [])
 ] + [
     ("elapsed", value) for value in (None, 0, "", "-1", "+1", "1.0", " 1", "١", "²")
-] + [("step", value) for value in (None, 0, [], {})]
+] + [("step", value) for value in (None, 0, [], {})] + [
+    ("bases", value) for value in (
+        None, "", "claude", 5, {}, [], [""], ["a", ""], ["a", 5], [5], ["a", None], [["a"]], {"a": "b"},
+    )
+]
 
 
 @pytest.mark.parametrize("key,value", INVALID_FIELDS)
@@ -169,6 +173,13 @@ def _seed(flow, record=None, *, markdown=True):
         flow.plan.with_suffix(".json").write_text(json.dumps(record))
 
 
+def _bases(flow):
+    """The task's bases as a start writes them: the commit the flow fixture's
+    single repository is at."""
+    return [subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(flow.project),
+                           capture_output=True, text=True).stdout.strip()]
+
+
 def _review(flow, number=1, *, passed=True, prefix=None):
     stem = flow.plan.stem if prefix is None else f"{prefix}-{flow.task.slug}"
     path = flow.prd / f"{stem}-plan-review-{number}.md"
@@ -256,13 +267,13 @@ def test_legacy_adoption_exposes_complete_valid_boundary_before_first_role(flow,
 
     def inspect(call):
         data = _read_sessions(f.plan)
-        assert data == {**record, "runtime": role_runtimes("claude"), "step": expected}
+        assert data == {**record, "runtime": role_runtimes("claude"), "step": expected, "bases": _bases(f)}
         raise RuntimeError("observed first role")
 
     backend = FakeAgentBackend(on_call=inspect)
     with pytest.raises(RuntimeError, match="observed first role"):
         _run(f, backend)
-    assert replacements[0] == (f.plan.with_suffix(".json"), {**record, "runtime": role_runtimes("claude"), "step": expected})
+    assert replacements[0] == (f.plan.with_suffix(".json"), {**record, "runtime": role_runtimes("claude"), "step": expected, "bases": _bases(f)})
     assert len(replacements) == 1
 
 
@@ -289,7 +300,7 @@ def test_legacy_inference_and_stale_boundaries_normalize_atomically_before_calls
 
     def inspect(call):
         data = _read_sessions(f.plan)
-        assert data == {**record, "runtime": role_runtimes("claude"), "step": expected}
+        assert data == {**record, "runtime": role_runtimes("claude"), "step": expected, "bases": _bases(f)}
         if expected.startswith("planning:"):
             _assert_planner_assignment(call, f)
             assert call.session_id == record["planner"]
@@ -303,7 +314,7 @@ def test_legacy_inference_and_stale_boundaries_normalize_atomically_before_calls
         _run(f, FakeAgentBackend(on_call=inspect), phase="competing phase")
     records = [data for _, data in replacements]
     retained = raw == "plan_review_failed:01"
-    assert records[0] == {**record, "runtime": role_runtimes("claude"), "step": raw if retained else expected}
+    assert records[0] == {**record, "runtime": role_runtimes("claude"), "step": raw if retained else expected, "bases": _bases(f)}
     assert records[-1]["step"] == expected
     assert all(data["optional"] == record["optional"] and data["elapsed"] == "007" for data in records)
 
@@ -322,12 +333,17 @@ def test_tagged_artifact_fallback_replaces_stale_boundary_before_role(flow, repl
         _review(f, passed=review)
 
     def inspect(call):
-        assert _read_sessions(f.plan) == {**record, "runtime": role_runtimes(runtime), "step": expected}
+        assert _read_sessions(f.plan) == {**record, "runtime": role_runtimes(runtime), "step": expected, "bases": _bases(f)}
         raise RuntimeError("observed tagged fallback")
 
     with pytest.raises(RuntimeError, match="observed tagged fallback"):
         _run(f, FakeAgentBackend(on_call=inspect))
-    assert replacements == [(f.plan.with_suffix(".json"), {**record, "runtime": role_runtimes(runtime), "step": expected})]
+    normalized = (f.plan.with_suffix(".json"), {**record, "runtime": role_runtimes(runtime), "step": expected, "bases": _bases(f)})
+    assert replacements[-1] == normalized
+    assert replacements[:-1] in (
+        [],  # the boundary's own write is the first
+        [(f.plan.with_suffix(".json"), {**record, "bases": _bases(f)})],  # a boundary kept as it stands takes its bases first
+    )
 
 
 @pytest.mark.parametrize("passed,role", [(True, AgentRole.IMPLEMENTER), (False, AgentRole.PLANNER)])
@@ -365,6 +381,10 @@ def test_resume_reads_a_non_ascii_plan_review_as_written(flow, monkeypatch, pass
     ("review_failed:01", False), ("test_run_failed:01", True),
 ])
 def test_valid_tagged_boundary_is_not_rewritten_before_first_role(flow, replacements, runtime, raw, test_mode):
+    """A valid tagged boundary is adopted as it stands: no boundary is
+    normalized and no runtime written before the first role — the one write
+    the record takes is its bases, which a start would have written with the
+    runtime the record already holds."""
     f = flow(runtime=runtime, test_mode=test_mode)
     record = {"runtime": runtime, "step": raw, "planner": "saved", "optional": [None, True]}
     _seed(f, record)
@@ -373,8 +393,8 @@ def test_valid_tagged_boundary_is_not_rewritten_before_first_role(flow, replacem
         (f.output / f"{f.plan.stem}{f.mode.verify.output_suffix.format(n=1)}").write_text("Actual findings")
 
     def inspect(call):
-        assert _read_sessions(f.plan) == record
-        assert replacements == []
+        assert _read_sessions(f.plan) == {**record, "bases": _bases(f)}
+        assert [record for _, record in replacements] == [{**record, "bases": _bases(f)}]
         raise RuntimeError("observed retained tagged boundary")
 
     with pytest.raises(RuntimeError, match="observed retained tagged boundary"):
@@ -750,7 +770,7 @@ def test_every_planning_call_records_current_identity_and_success_advances_befor
     assert observed[1]["plan-reviewer-1"] == "plan_reviewer-sid-2"
     assert _read_sessions(f.plan)["step"] == "done"
     pending = [record for _, record in replacements if record["step"].startswith("planning:")]
-    assert pending[0] == {"runtime": role_runtimes(runtime), "step": "planning:1", "planner": " phase identity "}
+    assert pending[0] == {"runtime": role_runtimes(runtime), "step": "planning:1", "planner": " phase identity ", "bases": _bases(f)}
     assert any(record["step"] == "planning:2" and record["planner"] == "planner-sid-1" for record in pending)
 
 
@@ -787,7 +807,7 @@ def test_failed_planning_restarts_exact_group_round_and_known_incoming_identity(
         _assert_planner_assignment(call, f)
         assert call.session_id == incoming
         disk = _read_sessions(f.plan)
-        expected = {**data, "runtime": role_runtimes(runtime), "step": f"planning:{round_number}"}
+        expected = {**data, "runtime": role_runtimes(runtime), "step": f"planning:{round_number}", "bases": _bases(f)}
         if incoming is not None:
             expected["planner"] = incoming
         assert disk == expected
@@ -838,7 +858,8 @@ def test_failed_planning_restarts_exact_group_round_and_known_incoming_identity(
         assert final["optional"] == data["optional"]
         assert final["plan-reviewer-1"] == data["plan-reviewer-1"]
         assert int(final["elapsed"]) >= 17
-    assert replacements[0][1]["step"] == f"planning:{round_number}"
+    pending_writes = [record for _, record in replacements if str(record.get("step", "")).startswith("planning:")]
+    assert pending_writes[0]["step"] == f"planning:{round_number}"
 
 
 @pytest.mark.parametrize("runtime", ["claude", "codex"])
@@ -1227,5 +1248,139 @@ def test_a_planning_off_record_past_the_first_round_halts_naming_planning(flow, 
         "Roll the record back to planning:1, which lays the spec, "
         "or set planning to true in the run settings file to continue."
     )
+    assert backend.calls == []
+    assert _snapshot(f) == before
+
+
+# ---------------------------------------------------------------------------
+# The task's base in each repository, recorded at the task's start
+# ---------------------------------------------------------------------------
+
+
+def test_read_bases_returns_the_record_s_bases_or_none(tmp_path):
+    """The record's `bases` read as a tuple, and a record that holds none —
+    absent or present — reads as None."""
+    plan = tmp_path / "01-work.md"
+    assert _read_bases(plan) is None  # no record at all
+    plan.with_suffix(".json").write_text(json.dumps({"runtime": "claude", "step": "planned:1"}))
+    assert _read_bases(plan) is None  # a record that holds no bases
+    plan.with_suffix(".json").write_text(json.dumps({
+        "runtime": "claude", "step": "planned:1", "bases": ["abc", "def"],
+    }))
+    assert _read_bases(plan) == ("abc", "def")
+
+
+def test_a_start_records_the_task_s_base_before_any_role(flow):
+    """A task begun afresh writes each repository's commit into `bases` with
+    the record's first write of runtime, before any role is called, in the
+    tree's order — the project's repository first."""
+    f = flow()
+    _seed(f, None)
+
+    def inspect(call):
+        assert _read_sessions(f.plan)["bases"] == _bases(f)
+        raise RuntimeError("observed first role")
+
+    with pytest.raises(RuntimeError, match="observed first role"):
+        _run(f, FakeAgentBackend(on_call=inspect))
+
+
+def test_a_record_found_with_runtime_and_no_bases_takes_the_head_now(flow):
+    """A task begun by an older run — a record holding runtime and no bases —
+    takes the repositories' HEAD when it is first found without one, as a
+    start does, and keeps it through the run."""
+    f = flow()
+    _seed(f, {"runtime": "claude", "step": "planned:1", "planner": "saved"})
+    _review(f)
+
+    def inspect(call):
+        assert _read_sessions(f.plan) == {
+            "runtime": "claude", "step": "planned:1", "planner": "saved", "bases": _bases(f),
+        }
+        raise RuntimeError("observed first role")
+
+    with pytest.raises(RuntimeError, match="observed first role"):
+        _run(f, FakeAgentBackend(on_call=inspect))
+
+
+def test_a_resume_keeps_the_recorded_bases_whatever_the_head_now_is(flow, monkeypatch):
+    """A record that already holds bases keeps them through the run, however
+    far the repository's HEAD has moved since the task began, and the
+    iteration's commit parents on the recorded base."""
+    f = flow()
+    recorded = _bases(f)
+    _seed(f, {"runtime": "claude", "step": "implemented:1", "bases": recorded})
+    _review(f)
+    (f.project / "a-late-commit.txt").write_text("another actor's work\n")
+    subprocess.run(["git", "add", "a-late-commit.txt"], cwd=str(f.project), check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.email=other@example.com", "-c", "user.name=Other",
+                    "commit", "-q", "-m", "another actor's commit"], cwd=str(f.project), check=True, capture_output=True)
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(f.project),
+                          capture_output=True, text=True).stdout.strip() != recorded[0]
+
+    observed = {}
+
+    def inspect(call):
+        observed["bases"] = _read_sessions(f.plan).get("bases")
+        observed["iteration_parent"] = subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", "refs/orchestrator-iteration/1-runtime-task"],
+            cwd=str(f.project), capture_output=True, text=True,
+        ).stdout.split()[1:]
+        raise RuntimeError("observed verify")
+
+    with pytest.raises(RuntimeError, match="observed verify"):
+        _run(f, FakeAgentBackend(on_call=inspect))
+    assert observed["bases"] == recorded  # whatever the HEAD now is
+    assert observed["iteration_parent"] == recorded  # the commit's parent is the recorded base
+
+
+def test_a_repository_whose_head_cannot_be_read_halts_the_start(tmp_path):
+    """A repository of the tree whose `HEAD` cannot be read — an initialized
+    repository holding no commit — halts the task before any role is called,
+    naming the repository and git's own text."""
+    subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=str(tmp_path), check=True, capture_output=True)
+    factory = tmp_path / ".ai-factory"
+    for name in ("plans", "plan-reviews", "reviews"):
+        (factory / name).mkdir(parents=True)
+    roadmap = factory / "ROADMAP.md"
+    roadmap.write_text("# Work\n\n- [ ] **Some task** — Some description\n")
+    task = parse_roadmap(roadmap).tasks[0]
+    backend = FakeAgentBackend()
+
+    with pytest.raises(HaltError) as caught:
+        process_task(
+            tmp_path, task, 1, OrchestratorConfig(3, 90, 95, False),
+            backend=backend, implementer_result=WorkingTreeResult(),
+            tree=(Repository(directory=tmp_path, folder=None),),
+        )
+
+    lines = str(caught.value).splitlines()
+    assert lines[0] == "The task's base could not be recorded"
+    assert lines[1] == "the project's repository"
+    assert lines[2].startswith("fatal:")
+    assert backend.calls == []
+    assert not (factory / "plans" / "01-some-task.json").exists()  # nothing was written
+
+
+def test_a_record_whose_bases_do_not_match_the_tree_halts_before_any_role(flow):
+    """A record holding more bases than the run's tree has repositories — a
+    sidecar written by hand, or a task whose `.ai-factory` link changed
+    beneath it — halts before any role is called, naming the record and both
+    counts, leaving the record and the tree exactly as they were."""
+    f = flow()
+    record = {"runtime": "claude", "step": "plan_reviewed", "planner": "saved",
+              "bases": ["the-first-commit", "a-second-commit"]}
+    _seed(f, record)
+    _review(f)
+    before = _snapshot(f)
+    backend = FakeAgentBackend()
+
+    with pytest.raises(HaltError) as caught:
+        _run(f, backend)
+
+    lines = str(caught.value).splitlines()
+    assert lines[0] == "The task's recorded bases do not match the run's tree"
+    assert lines[1] == str(f.plan.with_suffix(".json"))
+    assert lines[2] == "2 recorded, 1 repositories"
     assert backend.calls == []
     assert _snapshot(f) == before

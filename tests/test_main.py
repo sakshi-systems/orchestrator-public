@@ -2614,6 +2614,7 @@ def test_process_task_plan_review_failed_in_budget_revises_then_reviews_next_att
 
 
 def test_process_task_live_plan_review_exhaustion_is_a_work_failure(tmp_path, monkeypatch):
+    _flow_repo(tmp_path)
     _neutralize_side_effects(monkeypatch)
     backend = _passing_backend(plan_review_passes=False)
 

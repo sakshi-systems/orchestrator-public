@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 
 from . import git_runner
-from .errors import BaseNotOnRemoteError, NetworkError, OriginNotFetchedError
+from .errors import BaseNotOnRemoteError, HaltError, NetworkError, OriginNotFetchedError
 from .git_runner import run_git_sync
 from .ports import Repository
 
@@ -37,28 +37,22 @@ def _build_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
 
 
-def _base_on_remote(repository: Repository) -> str:
-    """Return the commit a repository of the run's tree is at, once origin is
-    known to hold it.
+def _base_on_remote(repository: Repository, base: str) -> str:
+    """Return the recorded base commit once origin is known to hold it.
 
+    The commit is the one the task's record holds for the repository, handed
+    by the caller — it is checked, never re-read from the repository's `HEAD`.
     A repository with no `origin` remote halts as BaseNotOnRemoteError, as does
     a fetched origin none of whose remote-tracking refs holds the commit — a
     commit only another remote's refs hold does not pass; a remote that cannot
     be fetched — a failed or timed-out `git fetch origin` — halts as
-    OriginNotFetchedError, and a repository with no commit at all is a defect.
-    Each halt names the repository by its label on a line of its own after the
-    first, so a stand without access to one of the tree's origins reads which
-    repository the halt is of.
+    OriginNotFetchedError. Each halt names the repository by its label on a
+    line of its own after the first, so a stand without access to one of the
+    tree's origins reads which repository the halt is of.
     """
     cwd = str(repository.directory)
     label = repository.label
-    resolved = run_git_sync(["rev-parse", "HEAD"], cwd=cwd)
-    if resolved.returncode != 0:
-        raise RuntimeError(
-            "Hermes call could not resolve the repository's base commit\n"
-            f"{resolved.stderr.strip()[:500]}"
-        )
-    commit = resolved.stdout.strip()
+    commit = base
     if run_git_sync(["remote", "get-url", "origin"], cwd=cwd).returncode != 0:
         raise BaseNotOnRemoteError(
             f"The base commit is not on the remote\n{label}\n{commit}"
@@ -90,7 +84,7 @@ def _channel_text(tree: tuple[Repository, ...], commits: tuple[str, ...]) -> str
 
     Each repository is named by its label, one sentence from one template
     whether the tree holds one repository or two, with `commits` holding the
-    base commit `_base_on_remote` found for each, in the tree's order. A URL
+    recorded base commit the call checked for each, in the tree's order. A URL
     with a scheme is named without its userinfo — everything before the last
     `@` of the authority — so no credential the URL holds reaches him as
     conversation content; a URL without a scheme, a local path or an scp form,
@@ -140,10 +134,14 @@ class HermesAgentBackend:
     through the stand's tunnel. The instance's key is read from its key file
     at call time and never appears in any message, error or evidence text. He
     works in his own clone, built from each repository of the run's tree the
-    backend is handed, so every call first checks each repository's base
-    commit on its own origin — the first failure halts — and then names each
-    repository, its origin URL without any credential it holds and that
-    commit in the assignment's channel text.
+    backend is handed, so every call first checks the task's recorded base
+    commit of each repository — the one the call is handed, the same on every
+    call of the task — on its own origin, the first failure halting, and then
+    names each repository, its origin URL without any credential it holds
+    and that commit in the assignment's channel text. A call handed no
+    recorded bases halts as a task with no record to work from, and the
+    bases pair with the tree strictly, so a tuple that does not cover the
+    whole tree fails rather than naming part of it.
     """
 
     def __init__(
@@ -204,13 +202,24 @@ class HermesAgentBackend:
         instructions: str,
         session_id: str | None = None,
         exchange: str | None = None,
+        bases: tuple[str, ...] | None = None,
     ) -> tuple[str, str]:
         key = self._read_key()
         opener = _build_opener()
-        # Each repository's base is checked on its own origin, in the tree's
-        # order, before any attempt runs: the first failure halts the call,
-        # naming the repository it failed on.
-        commits = tuple(_base_on_remote(repository) for repository in self.tree)
+        # Each repository's recorded base is checked on its own origin, in the
+        # tree's order, before any attempt runs: the first failure halts the
+        # call, naming the repository it failed on. The commits come from the
+        # record, paired with the tree in order, so every call of the task
+        # names the same base; a call that carries no record halts here — the
+        # run writes the bases at the task's start — and the pairing is
+        # strict, so a bases that does not cover the whole tree fails loudly
+        # instead of silently naming only part of it.
+        if bases is None:
+            raise HaltError("The task's base is not recorded")
+        commits = tuple(
+            _base_on_remote(repository, base)
+            for repository, base in zip(self.tree, bases, strict=True)
+        )
         assignment = f"{prompt}\n\n{_channel_text(self.tree, commits)}"
         session = session_id if session_id is not None else str(uuid.uuid4())
 

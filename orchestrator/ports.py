@@ -46,7 +46,9 @@ class AgentBackendProtocol(Protocol):
 
     Invocation faults propagate. Instructions are complete on every call; the
     backend decides whether a continuation needs them. No native tool names or
-    model/effort parameters cross this boundary.
+    model/effort parameters cross this boundary. `bases` is the task's
+    recorded base commit of each repository of the run's tree, in the tree's
+    order, or `None` where the task's record holds none.
     """
 
     def run(
@@ -58,6 +60,7 @@ class AgentBackendProtocol(Protocol):
         instructions: str,
         session_id: str | None = None,
         exchange: str | None = None,
+        bases: tuple[str, ...] | None = None,
     ) -> tuple[str, str]: ...
 
 

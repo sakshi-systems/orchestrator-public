@@ -48,18 +48,11 @@ The plan's units come in one of two shapes: a checklist's unchecked tasks (`- [ 
 - Verify functionality works
 - Fix any immediate issues
 
-**2.3: Update the project's documentation homes if project structure changed**
+**2.3: Keep the project's documentation homes in their arrangement**
 
-If during implementation:
-- New directories or modules were created
-- Project structure changed significantly (new `src/modules/`, new API routes directory, etc.)
-- New entry points or key files were added
-
-→ Enter a new module in the layer table under Dependency Rules of `.ai-factory/ARCHITECTURE.md`, with the edges it takes, where that file exists.
+→ Write into `.ai-factory/ARCHITECTURE.md` only what the unit names, never on your own initiative.
 
 → Leave `AGENTS.md` and `CLAUDE.md` in their established arrangement. Preserve the routing they already carry and any symlink between them (never replace a symlink with a regular file), and do not add a project-structure tree or entry-point table to either.
-
-**Only update if structure actually changed** — don't rewrite on every unit. Check if new directories were created that aren't in the current layer table.
 
 **2.4: Move to the next unit**
 

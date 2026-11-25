@@ -128,6 +128,10 @@ def _validate_record(data: dict[str, Any], path: Path) -> None:
             valid = isinstance(value, str) and bool(value.strip())
         elif key == "elapsed":
             valid = isinstance(value, str) and bool(value) and value.isascii() and value.isdecimal()
+        elif key == "bases":
+            valid = isinstance(value, list) and bool(value) and all(
+                isinstance(item, str) and bool(item.strip()) for item in value
+            )
         elif key == "step":
             valid = isinstance(value, str)
         if not valid:
@@ -141,6 +145,14 @@ def _read_sessions(plan_path: Path) -> dict[str, Any]:
     data = _load_sidecar(p)
     _validate_record(data, p)
     return data
+
+
+def _read_bases(plan_path: Path) -> tuple[str, ...] | None:
+    """The record's `bases` — the commit each repository of the run's tree
+    was at when the task started, in the tree's order — as a tuple, or
+    `None` where the record holds none."""
+    bases = _read_sessions(plan_path).get("bases")
+    return None if bases is None else tuple(bases)
 
 
 def _write_session(plan_path: Path, key: str, value: str) -> None:

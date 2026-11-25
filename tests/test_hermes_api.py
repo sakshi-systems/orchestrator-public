@@ -12,7 +12,7 @@ import pytest
 
 from orchestrator import git_runner
 from orchestrator import hermes_api
-from orchestrator.errors import BaseNotOnRemoteError, NetworkError, OriginNotFetchedError
+from orchestrator.errors import BaseNotOnRemoteError, HaltError, NetworkError, OriginNotFetchedError
 from orchestrator.hermes_api import HermesAgentBackend
 from orchestrator.ports import AgentRole, Repository
 from tests.conftest import git_in
@@ -163,6 +163,7 @@ def test_a_new_session_sends_the_instructions_and_returns_the_echoed_session(pro
     text, session = backend.run(
         role=AgentRole.PLANNER, prompt="Plan the task.", cwd=str(project.root),
         instructions="the role's instructions", session_id=None,
+        bases=(project.commit,),
     )
 
     assert text == "his answer"
@@ -187,6 +188,7 @@ def test_a_continued_session_sends_the_user_message_alone(project, stand, key_fi
     text, session = backend.run(
         role=AgentRole.CODE_REVIEWER, prompt="Review the changes.", cwd=str(project.root),
         instructions="the role's instructions", session_id="the-given-session",
+        bases=(project.commit,),
     )
 
     assert (text, session) == ("his answer", "the-given-session")
@@ -206,7 +208,7 @@ def test_a_refused_authorization_is_a_defect_naming_the_status_and_code(project,
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(RuntimeError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     message = str(caught.value)
     assert f"status: {status}" in message
@@ -220,7 +222,7 @@ def test_an_error_status_without_a_code_names_its_absence(project, stand, key_fi
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(RuntimeError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     assert "status: 400" in str(caught.value)
     assert "code: (none in the response)" in str(caught.value)
@@ -236,6 +238,7 @@ def test_a_5xx_is_retried_with_the_instructions_and_then_answers(project, stand,
     text, session = backend.run(
         role=AgentRole.PLAN_REVIEWER, prompt="p", cwd=str(project.root),
         instructions="i", session_id=None,
+        bases=(project.commit,),
     )
 
     assert (text, session) == ("third attempt's answer", "echoed-session")
@@ -257,6 +260,7 @@ def test_a_continued_session_s_retries_carry_no_instructions(project, stand, key
     text, session = backend.run(
         role=AgentRole.PLAN_REVIEWER, prompt="p", cwd=str(project.root),
         instructions="i", session_id="the-given-session",
+        bases=(project.commit,),
     )
 
     assert (text, session) == ("his answer", "the-given-session")
@@ -274,7 +278,7 @@ def test_a_refused_connection_persists_into_a_network_halt_and_waits_between_att
     backend = HermesAgentBackend(stand.host, stand.port, str(key_file), project.tree)
 
     with pytest.raises(NetworkError):
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     assert len(sleeps) == 2  # a wait between each of the three attempts
 
@@ -288,7 +292,7 @@ def test_a_timeout_persists_into_a_network_halt_the_stand_saw_every_attempt_of(
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(NetworkError):
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="the instructions")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="the instructions", bases=(project.commit,))
 
     stand.wait_for(3)
     assert len(stand.requests) == 3
@@ -304,7 +308,7 @@ def test_a_5xx_through_all_attempts_halts_as_a_network_failure(project, stand, k
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(NetworkError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     assert "last status: 500" in str(caught.value)
     stand.wait_for(3)
@@ -317,7 +321,7 @@ def test_an_incomplete_body_is_a_transport_failure(project, stand, key_file, mon
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(NetworkError):
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="the instructions")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="the instructions", bases=(project.commit,))
 
     stand.wait_for(3)
     assert len(stand.requests) == 3
@@ -338,7 +342,7 @@ def test_a_damaged_error_body_still_names_its_status(project, stand, key_file):
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(RuntimeError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     message = str(caught.value)
     assert "status: 401" in message
@@ -352,7 +356,7 @@ def test_an_undecodable_key_file_is_an_invalid_key(project, stand, key_file):
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(RuntimeError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     error = caught.value
     message = str(error)
@@ -392,6 +396,7 @@ def test_the_first_attempt_refused_and_the_second_answered_carries_the_instructi
         text, session = backend.run(
             role=AgentRole.PLANNER, prompt="p", cwd=str(project.root),
             instructions="the role's instructions", session_id=None,
+            bases=(project.commit,),
         )
 
         assert text == "answered on the retry"
@@ -411,7 +416,7 @@ def test_a_response_with_no_echoed_session_is_a_defect(project, stand, key_file)
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(RuntimeError, match="no session id"):
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
 
 def test_a_response_with_no_choices_is_a_defect(project, stand, key_file):
@@ -419,7 +424,7 @@ def test_a_response_with_no_choices_is_a_defect(project, stand, key_file):
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(RuntimeError, match="no choices"):
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
 
 def test_a_response_with_no_string_content_is_a_defect(project, stand, key_file):
@@ -427,14 +432,14 @@ def test_a_response_with_no_string_content_is_a_defect(project, stand, key_file)
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(RuntimeError, match="no message content"):
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
 
 def test_an_empty_answer_is_returned_as_it_is(project, stand, key_file):
     stand.reply(body=_answer(content="  \n"), session="echoed-session")
     backend = _backend(stand, key_file, project.tree)
 
-    text, _ = backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+    text, _ = backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     assert text == "  \n"
 
@@ -444,7 +449,7 @@ def test_an_unreadable_key_file_is_a_configuration_fault_naming_the_path(project
     backend = HermesAgentBackend(stand.host, stand.port, str(missing), project.tree)
 
     with pytest.raises(RuntimeError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     assert str(missing) in str(caught.value)
     assert stand.requests == []
@@ -464,7 +469,7 @@ def test_an_invalid_key_is_a_fault_naming_the_path_and_reason_and_never_the_key(
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(RuntimeError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     message = str(caught.value)
     lines = message.splitlines()
@@ -482,7 +487,7 @@ def test_a_trailing_line_break_still_works(project, stand, key_file):
     backend = _backend(stand, key_file, project.tree)
     key_file.write_text(f"{KEY}\n\n")
 
-    text, _ = backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+    text, _ = backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     assert text == "his answer"
     assert stand.requests[0].authorization == f"Bearer {KEY}"
@@ -498,7 +503,7 @@ def test_no_proxy_is_honoured_and_the_key_stays_with_the_instance(project, stand
         stand.reply(body=_answer(), session="echoed-session")
         backend = _backend(stand, key_file, project.tree)
 
-        text, _ = backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        text, _ = backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
         assert text == "his answer"
         stand.wait_for(1)
@@ -518,7 +523,7 @@ def test_a_redirect_is_a_defect_naming_its_status_and_reaches_no_other_host(proj
         backend = _backend(stand, key_file, project.tree)
 
         with pytest.raises(RuntimeError) as caught:
-            backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+            backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
         assert "status: 302" in str(caught.value)
         stand.wait_for(1)
@@ -535,7 +540,7 @@ def test_a_base_commit_no_remote_branch_holds_halts(project, stand, key_file):
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(BaseNotOnRemoteError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(commit,))
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "The base commit is not on the remote"
@@ -556,12 +561,74 @@ def test_a_base_commit_only_another_remote_holds_halts(project, stand, key_file)
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(BaseNotOnRemoteError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(commit,))
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "The base commit is not on the remote"
     assert lines[1] == "the project's repository"
     assert lines[2] == commit
+    assert stand.requests == []
+
+
+def test_a_head_past_the_recorded_base_does_not_halt_and_the_recorded_base_is_named(
+    project, stand, key_file,
+):
+    """A commit another actor made and has not pushed moves the repository's
+    `HEAD` past the task's recorded base: the call still goes through — the
+    recorded base is on origin — and the channel names the recorded base, not
+    the `HEAD` the task did not begin on."""
+    (project.root / "another-actor.txt").write_text("unpushed\n")
+    git_in(project.root, "add", "-A")
+    git_in(project.root, "commit", "-m", "another actor's work")
+    head = git_in(project.root, "rev-parse", "HEAD").strip()
+    assert head != project.commit
+    stand.reply(body=_answer(), session="echoed-session")
+    backend = _backend(stand, key_file, project.tree)
+
+    text, session = backend.run(
+        role=AgentRole.PLANNER, prompt="p", cwd=str(project.root),
+        instructions="i", session_id=None, bases=(project.commit,),
+    )
+
+    assert text == "his answer"
+    (request,) = stand.requests
+    user = request.body["messages"][-1]["content"]
+    assert f"at commit {project.commit};" in user
+    assert head not in user
+
+
+def test_a_call_without_the_task_s_recorded_bases_halts(project, stand, key_file):
+    """The port allows `bases=None` where the task's record holds none, and
+    this adapter is the one implementation that consumes the record: a call
+    carrying no bases halts — the run writes them at the task's start, so
+    their absence is a task with no record to work from — before any
+    repository is checked and before any request leaves."""
+    stand.reply(body=_answer(), session="echoed-session")
+    backend = _backend(stand, key_file, project.tree)
+
+    with pytest.raises(HaltError) as caught:
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root),
+                    instructions="i", bases=None)
+
+    assert str(caught.value) == "The task's base is not recorded"
+    assert stand.requests == []
+
+
+def test_bases_that_do_not_cover_the_tree_fail_instead_of_naming_part_of_it(project, stand, key_file):
+    """A bases shorter than the tree cannot pair with it: the call fails
+    before any request leaves, rather than silently naming only the
+    repositories the tuple covers — his clone would otherwise be built from
+    part of the tree."""
+    stand.reply(body=_answer(), session="echoed-session")
+    backend = _backend(stand, key_file, (
+        Repository(directory=project.root, folder=None),
+        Repository(directory=project.root, folder="ai/p1/"),
+    ))
+
+    with pytest.raises(ValueError, match="shorter than"):
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root),
+                    instructions="i", bases=(project.commit,))
+
     assert stand.requests == []
 
 
@@ -685,7 +752,7 @@ def test_every_role_s_channel_tells_him_where_his_clone_starts_and_to_fetch(
     stand.reply(body=_answer(), session="echoed-session")
     backend = _backend(stand, key_file, project.tree)
 
-    backend.run(role=role, prompt="the role's prompt", cwd=str(project.root), instructions="i")
+    backend.run(role=role, prompt="the role's prompt", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     (request,) = stand.requests
     user = request.body["messages"][-1]["content"]
@@ -707,7 +774,8 @@ def test_his_assignment_names_each_repository_of_the_run_s_tree(tmp_path, stand,
         Repository(directory=shared, folder="ai/p1/"),
     ))
 
-    backend.run(role=AgentRole.PLANNER, prompt="Plan the task.", cwd=str(project), instructions="i")
+    backend.run(role=AgentRole.PLANNER, prompt="Plan the task.", cwd=str(project), instructions="i",
+                bases=(git_in(project, "rev-parse", "HEAD").strip(), shared_base))
 
     (request,) = stand.requests
     user = request.body["messages"][-1]["content"]
@@ -745,7 +813,8 @@ def test_the_second_repository_s_base_is_checked_on_its_own_origin(tmp_path, sta
     ))
 
     with pytest.raises(BaseNotOnRemoteError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project), instructions="i",
+                    bases=(git_in(project, "rev-parse", "HEAD").strip(), commit))
 
     lines = str(caught.value).splitlines()
     assert lines[1] == "the repository holding `.ai-factory`, its folder `ai/p1/`"
@@ -770,7 +839,8 @@ def test_a_tree_of_two_halts_at_the_first_repository_whose_base_is_missing(tmp_p
     ))
 
     with pytest.raises(BaseNotOnRemoteError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project), instructions="i",
+                    bases=(commit, git_in(shared, "rev-parse", "HEAD").strip()))
 
     lines = str(caught.value).splitlines()
     assert lines[1] == "the project's repository"
@@ -787,7 +857,8 @@ def test_a_repository_with_no_origin_halts_at_the_first_call(tmp_path, stand, ke
     backend = _backend(stand, key_file, (Repository(directory=root, folder=None),))
 
     with pytest.raises(BaseNotOnRemoteError):
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(root), instructions="i",
+                    bases=(git_in(root, "rev-parse", "HEAD").strip(),))
 
     assert stand.requests == []
 
@@ -800,7 +871,7 @@ def test_a_remote_that_cannot_be_fetched_halts_as_its_own_fault(project, stand, 
     backend = _backend(stand, key_file, project.tree)
 
     with pytest.raises(OriginNotFetchedError) as caught:
-        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+        backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "The remote could not be fetched"
@@ -818,7 +889,7 @@ def test_a_fetch_that_times_out_halts_as_its_own_fault(project, stand, key_file,
         backend = _backend(stand, key_file, project.tree)
 
         with pytest.raises(OriginNotFetchedError) as caught:
-            backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i")
+            backend.run(role=AgentRole.PLANNER, prompt="p", cwd=str(project.root), instructions="i", bases=(project.commit,))
 
         lines = str(caught.value).splitlines()
         assert lines[0] == "The remote could not be fetched"

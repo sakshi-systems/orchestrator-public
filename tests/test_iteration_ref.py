@@ -14,7 +14,7 @@ from orchestrator import layout as layout_module
 from orchestrator import pipeline as pipeline_module
 from orchestrator import user_slug as user_slug_module
 from orchestrator.config import OrchestratorConfig
-from orchestrator.errors import IterationCommitNotMadeError, IterationRefNotPushedError, PipelineStopError
+from orchestrator.errors import HaltError, IterationCommitNotMadeError, IterationRefNotPushedError, PipelineStopError
 from orchestrator.iteration_ref import (
     make_iteration_commit,
     push_iteration_ref,
@@ -97,7 +97,7 @@ def test_the_commit_s_parent_is_the_base_and_its_tree_holds_what_the_add_stages(
     (project / ".ai-factory" / "plans" / "01-slug.json").write_text("{}")
     git_in(project, "add", "-A")
 
-    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    state = make_iteration_commit(_repository(project), "01-slug", 1, base)
 
     assert state.base == base
     assert state.ref == "refs/orchestrator-iteration/01-slug"
@@ -117,17 +117,38 @@ def test_a_second_iteration_moves_the_ref_to_a_commit_whose_parent_is_still_the_
     project, base, origin = _repo(tmp_path)
     (project / "first.txt").write_text("one\n")
     git_in(project, "add", "-A")
-    first = make_iteration_commit(_repository(project), "01-slug", 1)
+    first = make_iteration_commit(_repository(project), "01-slug", 1, base)
 
     (project / "second.txt").write_text("two\n")
     git_in(project, "add", "-A")
-    second = make_iteration_commit(_repository(project), "01-slug", 2)
+    second = make_iteration_commit(_repository(project), "01-slug", 2, base)
 
     assert second.commit != first.commit
     assert _parents_of(project, second.commit) == [second.commit, base]
     assert git_in(project, "rev-parse", "refs/orchestrator-iteration/01-slug").strip() == second.commit
     paths = _paths_of(project, second.commit)
     assert "first.txt" in paths and "second.txt" in paths  # each holds the whole state since the base
+
+
+def test_the_commit_s_parent_is_the_base_handed_in_not_the_head_now(tmp_path):
+    """A commit another actor made in the repository after the task's record
+    was written moves the iteration's parent nowhere: the commit's parent,
+    its base and the tree it is built from are the recorded base, and the
+    repository's own HEAD stays where that actor left it."""
+    project, base, origin = _repo(tmp_path)
+    (project / "another.txt").write_text("another actor's commit\n")
+    git_in(project, "add", "-A")
+    git_in(project, "commit", "-q", "-m", "another actor's commit")
+    moved = git_in(project, "rev-parse", "HEAD").strip()
+    (project / "work.txt").write_text("work\n")
+    git_in(project, "add", "-A")
+
+    state = make_iteration_commit(_repository(project), "01-slug", 1, base)
+
+    assert state.base == base
+    assert _parents_of(project, state.commit) == [state.commit, base]
+    assert "work.txt" in _paths_of(project, state.commit)
+    assert git_in(project, "rev-parse", "HEAD").strip() == moved  # HEAD does not move
 
 
 def test_a_named_roadmap_s_plan_carries_its_segment_in_the_ref(tmp_path):
@@ -138,7 +159,7 @@ def test_a_named_roadmap_s_plan_carries_its_segment_in_the_ref(tmp_path):
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
 
-    state = make_iteration_commit(_repository(project), ref_name_of(project, plan), 1)
+    state = make_iteration_commit(_repository(project), ref_name_of(project, plan), 1, base)
 
     assert state.ref == "refs/orchestrator-iteration/john-doe/01-slug"
     assert git_in(project, "rev-parse", state.ref).strip() == state.commit
@@ -152,7 +173,7 @@ def test_the_branch_s_short_name_reaches_the_branch_and_the_iteration_s_the_iter
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    state = make_iteration_commit(_repository(project), "01-slug", 1, base)
     push_iteration_ref(state)
     git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")  # a Hermes task's branch
     git_in(project, "update-ref", "refs/heads/orchestrator/01-slug", base)  # its ref in the run's clone, on another commit
@@ -163,13 +184,13 @@ def test_the_branch_s_short_name_reaches_the_branch_and_the_iteration_s_the_iter
 
 
 def test_a_held_lock_on_the_ref_halts_the_call(tmp_path):
-    project, _, origin = _repo(tmp_path)
+    project, base, origin = _repo(tmp_path)
     lock = project / ".git" / "refs" / "orchestrator-iteration" / "01-slug.lock"
     lock.parent.mkdir(parents=True)
     lock.write_text("")
 
     with pytest.raises(IterationCommitNotMadeError) as caught:
-        make_iteration_commit(_repository(project), "01-slug", 1)
+        make_iteration_commit(_repository(project), "01-slug", 1, base)
 
     lines = str(caught.value).splitlines()
     assert lines[0] == "The iteration's commit could not be made"
@@ -287,14 +308,14 @@ def test_the_push_puts_the_ref_on_origin_and_a_second_iteration_moves_it(tmp_pat
     project, base, origin = _repo(tmp_path)
     (project / "first.txt").write_text("one\n")
     git_in(project, "add", "-A")
-    first = make_iteration_commit(_repository(project), "01-slug", 1)
+    first = make_iteration_commit(_repository(project), "01-slug", 1, base)
     push_iteration_ref(first)
 
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*") == {first.ref}
 
     (project / "second.txt").write_text("two\n")
     git_in(project, "add", "-A")
-    second = make_iteration_commit(_repository(project), "01-slug", 2)
+    second = make_iteration_commit(_repository(project), "01-slug", 2, base)
     push_iteration_ref(second)
 
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*") == {second.ref}
@@ -306,7 +327,7 @@ def test_a_repository_with_no_origin_halts_the_push(tmp_path):
     git_in(project, "remote", "remove", "origin")
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    state = make_iteration_commit(_repository(project), "01-slug", 1, base)
 
     with pytest.raises(IterationRefNotPushedError) as caught:
         push_iteration_ref(state)
@@ -341,7 +362,7 @@ def test_a_push_against_an_origin_that_never_answers_halts_with_the_bound_s_text
         git_in(project, "remote", "set-url", "origin", f"http://127.0.0.1:{silent.port}/origin.git")
         (project / "work.txt").write_text("work\n")
         git_in(project, "add", "-A")
-        state = make_iteration_commit(_repository(project), "01-slug", 1)
+        state = make_iteration_commit(_repository(project), "01-slug", 1, base)
 
         with pytest.raises(IterationRefNotPushedError) as caught:
             push_iteration_ref(state)
@@ -358,7 +379,7 @@ def test_the_removal_takes_the_local_ref_the_remote_ref_and_the_task_s_branch(tm
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    state = make_iteration_commit(_repository(project), "01-slug", 1, base)
     push_iteration_ref(state)
     git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")  # a Hermes task's branch
     git_in(project, "update-ref", "refs/orchestrator-laid/01-slug", base)  # the run's own laid ref
@@ -378,7 +399,7 @@ def test_a_removal_with_no_branch_on_origin_removes_only_the_refs_silently(tmp_p
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    state = make_iteration_commit(_repository(project), "01-slug", 1, base)
     push_iteration_ref(state)
 
     remove_iteration_refs(project, _tree(project), project / ".ai-factory" / "plans" / "01-slug.md")
@@ -397,7 +418,7 @@ def test_a_ref_name_holding_a_unicode_line_boundary_is_removed_whole(tmp_path, c
     plan.write_text("# Plan\n")
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(_repository(project), ref_name_of(project, plan), 1)
+    state = make_iteration_commit(_repository(project), ref_name_of(project, plan), 1, base)
     push_iteration_ref(state)
     branch = f"refs/heads/orchestrator/a\u2028b/01-slug"
     git_in(project, "push", "-q", "origin", f"{base}:{branch}")  # a Hermes task's branch
@@ -422,11 +443,11 @@ def test_two_roadmaps_sharing_a_stem_never_share_a_ref_or_a_cleanup(tmp_path):
 
     (project / "plain.txt").write_text("plain\n")
     git_in(project, "add", "-A")
-    plain_state = make_iteration_commit(_repository(project), ref_name_of(project, plain), 1)
+    plain_state = make_iteration_commit(_repository(project), ref_name_of(project, plain), 1, base)
     push_iteration_ref(plain_state)
     (project / "named.txt").write_text("named\n")
     git_in(project, "add", "-A")
-    named_state = make_iteration_commit(_repository(project), ref_name_of(project, named), 1)
+    named_state = make_iteration_commit(_repository(project), ref_name_of(project, named), 1, base)
     push_iteration_ref(named_state)
     git_in(project, "push", "-q", "origin",
            f"{base}:refs/heads/orchestrator/01-slug",
@@ -449,7 +470,7 @@ def test_a_refusing_origin_prints_the_one_line_removes_the_local_ref_and_returns
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    state = make_iteration_commit(_repository(project), "01-slug", 1, base)
     push_iteration_ref(state)
     hook = origin / "hooks" / "pre-receive"
     hook.write_text(
@@ -479,7 +500,7 @@ def test_an_origin_that_never_answers_prints_the_one_line(tmp_path, monkeypatch,
         git_in(project, "remote", "set-url", "origin", f"http://127.0.0.1:{silent.port}/origin.git")
         (project / "work.txt").write_text("work\n")
         git_in(project, "add", "-A")
-        state = make_iteration_commit(_repository(project), "01-slug", 1)
+        state = make_iteration_commit(_repository(project), "01-slug", 1, base)
 
         remove_iteration_refs(project, _tree(project), project / ".ai-factory" / "plans" / "01-slug.md")
 
@@ -532,7 +553,7 @@ def test_a_local_removal_that_times_out_is_the_one_line_and_the_remote_still_run
     project, base, origin = _repo(tmp_path)
     (project / "work.txt").write_text("work\n")
     git_in(project, "add", "-A")
-    state = make_iteration_commit(_repository(project), "01-slug", 1)
+    state = make_iteration_commit(_repository(project), "01-slug", 1, base)
     push_iteration_ref(state)
     git_in(project, "push", "-q", "origin", f"{base}:refs/heads/orchestrator/01-slug")  # a Hermes task's branch
     assert _remote_refs(project, origin, "refs/orchestrator-iteration/*", "refs/heads/orchestrator/*") == {
@@ -711,7 +732,7 @@ def test_the_other_repository_s_iteration_commit_holds_the_folder_s_state_alone(
     git_in(shared, "add", "ai/p2/y")  # staged by another head, outside the folder
 
     other = find_run_tree(project)[1]
-    state = make_iteration_commit(other, "01-slug", 1)
+    state = make_iteration_commit(other, "01-slug", 1, shared_base)
 
     assert state.repository.directory == factory
     assert state.ref == "refs/orchestrator-iteration/ai/p1/01-slug"
@@ -734,7 +755,7 @@ def test_two_projects_of_one_repository_never_share_the_iteration_s_refs(tmp_pat
     (factory / "plans" / "01-slug.json").write_text("{}")
     git_in(factory, "add", "-A", "--", ".")
     tree = find_run_tree(project)
-    state = make_iteration_commit(tree[1], "01-slug", 1)
+    state = make_iteration_commit(tree[1], "01-slug", 1, shared_base)
     push_iteration_ref(state)
     other_ref = "refs/orchestrator-iteration/ai/p2/02-other"  # another project's task, by its folder
     other_branch = "refs/heads/orchestrator/ai/p2/02-other"
@@ -765,9 +786,9 @@ def test_a_removal_that_fails_in_each_repository_warns_once_per_repository(tmp_p
     (factory / "plans" / "01-slug.json").write_text("{}")
     git_in(factory, "add", "-A", "--", ".")
     tree = find_run_tree(project)
-    project_state = make_iteration_commit(tree[0], "01-slug", 1)
+    project_state = make_iteration_commit(tree[0], "01-slug", 1, git_in(project, "rev-parse", "HEAD").strip())
     push_iteration_ref(project_state)
-    other_state = make_iteration_commit(tree[1], "01-slug", 1)
+    other_state = make_iteration_commit(tree[1], "01-slug", 1, shared_base)
     push_iteration_ref(other_state)
     hook_text = (
         "#!/bin/sh\n"
@@ -1011,3 +1032,37 @@ def test_the_assembly_s_reads_run_in_the_target_with_git_dir_aimed_elsewhere(tmp
         assert user_slug_module.git_config_value(project, "user.email") == "test@example.com"
         with pytest.raises(ValueError, match="outside target Git worktree"):
             layout_module._external_evidence_path(project, project / "evidence.json")
+
+
+def test_the_flow_halts_where_the_tree_grew_beyond_the_recorded_bases(tmp_path, monkeypatch):
+    """A task whose record holds one base while its tree now has two
+    repositories — `.ai-factory` resolving into another repository than when
+    the task began — halts before any role is called, naming the record and
+    both counts, and neither repository's ref is made."""
+    project, shared, shared_base, shared_origin = _linked_project(tmp_path)
+    factory = project / ".ai-factory"
+    (factory / "plans" / "01-slug.json").write_text(json.dumps(
+        {"runtime": "claude", "step": "implemented:1", "bases": ["the-commit-the-task-began-on"]}
+    ))
+    (factory / "plan-reviews").mkdir()
+    (factory / "plan-reviews" / "01-slug-plan-review-1.md").write_text("PLAN_REVIEW_PASS")
+    (factory / "reviews").mkdir()
+    tree = find_run_tree(project)
+    assert len(tree) == 2
+    monkeypatch.setattr(pipeline_module, "mark_done", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline_module, "_git_commit", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline_module, "report", lambda *a, **k: None)
+
+    with pytest.raises(HaltError) as caught:
+        pipeline_module.process_task(
+            project, _TaskStub(), 1,
+            OrchestratorConfig(max_iterations=3, usage_threshold_5h=90, usage_threshold_weekly=95, enable_phase_sessions=False),
+            IMPLEMENT_MODE, backend=FakeAgentBackend(), implementer_result=WorkingTreeResult(), tree=tree,
+        )
+
+    lines = str(caught.value).splitlines()
+    assert lines[0] == "The task's recorded bases do not match the run's tree"
+    assert lines[1] == str(factory / "plans" / "01-slug.json")
+    assert lines[2] == "1 recorded, 2 repositories"
+    for repository in (project, shared):
+        assert git_in(repository, "for-each-ref", "--format=%(refname)", "refs/orchestrator-iteration/").split() == []

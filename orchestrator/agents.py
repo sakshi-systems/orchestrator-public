@@ -10,7 +10,7 @@ from pathlib import Path
 from .artifact_layout import REVIEWS_DIRNAME, REVIEW_SUFFIX, TEST_RUNS_DIRNAME, TEST_RUN_SUFFIX
 from .errors import EscalationError, HaltError
 from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, IterationState, VerifierProtocol, VerifyKind
-from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_artifact, _write_artifact, _write_session
+from .protocol import PLAN_REVIEW_PASS, _escalation_excerpt, _has_escalation, _has_signal, _read_artifact, _read_bases, _write_artifact, _write_session
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
@@ -135,6 +135,7 @@ class Planner:
             instructions=self.system_prompt,
             session_id=self.session_id,
             exchange=exchange,
+            bases=_read_bases(plan_path),
         )
         _write_session(plan_path, "planner", self.session_id)
         _write_artifact(plan_path, answer)
@@ -284,6 +285,7 @@ class CodeReviewer:
             instructions=self.system_prompt,
             session_id=self.session_id,
             exchange=_exchange_of(self.project_dir, review_path),
+            bases=_read_bases(plan_path),
         )
         _write_session(plan_path, "code-reviewer", self.session_id)
         _write_artifact(review_path, answer)
@@ -341,6 +343,7 @@ class PlanReviewer:
             instructions=self.system_prompt,
             session_id=None,
             exchange=_exchange_of(self.project_dir, review_path),
+            bases=_read_bases(plan_path),
         )
         _write_session(plan_path, f"plan-reviewer-{attempt}", sid)
         _write_artifact(review_path, answer)
@@ -430,6 +433,7 @@ class Implementer:
             cwd=str(self.project_dir),
             instructions=self.system_prompt,
             session_id=self.session_id,
+            bases=_read_bases(plan_path),
         )
         _write_session(plan_path, "implementer", self.session_id)
         _write_artifact(answer_path, answer)
