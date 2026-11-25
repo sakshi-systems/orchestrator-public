@@ -335,6 +335,7 @@ def test_run_keys_is_the_list_of_keys_a_person_s_file_holds():
         "roadmap_path",
         "runtime",
         "roles",
+        "heads",
         "claude_agents",
         "codex_agents",
     )
@@ -355,6 +356,7 @@ def test_every_run_key_is_accepted_from_the_person_s_file(tmp_path, monkeypatch)
         "roadmap_path": "roadmaps/alice.md",
         "runtime": "codex",
         "roles": {"planner": {"runtime": "codex"}},
+        "heads": {"builder": {"repository": str(tmp_path / "repo"), "owner": "alice", "folder": "01"}},
         "claude_agents": {"planner": {"model": "m1", "effort": "high"}},
         "codex_agents": {"implementer": {"model": "m2", "effort": "low"}},
     }
@@ -372,6 +374,7 @@ def test_every_run_key_is_accepted_from_the_person_s_file(tmp_path, monkeypatch)
     assert config.roadmap_path == "roadmaps/alice.md"
     assert config.runtime == "codex"
     assert config.roles == {"planner": {"runtime": "codex"}}
+    assert config.heads == settings["heads"]
     assert config.claude_agents == {"planner": {"model": "m1", "effort": "high"}}
     assert config.codex_agents == {"implementer": {"model": "m2", "effort": "low"}}
 

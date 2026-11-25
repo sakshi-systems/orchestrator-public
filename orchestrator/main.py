@@ -10,9 +10,10 @@ import signal
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
-from typing import Callable, NoReturn
+from typing import Callable, NamedTuple, NoReturn, Sequence
 
 from .agents import SpecLayer
 from .artifact_layout import (
@@ -24,8 +25,9 @@ from .artifact_layout import (
 )
 from .claude_cli import ClaudeAgentBackend
 from .codex_cli import CodexAgentBackend
+from .closure import DONE, CloseStep
 from .config import OrchestratorConfig, load_config, role_runtimes
-from .errors import EscalationError, HaltError, HeadNotReachedError, PipelineStopError, RunDataRefusal
+from .errors import EscalationError, HaltError, HeadNotReachedError, PipelineStopError, RunDataRefusal, RunStoppedError, ScenarioRefusal
 from .exchange import answer_command
 from .head_backend import HeadAgentBackend
 from .hermes_api import HermesAgentBackend
@@ -35,11 +37,14 @@ from .locator import HeadIdentity, LocatorFault, read_address
 from .role_backend import RoleRoutedBackend, backend_key
 from .layout import _artifact_subdir, _external_evidence_path, _resolve_roadmap_relpath, _tests_sibling
 from .notify import Outcome, report
-from .pipeline import IMPLEMENT_MODE, TEST_MODE, Mode, _artifact_dir, _run_dynamic_loop, process_task
-from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, Repository
+from .pipeline import CLOSURE_OWED, IMPLEMENT_MODE, NO_TASK, TEST_MODE, Mode, _artifact_dir, _run_dynamic_loop, process_task
+from .ports import AgentBackendProtocol, AgentRole, ImplementerResultProtocol, Repository, StepKindProtocol
 from .repositories import find_run_tree
 from .resume import plan_review_budget
-from .run_data import dispose, refuse, rollback, show, sweep
+from .run_data import dispose, owed_phase, refuse, rollback, show, sweep
+from .scenario_file import Cycle, Scenario, Step, StepKind, StepOption, load_scenario, refusal
+from .scenario_lookup import check_template, resolve_scenario, resolve_template
+from .scenario_run import run_scenario
 from .runtime import _handle_sigint, _run_summary, _with_caffeinate
 from .usage import _check_codex_usage_limits, _check_usage_limits
 from .user_slug import USER_SLUG_MISSING, user_slug
@@ -111,6 +116,26 @@ def _print_run_choices(config: OrchestratorConfig) -> None:
         print(f"Plan review iterations: {plan_review_budget(config.max_iterations, config.plan_review_iterations)}")
 
 
+def _check_heads_reachable(identities: Sequence[HeadIdentity]) -> None:
+    """Check that the answer command can run and read each head's address fresh, refusing as `HeadNotReachedError`."""
+    if not identities:
+        return
+    command = answer_command()
+    if not (command.is_file() and os.access(command, os.X_OK)):
+        raise HeadNotReachedError(
+            "A head could not be reached\n"
+            f"The answer command {command} does not exist or is not executable"
+        )
+    for identity in identities:
+        try:
+            read_address(identity)  # a head's address is read fresh, before any backend is built
+        except LocatorFault as fault:
+            raise HeadNotReachedError(
+                "A head could not be reached\n"
+                f"{identity.repository} {identity.owner} {identity.folder}\n{fault}"
+            ) from None
+
+
 def _make_runtime(config: OrchestratorConfig, project_dir: Path, roles: tuple[AgentRole, ...], tree: tuple[Repository, ...]) -> tuple[AgentBackendProtocol, Callable[[], None]]:
     """Construct one backend per runtime a role of the run takes and bind the pre-task usage policy.
 
@@ -123,23 +148,8 @@ def _make_runtime(config: OrchestratorConfig, project_dir: Path, roles: tuple[Ag
     for entry in runtimes.values():
         if entry["runtime"] == "head":
             head = entry["head"]
-            identity = HeadIdentity(Path(head["repository"]), head["owner"], head["folder"])
-            heads[backend_key(entry)] = identity
-    if heads:
-        command = answer_command()
-        if not (command.is_file() and os.access(command, os.X_OK)):
-            raise HeadNotReachedError(
-                "A head could not be reached\n"
-                f"The answer command {command} does not exist or is not executable"
-            )
-    for key, identity in sorted(heads.items()):
-        try:
-            read_address(identity)  # a head's address is read fresh, before any backend is built
-        except LocatorFault as fault:
-            raise HeadNotReachedError(
-                "A head could not be reached\n"
-                f"{identity.repository} {identity.owner} {identity.folder}\n{fault}"
-            ) from None
+            heads[backend_key(entry)] = _head_identity(head)
+    _check_heads_reachable([identity for _, identity in sorted(heads.items())])
     backends: dict[str, AgentBackendProtocol] = {}
     built: set[str] = set()
     for entry in runtimes.values():
@@ -181,7 +191,7 @@ def _make_runtime(config: OrchestratorConfig, project_dir: Path, roles: tuple[Ag
     return backend, usage_check
 
 
-def _test_loop(project_dir: Path, config: OrchestratorConfig) -> None:
+def _test_loop(project_dir: Path, config: OrchestratorConfig) -> str | None:
     """Write tests for all pending tasks from the roadmap's test sibling."""
     main_relpath = _resolve_roadmap_relpath(config, project_dir)
     relpath = _tests_sibling(main_relpath)
@@ -198,7 +208,7 @@ def _test_loop(project_dir: Path, config: OrchestratorConfig) -> None:
     backend, usage_check = _make_runtime(config, project_dir, mode.roles, tree)
     implementer_result = _implementer_result(config, project_dir, mode, tree)
     _print_run_choices(config)
-    _run_dynamic_loop(
+    return _run_dynamic_loop(
         project_dir, roadmap_path, config,
         lambda m, i, sid: process_task(project_dir, m, i, config, mode, phase_session_id=sid, backend=backend, implementer_result=implementer_result, tree=tree),
         mode=mode,
@@ -206,7 +216,10 @@ def _test_loop(project_dir: Path, config: OrchestratorConfig) -> None:
     )
 
 
-def _implement_loop(project_dir: Path, config: OrchestratorConfig, planner_prompt_name: str = "planner", roadmap_relpath: str | None = None) -> None:
+def _implement_loop(
+    project_dir: Path, config: OrchestratorConfig, planner_prompt_name: str = "planner", roadmap_relpath: str | None = None,
+    *, stop_for_closure: bool = False,
+) -> str | None:
     """Plan + implement all pending tasks. No review."""
     relpath = roadmap_relpath or _resolve_roadmap_relpath(config, project_dir)
     roadmap_path = project_dir / ".ai-factory" / relpath
@@ -228,40 +241,266 @@ def _implement_loop(project_dir: Path, config: OrchestratorConfig, planner_promp
     backend, usage_check = _make_runtime(config, project_dir, mode.roles, tree)
     implementer_result = _implementer_result(config, project_dir, mode, tree)
     _print_run_choices(config)
-    _run_dynamic_loop(
+    closure_owed = (lambda: owed_phase(project_dir, relpath) is not None) if stop_for_closure else None
+    return _run_dynamic_loop(
         project_dir, roadmap_path, config,
         lambda m, i, sid: process_task(project_dir, m, i, config, mode, phase_session_id=sid, backend=backend, implementer_result=implementer_result, tree=tree),
         mode=mode,
         usage_check=usage_check,
+        closure_owed=closure_owed,
     )
+
+
+class _WalkLoop(NamedTuple):
+    """A walk value's loop, by the name it has in this module, and whether the
+    loop takes the closure check."""
+
+    loop_name: str
+    closure_check: bool
+
+
+_WALK_LOOPS: dict[str, _WalkLoop] = {
+    "implement": _WalkLoop("_implement_loop", True),
+    "test": _WalkLoop("_test_loop", False),
+}
+
+
+def _walk_stops_for_closure(value: str, options: Mapping[str, str]) -> bool:
+    """Whether a walk of `value` with `options` stops before a task for a phase
+    that owes a closure: only a loop that takes the closure check does."""
+    return _WALK_LOOPS[value].closure_check and options.get("stop") == CLOSURE_OWED
+
+
+def _walk_outcomes(step: Step) -> frozenset[str]:
+    if _walk_stops_for_closure(step.value, step.options):
+        return frozenset({NO_TASK, CLOSURE_OWED})
+    return frozenset({NO_TASK})
+
+
+def _close_outcomes(step: Step) -> frozenset[str]:
+    return frozenset({DONE})
+
+
+class _KindInputs(NamedTuple):
+    """What the run holds when it builds a step kind's callable."""
+
+    project_dir: Path
+    config: OrchestratorConfig
+    template: Path | None
+    heads: Mapping[str, tuple[HeadIdentity, HeadAgentBackend]]
+
+
+class _ScenarioKind(NamedTuple):
+    """A step kind held once: the declaration the loader reads and the builder
+    of the callable the executor runs."""
+
+    step_kind: StepKind
+    build: Callable[[_KindInputs], StepKindProtocol]
+
+
+def _walk(project_dir: Path, config: OrchestratorConfig, value: str, options: Mapping[str, str]) -> str:
+    """One walk step: run the loop of the mode the step's value names over the
+    roadmap and return the outcome it ended in, ``no-task`` or
+    ``closure-owed``.
+
+    The step's ``stop`` option set to ``closure-owed`` declares the stop before
+    a task for a phase that owes a closure; only the implement loop takes it.
+    A person's stop still ends the scenario, raised before an outcome is read."""
+    record = _WALK_LOOPS[value]
+    loop = globals()[record.loop_name]
+    if record.closure_check:
+        outcome = loop(project_dir, config, stop_for_closure=_walk_stops_for_closure(value, options))
+    else:
+        outcome = loop(project_dir, config)
+    if state.stop_requested:
+        raise RunStoppedError("the person stopped the run")
+    assert outcome is not None  # a loop ends without an outcome only at a person's stop
+    return outcome
+
+
+def _build_walk(inputs: _KindInputs) -> StepKindProtocol:
+    return partial(_walk, inputs.project_dir, inputs.config)
+
+
+def _build_close(inputs: _KindInputs) -> StepKindProtocol:
+    # A close step implies close words, which imply a checked template.
+    assert inputs.template is not None
+    return CloseStep(
+        project_dir=inputs.project_dir,
+        relpath=_resolve_roadmap_relpath(inputs.config, inputs.project_dir),
+        template=inputs.template,
+        heads=inputs.heads,
+    )
+
+
+_SCENARIO_KIND_RECORDS: dict[str, _ScenarioKind] = {
+    "walk": _ScenarioKind(
+        step_kind=StepKind(
+            values=tuple(_WALK_LOOPS),
+            options={"stop": StepOption(values=(CLOSURE_OWED,), required=False)},
+            outcomes=_walk_outcomes,
+        ),
+        build=_build_walk,
+    ),
+    "close": _ScenarioKind(
+        step_kind=StepKind(
+            values=None,
+            options={"peer": StepOption(values=None, required=True)},
+            outcomes=_close_outcomes,
+        ),
+        build=_build_close,
+    ),
+}
+
+_SCENARIO_KINDS = {key: record.step_kind for key, record in _SCENARIO_KIND_RECORDS.items()}
+
+
+def _is_closure_walk(step: Step) -> bool:
+    """Whether `step` is a walk that declares the stop before a phase that owes a closure."""
+    return step.kind == "walk" and step.options.get("stop") == CLOSURE_OWED
+
+
+def _check_stop_pairs(path: Path, scenario: Scenario) -> None:
+    """Refuse a declared `closure-owed` stop that no `close` step follows in its
+    cycle, or that stands in no cycle at all."""
+    for i, item in enumerate(scenario.steps):
+        if isinstance(item, Cycle):
+            for j, member in enumerate(item.steps):
+                if _is_closure_walk(member) and not any(
+                    later.kind == "close" for later in item.steps[j + 1:]
+                ):
+                    raise refusal(
+                        path,
+                        f"steps[{i}].cycle.steps[{j}].stop: {CLOSURE_OWED!r} "
+                        "with no 'close' step after it in its cycle",
+                    )
+        elif _is_closure_walk(item):
+            raise refusal(
+                path,
+                f"steps[{i}].stop: {CLOSURE_OWED!r} declared by a walk that stands in no cycle",
+            )
+
+
+def _close_words(scenario: Scenario) -> list[tuple[str, str]]:
+    """The `(where, word)` of every head word a `close` step names, its value
+    and its `peer`, inside cycles too; empty when the scenario holds no close step."""
+    words: list[tuple[str, str]] = []
+
+    def collect(step: Step, where: str) -> None:
+        if step.kind == "close":
+            words.append((f"{where}.close", step.value))
+            words.append((f"{where}.peer", step.options["peer"]))
+
+    for i, item in enumerate(scenario.steps):
+        if isinstance(item, Cycle):
+            for j, member in enumerate(item.steps):
+                collect(member, f"steps[{i}].cycle.steps[{j}]")
+        else:
+            collect(item, f"steps[{i}]")
+    return words
+
+
+def _held_kinds(scenario: Scenario) -> set[str]:
+    """The `kind` of every step the scenario holds, inside cycles too."""
+    kinds: set[str] = set()
+    for item in scenario.steps:
+        if isinstance(item, Cycle):
+            kinds.update(member.kind for member in item.steps)
+        else:
+            kinds.add(item.kind)
+    return kinds
+
+
+def _check_close_words(path: Path, words: Sequence[tuple[str, str]], heads: Mapping[str, Mapping[str, str]]) -> None:
+    """Refuse the first head word `heads` does not map."""
+    for where, word in words:
+        if word not in heads:
+            raise refusal(path, f"{where}: {word!r} is not mapped by 'heads'")
+
+
+def _head_identity(address: Mapping[str, str]) -> HeadIdentity:
+    """The identity of the head a `heads` entry addresses."""
+    return HeadIdentity(Path(address["repository"]), address["owner"], address["folder"])
+
+
+def _run_lifecycle(
+    project_dir: Path,
+    config: OrchestratorConfig,
+    loop: Callable[[Path, OrchestratorConfig], None],
+    banner: str,
+) -> None:
+    """The run's lifecycle: reset the run's state, install the interrupt
+    handler, run the loop under the keep-awake wrapper and print the closing
+    banner with the elapsed time."""
+    state.queue_exhausted = False
+    state.config = config
+    state.project_dir = project_dir
+    state.run_started = time.monotonic()
+    state.tasks_done = 0
+    signal.signal(signal.SIGINT, _handle_sigint)
+    time_str = _with_caffeinate(loop, project_dir, config)
+    print(f"\n{'='*60}")
+    print(f"{banner} DONE — {time_str}")
+    print(f"{'='*60}")
+
+
+def _run_outcome_chain(
+    config: OrchestratorConfig,
+    project_dir: Path,
+    run: Callable[[], None],
+) -> bool:
+    """Call `run` and map its exceptions to the run's outcomes: each of a stop,
+    a halt and an escalation prints its frame, reports and exits with status 0;
+    a walk the person stopped (`RunStoppedError`) exits with status 0, prints
+    no frame and sends no report of its own: `_with_caffeinate` has printed
+    `>>> Ran for … before stopping.` before it, and the loop has reported the
+    stop except at its empty-queue early return;
+    any other exception is reported as an error and re-raised. Returns True
+    when `run` returns."""
+    try:
+        run()
+        return True
+    except PipelineStopError as e:
+        print(f"\n{'='*60}")
+        print(f"STOPPED — {e}")
+        print(f"{'='*60}")
+        msg = str(e).splitlines()[0]
+        report(config, Outcome.UNCONVERGED, project_dir.name, msg, _run_summary())
+        sys.exit(0)
+    except HaltError as e:
+        print(f"\n{'='*60}")
+        print(f"HALTED — {e}")
+        print(f"{'='*60}")
+        msg = str(e).splitlines()[0]
+        report(config, Outcome.HALTED, project_dir.name, msg, _run_summary())
+        sys.exit(0)
+    except EscalationError as e:
+        print(f"\n{'='*60}")
+        print(f"ESCALATED — {e}")
+        print(f"{'='*60}")
+        report(config, Outcome.ESCALATED, project_dir.name, None, _run_summary())
+        sys.exit(0)
+    except RunStoppedError:
+        sys.exit(0)
+    except Exception as e:
+        report(
+            config,
+            Outcome.ERRORED,
+            project_dir.name,
+            f"{type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}",
+            _run_summary(),
+        )
+        raise
 
 
 def run_implement(project_dir: Path, config: OrchestratorConfig) -> None:
     """Implement only — plan + implement tasks, no review pass."""
-    state.queue_exhausted = False
-    state.config = config
-    state.project_dir = project_dir
-    state.run_started = time.monotonic()
-    state.tasks_done = 0
-    signal.signal(signal.SIGINT, _handle_sigint)
-    time_str = _with_caffeinate(_implement_loop, project_dir, config)
-    print(f"\n{'='*60}")
-    print(f"IMPLEMENT DONE — {time_str}")
-    print(f"{'='*60}")
+    _run_lifecycle(project_dir, config, _implement_loop, "IMPLEMENT")
 
 
 def run_test(project_dir: Path, config: OrchestratorConfig) -> None:
     """Test mode — plan + implement tests, gate on real test runner output."""
-    state.queue_exhausted = False
-    state.config = config
-    state.project_dir = project_dir
-    state.run_started = time.monotonic()
-    state.tasks_done = 0
-    signal.signal(signal.SIGINT, _handle_sigint)
-    time_str = _with_caffeinate(_test_loop, project_dir, config)
-    print(f"\n{'='*60}")
-    print(f"TEST DONE — {time_str}")
-    print(f"{'='*60}")
+    _run_lifecycle(project_dir, config, _test_loop, "TEST")
 
 
 def _write_completion_proof(completion_path: Path, invocation_id: str, succeeded: bool) -> None:
@@ -308,8 +547,11 @@ def cli() -> None:
     for cmd, help_text in [
         ("implement", "Plan and implement tasks"),
         ("test", "Write tests for tasks (uses test-planner prompt)"),
+        ("run", "Run a declared scenario of steps"),
     ]:
         p = subparsers.add_parser(cmd, help=help_text)
+        if cmd == "run":
+            p.add_argument("scenario", help="The scenario's name")
         p.add_argument("project_dir", nargs="?", default=".", help="Path to the project directory")
         p.add_argument("--completion-file", help="External path for terminal completion proof")
         p.add_argument("--invocation-id", help="Canonical UUID correlated with completion proof")
@@ -403,43 +645,59 @@ def cli() -> None:
 
     completed_normally = False
     try:
+        if args.command == "run":
+            # A refused scenario starts nothing: the load, the stop pairs and
+            # the closure template are refused before the configuration is
+            # loaded, and no runtime is built. A scenario with no close step
+            # reads no template.
+            template = None
+            try:
+                resolved = resolve_scenario(args.scenario, project_dir)
+                scenario = load_scenario(resolved.path, _SCENARIO_KINDS)
+                _check_stop_pairs(resolved.path, scenario)
+                close_words = _close_words(scenario)
+                if close_words:
+                    template = resolve_template(project_dir)
+                    check_template(template)
+            except ScenarioRefusal as e:
+                refuse(e)
+            if resolved.shadows:
+                print(f"Scenario {args.scenario!r}: the project's {resolved.path} runs in place of the shipped one")
         config = load_config(project_dir=project_dir, user_slug=_run_settings_slug(project_dir))
 
-        try:
-            if args.command == "test":
-                run_test(project_dir, config)
-            else:
-                run_implement(project_dir, config)
-            completed_normally = True
-        except PipelineStopError as e:
-            print(f"\n{'='*60}")
-            print(f"STOPPED — {e}")
-            print(f"{'='*60}")
-            msg = str(e).splitlines()[0]
-            report(config, Outcome.UNCONVERGED, project_dir.name, msg, _run_summary())
-            sys.exit(0)
-        except HaltError as e:
-            print(f"\n{'='*60}")
-            print(f"HALTED — {e}")
-            print(f"{'='*60}")
-            msg = str(e).splitlines()[0]
-            report(config, Outcome.HALTED, project_dir.name, msg, _run_summary())
-            sys.exit(0)
-        except EscalationError as e:
-            print(f"\n{'='*60}")
-            print(f"ESCALATED — {e}")
-            print(f"{'='*60}")
-            report(config, Outcome.ESCALATED, project_dir.name, None, _run_summary())
-            sys.exit(0)
-        except Exception as e:
-            report(
-                config,
-                Outcome.ERRORED,
-                project_dir.name,
-                f"{type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}",
-                _run_summary(),
-            )
-            raise
+        if args.command == "run":
+            heads: dict[str, tuple[HeadIdentity, HeadAgentBackend]] = {}
+            if close_words:
+                # The one scenario refusal that follows the configuration: the
+                # heads a close step names are the person's, and it comes
+                # before any runtime is built.
+                try:
+                    _check_close_words(resolved.path, close_words, config.heads)
+                except ScenarioRefusal as e:
+                    refuse(e)
+                for word in sorted({word for _, word in close_words}):
+                    identity = _head_identity(config.heads[word])
+                    heads[word] = (identity, HeadAgentBackend(identity))
+
+            def scenario_loop(p: Path, c: OrchestratorConfig) -> None:
+                # The heads a close step names are reached before any step runs.
+                _check_heads_reachable([identity for identity, _ in heads.values()])
+                # One callable per kind the scenario holds, built from the
+                # kinds' records: a scenario with no close step builds no close
+                # callable. The close step resolves the roadmap here, inside
+                # the run, so a halt there ends like any other halt.
+                inputs = _KindInputs(project_dir, config, template, heads)
+                kinds: dict[str, StepKindProtocol] = {
+                    kind: _SCENARIO_KIND_RECORDS[kind].build(inputs) for kind in _held_kinds(scenario)
+                }
+                run_scenario(scenario, kinds)
+
+            run = lambda: _run_lifecycle(project_dir, config, scenario_loop, "SCENARIO")
+        elif args.command == "test":
+            run = lambda: run_test(project_dir, config)
+        else:
+            run = lambda: run_implement(project_dir, config)
+        completed_normally = _run_outcome_chain(config, project_dir, run)
     finally:
         if completion_path is not None:
             try:

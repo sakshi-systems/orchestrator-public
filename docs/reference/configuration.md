@@ -40,6 +40,7 @@ ORCHESTRATOR_CONFIG=/path/to/my-base.json orchestrator implement /path/to/projec
 | `roadmap_path` | absent | the person's file | Which roadmap the orchestrator reads. See [named-roadmaps.md](../features/named-roadmaps.md). |
 | `runtime` | `claude` | the person's file | Optional runtime selector: exactly `claude` or `codex`. It is the default for every role of the run. See [Runtime selection](../features/agent-runtime.md#runtime-selection). |
 | `roles` | absent | the person's file | The runtime of each role of the run that does not take the default: an object keyed by role. See [A role's runtime](#a-roles-runtime). |
+| `heads` | absent | the person's file | The address of each head a scenario's close step names, by the word the scenario writes: an object keyed by word. See [A scenario's heads](#a-scenarios-heads). |
 | `hermes_instances` | absent | the base | The map of Hermes instances a role may name, in the base only. See [Hermes instances](#hermes-instances). |
 | `claude_agents` | per role, below | the person's file | Model and effort of each role when the runtime is `claude`: an object keyed by role. See [Agent defaults](#agent-defaults). |
 | `codex_agents` | per role, below | the person's file | Model and effort of each role when the runtime is `codex`: an object keyed by role. See [Agent defaults](#agent-defaults). |
@@ -112,13 +113,30 @@ A head's address lives where the role is named, in the person's run settings. It
 
 The pre-task usage check runs for each local runtime, Claude and Codex, that any role of the run takes, a head counting as the runtime its address names; a Hermes instance adds none ([Usage limits](../features/usage-limits.md#selected-pre-task-check)).
 
+## A scenario's heads
+
+`heads` is an object that maps the words a scenario's `close` step and its `peer` key name to the heads they stand for ([The scenario engine reference](scenario-engine.md#the-file)). A word is a non-empty string without whitespace. Its value is a head's address, `{"repository": <path>, "owner": <slug>, "folder": <NN>}`, in the shape a role's `head` takes, so a scenario carries no machine path and can ship:
+
+```json
+{
+  "heads": {
+    "builder": { "repository": "/path/to/repo", "owner": "alice", "folder": "01" },
+    "razor": { "repository": "/path/to/repo", "owner": "alice", "folder": "02" }
+  }
+}
+```
+
+`heads` is validated after the merge, like `roles`: a value that is not an object, an empty word or one holding whitespace, an address that does not hold exactly `repository`, `owner` and `folder`, a `repository` that is not an absolute path the filesystem can name, and an `owner` or `folder` that is not a single path component are each a configuration error naming the file that supplies the value. A person's file that carries `heads` replaces it wholesale, as every key does.
+
+A run reads the address of each head its scenario's close steps name, fresh, before any step, and checks that the answer command exists, as for a head that takes a role (A head takes a role of the run); an address the locator cannot read halts the run before any step. A word the scenario names and `heads` does not hold is refused at the start. The shipped `implement` scenario names `builder` and `razor`, so it refuses to start unless `heads` maps both; `orchestrator implement`, `orchestrator run test` and a scenario with no close step read no `heads`. A head's address lives in the person's file, and the pitfall of a role's address holds here too: the file is committed and the `repository` path names the person's directory.
+
 ## Hermes instances
 
 `hermes_instances` is an object in the machine's base, `~/.local/state/orchestrator/orchestrator.json`, and only there: a person's run settings that carry it are a configuration error naming the file and the key. It maps an instance's name to `{"server", "port", "key_file"}`, the server to reach, its port and the path of the file holding the key that opens his API. The key stays in its file and is never printed or copied. The file holds one key: surrounding whitespace and a trailing line break are ignored, and a file with no key, with whitespace, a line break or another control character inside the key, or with a character outside latin-1 is a configuration fault that names the file and never the key, raised before any request. The values are the stand's and are written in no repository.
 
 ## A person's run settings
 
-A person's run settings are the one home of every value that shapes a run: `max_iterations`, `plan_review_iterations`, `planning`, `usage_threshold_5h`, `usage_threshold_weekly`, `enable_phase_sessions`, `roadmap_path`, `runtime`, `roles`, `claude_agents` and `codex_agents`. They are one JSON file for each person who runs the project, `<project>/.ai-factory/run-settings/<slug>.json`, committed with the project, in the repository `.ai-factory` leads to, so that the project's history shows which executor, reviewer and limits each phase ran under and two executors can be compared on the same phases. The slug is the one `roadmap_path: "my"` derives from the git identity ([named-roadmaps.md](../features/named-roadmaps.md#what-it-is)).
+A person's run settings are the one home of every value that shapes a run: `max_iterations`, `plan_review_iterations`, `planning`, `usage_threshold_5h`, `usage_threshold_weekly`, `enable_phase_sessions`, `roadmap_path`, `runtime`, `roles`, `heads`, `claude_agents` and `codex_agents`. They are one JSON file for each person who runs the project, `<project>/.ai-factory/run-settings/<slug>.json`, committed with the project, in the repository `.ai-factory` leads to, so that the project's history shows which executor, reviewer and limits each phase ran under and two executors can be compared on the same phases. The slug is the one `roadmap_path: "my"` derives from the git identity ([named-roadmaps.md](../features/named-roadmaps.md#what-it-is)).
 
 The run looks for the person's file under the slug derived as [named-roadmaps.md](../features/named-roadmaps.md#what-it-is) states, and a missing file runs on the base and the defaults. Only where `.ai-factory/run-settings/` exists and no slug can be derived does the run halt, and no other file stands in for the person's. No layer shared by the project's people stands beside the file: it is the one home of the values, and a second file would be a second home.
 

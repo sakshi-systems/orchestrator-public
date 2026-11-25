@@ -19,13 +19,15 @@ from orchestrator import pipeline as pipeline_module
 from orchestrator import usage as usage_module
 from orchestrator import user_slug as user_slug_module
 from orchestrator.agents import REVIEW_VERIFY, TEST_RUN_VERIFY, Planner, SpecLayer
-from orchestrator.errors import EscalationError, HaltError, HeadNotReachedError, PipelineStopError, RateLimitError
+from orchestrator.errors import EscalationError, HaltError, HeadNotReachedError, PipelineStopError, RateLimitError, RunStoppedError
 from orchestrator.config import OrchestratorConfig, load_config, role_runtimes
 from orchestrator.layout import _artifact_subdir, _resolve_roadmap_relpath, _tests_sibling
 from orchestrator.notify import Outcome
 from orchestrator.protocol import _read_sessions
 from orchestrator.pipeline import (
+    CLOSURE_OWED,
     IMPLEMENT_MODE,
+    NO_TASK,
     TEST_MODE,
     _artifact_dir,
     _next_number,
@@ -869,6 +871,17 @@ def test_cli_escalation_error_routes_to_escalated_with_no_detail(monkeypatch):
     assert recorded[-1] == (Outcome.ESCALATED, None)
 
 
+def test_cli_run_stopped_error_exits_zero_and_reports_nothing(monkeypatch, capsys):
+    """Should exit 0 without a report or a frame when run_implement raises RunStoppedError —
+    the loop already reported the stop."""
+    recorded = _run_cli_with(monkeypatch, RunStoppedError("the person stopped the run"))
+    with pytest.raises(SystemExit) as caught:
+        main_module.cli()
+    assert caught.value.code == 0
+    assert recorded == []
+    assert "=" * 60 not in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # _check_usage_limits raises HaltError over a threshold
 # ---------------------------------------------------------------------------
@@ -1556,7 +1569,7 @@ def test_loops_construct_one_backend_and_forward_it(tmp_path, monkeypatch, loop_
         make_calls.append((c, p, roles, tree))
         return real_make_runtime(c, p, roles, tree)
 
-    def capture_loop(project_dir, roadmap_path, config, process_fn, mode, *, usage_check):
+    def capture_loop(project_dir, roadmap_path, config, process_fn, mode, *, usage_check, **k):
         captured.update(process_fn=process_fn, mode=mode, usage_check=usage_check)
 
     monkeypatch.setattr(main_module, "_make_runtime", make_runtime)
@@ -1702,7 +1715,7 @@ def _capture_loop_mode(monkeypatch, project_dir):
     monkeypatch.setattr(main_module, "_make_runtime", lambda c, p, roles, tree: (FakeAgentBackend(), lambda: None))
     monkeypatch.setattr(
         main_module, "_run_dynamic_loop",
-        lambda project_dir, roadmap_path, config, process_fn, *, mode, usage_check: captured.update(mode=mode),
+        lambda project_dir, roadmap_path, config, process_fn, *, mode, usage_check, **k: captured.update(mode=mode),
     )
     _write_loop_roadmaps(project_dir)
     return captured
@@ -1747,7 +1760,7 @@ def _capture_loop_assembly(monkeypatch, project_dir):
     monkeypatch.setattr(main_module, "_check_codex_usage_limits", _unexpected_runtime)
     monkeypatch.setattr(
         main_module, "_run_dynamic_loop",
-        lambda project_dir, roadmap_path, config, process_fn, *, mode, usage_check:
+        lambda project_dir, roadmap_path, config, process_fn, *, mode, usage_check, **k:
         captured.update(mode=mode, config=config, usage_check=usage_check),
     )
     _write_loop_roadmaps(project_dir)
@@ -3826,8 +3839,7 @@ def test_every_role_reaches_its_own_backend_through_one_routed_assembly(tmp_path
     from tests.conftest import bounded_sleep
 
     head_identity = HeadIdentity(repository=repository, owner="max", folder="r-d")
-    answer_paths = exchange_paths(repository, AgentRole.CODE_REVIEWER,
-                                  "reviews/john-doe/01-slug-review-1")
+    answer_paths = exchange_paths(repository, "reviews/john-doe", "code_reviewer-01-slug-review-1")
 
     class _DepositingSend:
         def __init__(self):
@@ -3870,3 +3882,192 @@ def test_every_role_reaches_its_own_backend_through_one_routed_assembly(tmp_path
     assert sender.calls == [head_identity]  # the call reached the head's backend, once
     assert text == "the head's answer"
     assert session == "max/r-d"
+
+
+# ---------------------------------------------------------------------------
+# `run` — a scenario of task walks
+# ---------------------------------------------------------------------------
+
+
+def _scenario_cli(env, monkeypatch, name, proof=None):
+    monkeypatch.setattr(sys, "argv", [
+        "orchestrator", "run", name, str(env.project),
+        "--completion-file", str(proof or env.proof), "--invocation-id", COMPLETION_ID,
+    ])
+    return main_module.cli()
+
+
+def _write_scenario(env, name, text):
+    path = env.project / ".ai-factory" / "scenarios" / f"{name}.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_run_scenario_stop_in_first_walk_starts_no_second_walk(completion_env, monkeypatch, capsys):
+    env = completion_env
+    _write_scenario(env, "two", "steps:\n  - walk: implement\n  - walk: implement\n")
+    roadmap = _completion_roadmap(env, content="- [ ] **First** — one\n- [ ] **Second** — two\n")
+
+    def stop(project, task, mode):
+        mark_done(roadmap, task)
+        main_module.state.stop_requested = True
+
+    env.process = stop
+    with pytest.raises(SystemExit) as caught:
+        _scenario_cli(env, monkeypatch, "two")
+    assert caught.value.code == 0
+    assert env.events == ["constructor", "quota", "process"]
+    assert env.reports == [Outcome.MANUAL_STOP]
+    _assert_completion(env, "FAIL")
+    assert "SCENARIO DONE" not in capsys.readouterr().out
+
+
+def test_run_scenario_notices_a_project_file_shadowing_a_shipped_one(completion_env, monkeypatch, capsys):
+    env = completion_env
+    path = _write_scenario(env, "implement", "steps:\n  - walk: implement\n")
+    _completion_roadmap(env)
+    _scenario_cli(env, monkeypatch, "implement")
+    out = capsys.readouterr().out
+    assert f"the project's {path} runs in place of the shipped one" in out
+
+
+@pytest.mark.parametrize("refusal", ["invalid-key", "unknown-name"])
+def test_run_scenario_refusal_starts_nothing(completion_env, monkeypatch, capsys, refusal):
+    env = completion_env
+    _completion_roadmap(env)
+    loaded = []
+    monkeypatch.setattr(main_module, "load_config", lambda *a, **kw: loaded.append(1))
+    if refusal == "invalid-key":
+        path = _write_scenario(env, "bad", "steps:\n  - walk: deploy\n")
+        name = "bad"
+    else:
+        name = "absent"
+    with pytest.raises(SystemExit) as caught:
+        _scenario_cli(env, monkeypatch, name)
+    assert caught.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert len(lines) == 1
+    if refusal == "invalid-key":
+        assert str(path) in lines[0] and "walk" in lines[0]
+    else:
+        assert "'absent'" in lines[0] and ".ai-factory" in lines[0]
+    assert loaded == []
+    assert env.events == []
+    _assert_completion(env, "FAIL")
+
+
+@pytest.mark.parametrize("mode", ["implement", "test"])
+@pytest.mark.parametrize("stopped", [False, True])
+def test_run_shipped_scenario_proof_follows_the_walk(completion_env, monkeypatch, capsys, mode, stopped):
+    env = completion_env
+    roadmap = _completion_roadmap(env, mode, content="- [ ] **First** — one\n- [ ] **Second** — two\n")
+    if mode == "implement":
+        env.config = dataclasses.replace(env.config, heads={
+            word: {"repository": str(env.project), "owner": "o", "folder": word}
+            for word in ("builder", "razor")
+        })
+        monkeypatch.setattr(main_module, "_check_heads_reachable", lambda identities: None)
+
+    def finish(project, task, effective_mode):
+        mark_done(roadmap, task)
+        if stopped:
+            main_module.state.stop_requested = True
+
+    env.process = finish
+    if stopped:
+        with pytest.raises(SystemExit) as caught:
+            _scenario_cli(env, monkeypatch, mode)
+        assert caught.value.code == 0
+        assert env.reports == [Outcome.MANUAL_STOP]
+        _assert_completion(env, "FAIL")
+        assert "SCENARIO DONE" not in capsys.readouterr().out
+    else:
+        assert _scenario_cli(env, monkeypatch, mode) is None
+        assert env.reports == [Outcome.RUN_DONE]
+        _assert_completion(env, "SUCCESS")
+        assert "SCENARIO DONE" in capsys.readouterr().out
+
+
+def test_run_close_step_with_unresolvable_roadmap_reports_halted(completion_env, monkeypatch, capsys):
+    env = completion_env
+    env.config = dataclasses.replace(env.config, roadmap_path="my", heads={
+        word: {"repository": str(env.project), "owner": "o", "folder": word}
+        for word in ("builder", "razor")
+    })
+    monkeypatch.setattr(main_module, "_check_heads_reachable", lambda identities: None)
+    with pytest.raises(SystemExit) as caught:
+        _scenario_cli(env, monkeypatch, "implement")
+    assert caught.value.code == 0
+    assert env.reports == [Outcome.HALTED]
+    assert "HALTED" in capsys.readouterr().out
+    _assert_completion(env, "FAIL")
+
+
+# The walk's closure check: where a phase owes a closure the walk ends
+# `closure-owed` before it tests the queue for emptiness, so a run that
+# resumes on, or finishes, the last task of a phase never ends `no-task`
+# with the closure undone.
+
+
+@pytest.fixture
+def closure_walk(tmp_path, monkeypatch):
+    from orchestrator import state
+
+    project = tmp_path / "target"
+    project.mkdir()
+    subprocess.run(["git", "init", "-q", str(project)], check=True, capture_output=True)
+    roadmap_path = project / ".ai-factory" / "ROADMAP.md"
+    roadmap_path.parent.mkdir()
+    reported = []
+    monkeypatch.setattr(state, "stop_requested", False)
+    monkeypatch.setattr(state, "queue_exhausted", False)
+    monkeypatch.setattr(pipeline_module, "report", lambda config, outcome, *a: reported.append(outcome))
+
+    def walk(roadmap, process_fn, closure_owed):
+        roadmap_path.write_text(roadmap, encoding="utf-8")
+        return pipeline_module._run_dynamic_loop(
+            project, roadmap_path, _flow_config(), process_fn, IMPLEMENT_MODE,
+            usage_check=lambda: None, closure_owed=closure_owed,
+        )
+
+    return SimpleNamespace(walk=walk, roadmap_path=roadmap_path, reported=reported, state=state)
+
+
+def test_a_walk_over_a_done_queue_ends_closure_owed_at_startup(closure_walk):
+    calls = []
+
+    result = closure_walk.walk(
+        "## Phase 1 — the phase\n\n- [x] **1.1 — Alpha** — done\n",
+        lambda *args: calls.append(args),
+        lambda: True,
+    )
+
+    assert result == CLOSURE_OWED
+    assert result != NO_TASK
+    assert Outcome.RUN_DONE not in closure_walk.reported
+    assert closure_walk.state.queue_exhausted is False
+    assert calls == []
+
+
+def test_a_walk_whose_last_task_leaves_a_closure_owed_ends_closure_owed(closure_walk):
+    owed = {"now": False}
+    calls = []
+
+    def process(task, index, phase_session_id):
+        calls.append(task.title)
+        mark_done(closure_walk.roadmap_path, task)
+        owed["now"] = True
+
+    result = closure_walk.walk(
+        "## Phase 1 — the phase\n\n- [ ] **1.1 — Alpha** — open\n",
+        process,
+        lambda: owed["now"],
+    )
+
+    assert result == CLOSURE_OWED
+    assert calls == ["1.1 — Alpha"]
+    assert Outcome.RUN_DONE not in closure_walk.reported
+    assert closure_walk.state.queue_exhausted is False

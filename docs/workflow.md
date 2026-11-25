@@ -25,7 +25,7 @@ Once the roadmap is ready:
 orchestrator implement /path/to/project
 ```
 
-The orchestrator processes tasks one at a time: plan → plan review → implementation → code review → commit, the stages a project sets ([Pipeline](pipeline.md#planning-is-a-stage-a-project-can-switch-off)). Each task is marked `[x]` after it completes.
+The orchestrator processes tasks one at a time: plan → plan review → implementation → code review → commit, the stages a project sets ([Pipeline](pipeline.md#planning-is-a-stage-a-project-can-switch-off)). Each task is marked `[x]` after it completes. `orchestrator run implement /path/to/project` runs the same flow as the one step of a scenario, and a project's own scenarios add steps around it ([The scenario engine](features/scenario-engine.md)).
 
 If the reviewer's signature does not appear within the iteration limit, the orchestrator stops with artifacts left on disk — what that means and how to work through it is described in [non-convergence.md](concepts/non-convergence.md).
 

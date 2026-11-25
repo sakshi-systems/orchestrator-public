@@ -69,6 +69,16 @@ class HeadNotReachedError(HaltError):
     or the courier could not deliver the call's message to it."""
 
 
+class ClosureLeftUndisposedError(HaltError):
+    """Raised when a phase's closure is answered but some of the phase's
+    deferred observations still have no disposition, so the run cannot go on
+    past the phase.
+
+    The first line is the fixed clause; the phase and each undisposed entry id
+    go on later lines.
+    """
+
+
 class RunDataRefusal(Exception):
     """Raised when a command over a run's data refuses what it was asked for.
 
@@ -76,6 +86,35 @@ class RunDataRefusal(Exception):
     a run, a refusal answers a command — printed as its first line on standard
     error with exit status 1, and nothing on standard output. The behaviour is
     docs/features/run-data.md; the values live in docs/reference/run-data.md.
+    """
+
+
+class ScenarioRefusal(Exception):
+    """Raised when a scenario name cannot be resolved or its file is refused at load.
+
+    A deliberate sibling of the halt, never a HaltError subclass: a halt ends
+    a run, a refusal answers a command. Its first line names what is refused:
+    for a refusal at load, the scenario file and the key it concerns; for a
+    refusal of a name, the name and, for a name that resolves to no file, both
+    places it looked. The command prints that line on standard error and
+    exits with status 1, before any step starts. The behaviour is
+    docs/features/scenario-engine.md; the values live in
+    docs/reference/scenario-engine.md.
+    """
+
+
+class RunStoppedError(Exception):
+    """Raised when a walk step returns after the person's stop, so the scenario
+    ends there and no later step starts.
+
+    A person's stop ends the scenario with no frame and no report of the
+    outcome chain's own. `_with_caffeinate` (orchestrator/runtime.py) has
+    already printed `>>> Ran for … before stopping.` before the chain exits.
+    The loop (the dynamic loop in orchestrator/pipeline.py) reports the stop
+    when it reaches its end after its `while` loop; at its empty-queue early
+    return it reports none. A deliberate sibling of the halt, never a
+    HaltError subclass: a halt sends a notification of its own. The behaviour
+    is docs/features/scenario-engine.md.
     """
 
 

@@ -8,7 +8,6 @@ import pytest
 
 from orchestrator import answer, exchange
 from orchestrator.exchange import deposit, exchange_paths, remove_call, remove_task
-from orchestrator.ports import AgentRole
 
 
 @pytest.fixture
@@ -27,7 +26,7 @@ def test_the_paths_sit_under_the_digest_of_the_resolved_project(tmp_path, root):
     project.mkdir()
     resolved = project.resolve()
 
-    paths = exchange_paths(project, AgentRole.CODE_REVIEWER, "reviews/john-doe/01-slug-review-1")
+    paths = exchange_paths(project, "reviews/john-doe", "code_reviewer-01-slug-review-1")
 
     digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()
     assert paths.message == root / digest / "reviews/john-doe" / "code_reviewer-01-slug-review-1.message.md"

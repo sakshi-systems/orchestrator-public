@@ -38,17 +38,14 @@ def _digest_of(project_dir: Path) -> str:
     return hashlib.sha256(str(project_dir.resolve()).encode("utf-8")).hexdigest()
 
 
-def exchange_paths(project_dir: Path, role: AgentRole, exchange: str) -> ExchangePaths:
+def exchange_paths(project_dir: Path, directory: str, stem: str) -> ExchangePaths:
     """A call's three files under the project's exchange directory.
 
-    The directory is `~/.local/state/orchestrator/exchanges/<digest>/`, the
-    digest of the project's resolved path; the files sit in the exchange's
-    directory part and are named `<role value>-<last segment>` with the
-    suffixes `.message.md`, `.sent` and `.answer`.
+    The files sit under `~/.local/state/orchestrator/exchanges/<digest>/<directory>/`,
+    the digest being that of the project's resolved path, and are named
+    `<stem>` plus the suffixes `.message.md`, `.sent` and `.answer`.
     """
-    directory, _, last = exchange.rpartition("/")
     base = _ROOT / _digest_of(project_dir) / directory
-    stem = f"{role.value}-{last}"
     return ExchangePaths(
         message=base / f"{stem}.message.md",
         sent=base / f"{stem}.sent",

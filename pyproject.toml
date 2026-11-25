@@ -1,9 +1,11 @@
 [project]
 name = "orchestrator"
-version = "0.13.0"
+version = "0.14.0"
 description = "Generic AI agent orchestrator — plans, implements, and reviews tasks from a roadmap"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "ruamel-yaml==0.19.1",
+]
 
 [build-system]
 requires = ["hatchling"]

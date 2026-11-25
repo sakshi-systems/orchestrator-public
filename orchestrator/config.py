@@ -30,6 +30,7 @@ class OrchestratorConfig:
     plan_review_iterations: int | None = None
     planning: bool = True
     roles: dict[str, dict[str, str]] = field(default_factory=dict)
+    heads: dict[str, dict[str, str]] = field(default_factory=dict)
     hermes_instances: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
@@ -49,6 +50,7 @@ RUN_KEYS = (
     "roadmap_path",
     "runtime",
     "roles",
+    "heads",
     "claude_agents",
     "codex_agents",
 )
@@ -103,6 +105,22 @@ def _validate_agent_block(key: str, block: object, path: Path) -> dict[str, dict
     return block
 
 
+def _validate_head_address(head: object, prefix: str) -> None:
+    """Validate a head's `{repository, owner, folder}` address under the caller's diagnostic prefix."""
+    if not isinstance(head, dict) or set(head) != {"repository", "owner", "folder"}:
+        raise SystemExit(f"{prefix}: {head!r} (must hold exactly 'repository', 'owner' and 'folder')")
+    for field in ("repository", "owner", "folder"):
+        if not isinstance(head[field], str) or not head[field]:
+            raise SystemExit(f"{prefix}: {field} must be a nonempty string")
+    if not Path(head["repository"]).is_absolute():
+        raise SystemExit(f"{prefix}: repository must be an absolute path")
+    if not is_path_text(head["repository"]):
+        raise SystemExit(f"{prefix}: repository must be a path the filesystem can name")
+    for field in ("owner", "folder"):
+        if not is_single_component(head[field]):
+            raise SystemExit(f"{prefix}: {field} must be a single path component")
+
+
 def _validate_roles(block: object, path: Path, hermes_instances: Mapping[str, object]) -> dict[str, dict[str, str]]:
     """Validate the effective `roles` object without adding defaults or changing values."""
     if not isinstance(block, dict):
@@ -134,34 +152,7 @@ def _validate_roles(block: object, path: Path, hermes_instances: Mapping[str, ob
         if runtime == "head":
             if role == "implementer":
                 raise SystemExit(f"Invalid 'roles' role 'implementer' in {path}: a head cannot take the implementer")
-            head = value.get("head")
-            if not isinstance(head, dict) or set(head) != {"repository", "owner", "folder"}:
-                raise SystemExit(
-                    f"Invalid 'roles' role {role!r} field 'head' in {path}: {head!r} "
-                    "(must hold exactly 'repository', 'owner' and 'folder')"
-                )
-            for field in ("repository", "owner", "folder"):
-                if not isinstance(head[field], str) or not head[field]:
-                    raise SystemExit(
-                        f"Invalid 'roles' role {role!r} field 'head' in {path}: "
-                        f"{field} must be a nonempty string"
-                    )
-            if not Path(head["repository"]).is_absolute():
-                raise SystemExit(
-                    f"Invalid 'roles' role {role!r} field 'head' in {path}: "
-                    f"repository must be an absolute path"
-                )
-            if not is_path_text(head["repository"]):
-                raise SystemExit(
-                    f"Invalid 'roles' role {role!r} field 'head' in {path}: "
-                    f"repository must be a path the filesystem can name"
-                )
-            for field in ("owner", "folder"):
-                if not is_single_component(head[field]):
-                    raise SystemExit(
-                        f"Invalid 'roles' role {role!r} field 'head' in {path}: "
-                        f"{field} must be a single path component"
-                    )
+            _validate_head_address(value.get("head"), f"Invalid 'roles' role {role!r} field 'head' in {path}")
             continue
         if runtime == "hermes":
             instance = value.get("instance")
@@ -178,6 +169,19 @@ def _validate_roles(block: object, path: Path, hermes_instances: Mapping[str, ob
             raise SystemExit(
                 f"Invalid 'roles' role {role!r} field 'runtime' in {path}: {runtime!r} (must be 'claude' or 'codex')"
             )
+    return block
+
+
+def _validate_heads(block: object, path: Path) -> dict[str, dict[str, str]]:
+    """Validate the effective `heads` object without adding defaults or changing values."""
+    if not isinstance(block, dict):
+        raise SystemExit(f"Invalid 'heads' in {path}: {block!r} (must be an object)")
+    for word, address in block.items():
+        if not word or any(ch.isspace() for ch in word):
+            raise SystemExit(
+                f"Invalid 'heads' word {word!r} in {path} (must be a non-empty string without whitespace)"
+            )
+        _validate_head_address(address, f"Invalid 'heads' word {word!r} in {path}")
     return block
 
 
@@ -355,6 +359,7 @@ def load_config(project_dir: Path | None = None, user_slug: str | None = None) -
 
     hermes_instances = _validate_hermes_instances(data.get("hermes_instances", {}), path)
     roles = _validate_roles(data.get("roles", {}), person_path, hermes_instances)
+    heads = _validate_heads(data.get("heads", {}), person_path)
 
     plan_review_iterations = None
     if "plan_review_iterations" in data:
@@ -409,6 +414,7 @@ def load_config(project_dir: Path | None = None, user_slug: str | None = None) -
         usage_threshold_weekly=thresholds["usage_threshold_weekly"],
         enable_phase_sessions=enable_phase_sessions,
         roles=roles,
+        heads=heads,
         hermes_instances=hermes_instances,
         telegram_bot_token=data.get("telegram_bot_token") or None,
         telegram_chat_id=data.get("telegram_chat_id") or None,

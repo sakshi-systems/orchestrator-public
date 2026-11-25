@@ -171,7 +171,7 @@ def show(config: OrchestratorConfig, project_dir: Path, *, roadmap: str | None =
         under_phase = [entry for entry in listed.tasks if entry.phase == number]
         if not under_phase:
             raise RunDataRefusal(f"No phase {number} in the roadmap")
-        shown = _phase_object(project_dir, relpath, number, under_phase)
+        shown = phase_object(project_dir, relpath, number, under_phase)
     else:
         shown = _task_object(project_dir, relpath, find_task(listed.tasks, task))
     _print_object(shown)
@@ -625,7 +625,7 @@ def _task_object(project_dir: Path, relpath: str, task: Task) -> dict:
     }
 
 
-def _phase_object(project_dir: Path, relpath: str, phase: int, tasks: list[Task]) -> dict:
+def phase_object(project_dir: Path, relpath: str, phase: int, tasks: list[Task]) -> dict:
     """A phase's object: every task the roadmap lists under the phase heading,
     each with its standing, its escalation and its deferred observations."""
     listed = []
@@ -647,6 +647,56 @@ def _phase_object(project_dir: Path, relpath: str, phase: int, tasks: list[Task]
         "phase": phase,
         "tasks": listed,
     }
+
+
+def _phase_tasks(project_dir: Path, relpath: str) -> dict[int, list[Task]]:
+    """The roadmap's tasks grouped by the phase they sit under, the phases in
+    the order they first appear; a task under a section that names no phase is
+    left out. The roadmap is read with everything past a ``---STOP---``
+    breakpoint, as `show` reads it."""
+    listed = parse_roadmap(project_dir / ".ai-factory" / relpath, keep_after_breakpoint=True)
+    grouped: dict[int, list[Task]] = {}
+    for task in listed.tasks:
+        if task.phase is not None:
+            grouped.setdefault(task.phase, []).append(task)
+    return grouped
+
+
+def _undisposed(project_dir: Path, relpath: str, phase: int, tasks: list[Task]) -> list[str]:
+    """The entry ids of the phase's deferred observations that have no
+    disposition, over the phase object's tasks and observations in order."""
+    shown = phase_object(project_dir, relpath, phase, tasks)
+    return [
+        entry["entry"]
+        for listed in shown["tasks"]
+        for entry in listed["observations"]
+        if entry["disposition"] is None
+    ]
+
+
+def undisposed_entries(project_dir: Path, relpath: str, phase: int) -> list[str]:
+    """The entry ids of the phase's deferred observations that have no
+    disposition, in the phase object's order; empty where the phase has no
+    tasks."""
+    return _undisposed(project_dir, relpath, phase, _phase_tasks(project_dir, relpath).get(phase, []))
+
+
+def owed_phase(project_dir: Path, relpath: str) -> int | None:
+    """The first phase, in the order the phases first appear in the roadmap,
+    that owes a closure, or None where none does.
+
+    A phase owes a closure when every one of its tasks is done and at least
+    one of its deferred observations has no disposition. The roadmap is read
+    with ``keep_after_breakpoint=True``, so a phase half run to a
+    ``---STOP---`` breakpoint, whose later tasks are still open, is not
+    counted as done. A wholly done phase owes a closure whatever its age. A
+    phase with an open task is skipped without its observations being read.
+    A missing roadmap file is the caller's to handle.
+    """
+    for phase, tasks in _phase_tasks(project_dir, relpath).items():
+        if all(task.done for task in tasks) and _undisposed(project_dir, relpath, phase, tasks):
+            return phase
+    return None
 
 
 def _observations(project_dir: Path, segment: str | None, group: TaskGroup | None, rounds: list[tuple[str, int, Path, str]]) -> list[dict]:

@@ -2,7 +2,7 @@
 
 ## When it fires
 
-An agent — planner, plan-reviewer, implementer, or reviewer — stops the run immediately, before exhausting its iteration budget, when its own mandated output cannot honestly be produced without a decision outside its authority: the scope of a neighboring task, the ratified spec above the current phase, or a deadlock between two agents that no document resolves (see [non-convergence.md](../concepts/non-convergence.md) for the shape of that deadlock).
+An agent — planner, plan-reviewer, implementer, or reviewer — stops the run immediately, before exhausting its iteration budget, when its own mandated output cannot honestly be produced without a decision outside its authority: the scope of a neighboring task, the ratified spec above the current phase, or a deadlock between two agents that no document resolves (see [non-convergence.md](../concepts/non-convergence.md) for the shape of that deadlock). The responsible head of a scenario's close step stops the scenario the same way: its answer ends in `ESCALATION` ([The closure of a phase](phase-closure.md#how-the-step-ends)).
 
 ## What it is not
 
@@ -14,7 +14,7 @@ The escalating agent names the missing decision and its options; it never picks 
 
 ## How it is signalled
 
-The agent signals this by ending its answer with `ESCALATION` as the last line, and the run writes the answer as the artifact it is already producing — the plan file for the planner, the implementer's answer file for the implementer, the plan-review or review file for the two reviewers (see [pipeline.md](../pipeline.md#completion-signals) for the shared signal protocol). The section above that line carries the missing decision and its options in full.
+The agent signals this by ending its answer with `ESCALATION` as the last line, and the run writes the answer as the artifact it is already producing — the plan file for the planner, the implementer's answer file for the implementer, the plan-review or review file for the two reviewers (see [pipeline.md](../pipeline.md#completion-signals) for the shared signal protocol). A phase's closure signals it in the answer the responsible head deposits, which the close step reads as a role's answer is read ([The closure of a phase](phase-closure.md#how-the-step-ends)). The section above that line carries the missing decision and its options in full.
 
 ## What happens next
 

@@ -1,0 +1,9 @@
+# The implement flow, and the closure of each phase that owes one
+steps:
+  - cycle:
+      until: no-task
+      steps:
+        - walk: implement
+          stop: closure-owed
+        - close: builder
+          peer: razor

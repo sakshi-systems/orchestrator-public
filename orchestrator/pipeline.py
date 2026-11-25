@@ -36,6 +36,10 @@ from .roadmap import mark_done, parse_roadmap
 from .runtime import _run_summary
 from . import state
 
+# The outcomes a walk ends in; a person's stop ends it with None.
+NO_TASK = "no-task"
+CLOSURE_OWED = "closure-owed"
+
 
 def _make_llm_planner(project_dir: Path, backend: AgentBackendProtocol, prompt_name: str) -> PlannerProtocol:
     """The plan stage with a planner: plan in a session of its own."""
@@ -355,11 +359,23 @@ def process_task(project_dir: Path, task, task_index: int, config: OrchestratorC
     return planner.session_id
 
 
-def _run_dynamic_loop(project_dir: Path, roadmap_path: Path, config: OrchestratorConfig, process_fn, mode: Mode, *, usage_check: Callable[[], None]) -> None:
-    """Dynamically re-scan the roadmap before each task, always running the first unchecked one."""
+def _run_dynamic_loop(
+    project_dir: Path, roadmap_path: Path, config: OrchestratorConfig, process_fn, mode: Mode, *,
+    usage_check: Callable[[], None], closure_owed: Callable[[], bool] | None = None,
+) -> str | None:
+    """Dynamically re-scan the roadmap before each task, always running the first unchecked one.
+
+    Returns the outcome the walk ended in: ``NO_TASK`` when the queue is empty,
+    ``CLOSURE_OWED`` when ``closure_owed`` is given and reports a phase that owes
+    a closure (checked before every task, startup included, and before the
+    empty-queue test), and ``None`` when a person stopped the run.
+    """
     plans_dir = _artifact_dir(project_dir, mode, PLANS_DIRNAME)
     plans_dir.mkdir(parents=True, exist_ok=True)
     phase_sessions_enabled = config.enable_phase_sessions
+
+    if closure_owed is not None and not state.stop_requested and closure_owed():
+        return CLOSURE_OWED
 
     # Startup summary (printed once)
     result = parse_roadmap(roadmap_path)
@@ -367,8 +383,10 @@ def _run_dynamic_loop(project_dir: Path, roadmap_path: Path, config: Orchestrato
     if not pending:
         if not state.stop_requested:
             state.queue_exhausted = True
+            if closure_owed is not None:
+                report(config, Outcome.RUN_DONE, project_dir.name, None, _run_summary())
         print("All tasks are done!")
-        return
+        return NO_TASK
     if result.breakpoint_hit:
         total = len(result.tasks) + result.tasks_after_breakpoint
         print(f"Found {len(pending)} pending tasks out of {total} total (stopped at breakpoint — {result.tasks_after_breakpoint} tasks after marker not queued).")
@@ -380,13 +398,15 @@ def _run_dynamic_loop(project_dir: Path, roadmap_path: Path, config: Orchestrato
     last_signature: tuple[str, str] | None = None
 
     while not state.stop_requested:
+        if closure_owed is not None and closure_owed():
+            return CLOSURE_OWED
         result = parse_roadmap(roadmap_path)
         pending = [m for m in result.tasks if not m.done]
         if not pending:
             if not state.stop_requested:
                 state.queue_exhausted = True
             report(config, Outcome.RUN_DONE, project_dir.name, None, _run_summary())
-            break
+            return NO_TASK
 
         task = pending[0]
         signature = (task.title, task.description)
@@ -411,3 +431,4 @@ def _run_dynamic_loop(project_dir: Path, roadmap_path: Path, config: Orchestrato
     if state.stop_requested:
         print("\n>>> Stop requested — halting.")
         report(config, Outcome.MANUAL_STOP, project_dir.name, None, _run_summary())
+    return None

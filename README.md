@@ -30,8 +30,9 @@ Two files configure a run. The machine's base, `~/.local/state/orchestrator/orch
 |---------|-------------|
 | `orchestrator implement /path/to/project` | Plans and implements every pending task |
 | `orchestrator test /path/to/project` | Writes tests for the tasks in `ROADMAP_TESTS.md` |
+| `orchestrator run SCENARIO /path/to/project` | Runs a declared scenario of steps beside the two modes above |
 
-Without a mode the orchestrator runs `implement` on the current directory. [Test mode](docs/features/test-mode.md) describes the second mode.
+Without a mode the orchestrator runs `implement` on the current directory. [Test mode](docs/features/test-mode.md) describes the second mode, and [The scenario engine](docs/features/scenario-engine.md) the declared files that `run` takes.
 
 ## Documentation
 

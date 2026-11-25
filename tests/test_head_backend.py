@@ -72,7 +72,7 @@ def _run(backend, project, exchange_name=EXCHANGE):
 
 
 def _paths_of(project):
-    return exchange_paths(project, AgentRole.CODE_REVIEWER, EXCHANGE)
+    return exchange_paths(project, "reviews/john-doe", "code_reviewer-01-slug-review-1")
 
 
 def test_a_call_without_an_exchange_raises_value_error(tmp_path):
@@ -346,8 +346,8 @@ def _run_task(project, config, backend):
 
 def test_a_task_started_afresh_sends_its_messages_and_returns_no_leftover(tmp_path, monkeypatch):
     project, config = _flow_project(tmp_path, monkeypatch)
-    plan_answer = exchange.exchange_paths(project, AgentRole.PLANNER, "plans/01-some-task")
-    review_answer = exchange.exchange_paths(project, AgentRole.CODE_REVIEWER, "reviews/01-some-task-review-1")
+    plan_answer = exchange.exchange_paths(project, "plans", "planner-01-some-task")
+    review_answer = exchange.exchange_paths(project, "reviews", "code_reviewer-01-some-task-review-1")
     for paths, text in ((plan_answer, "an earlier attempt's plan"), (review_answer, "an earlier attempt's review")):
         paths.message.parent.mkdir(parents=True, exist_ok=True)
         exchange.deposit(paths.answer, text)
@@ -387,7 +387,7 @@ def test_a_task_that_stops_keeps_the_leftovers_of_its_waiting_call(tmp_path, mon
     with pytest.raises(HeadNotReachedError):
         _run_task(project, config, _routed(project, Unreached()))
 
-    paths = exchange.exchange_paths(project, AgentRole.CODE_REVIEWER, "reviews/01-some-task-review-1")
+    paths = exchange.exchange_paths(project, "reviews", "code_reviewer-01-some-task-review-1")
     assert paths.message.exists()  # kept: the task did not end
     assert not paths.sent.exists() and not paths.answer.exists()
 
@@ -413,7 +413,7 @@ def test_a_resume_with_a_record_returns_a_deposit_already_made(tmp_path, monkeyp
         "PLAN_REVIEW_PASS", encoding="utf-8")
     (project / ".ai-factory" / "reviews" / "01-some-task-implementer-1.md").write_text(
         "Did the work.", encoding="utf-8")
-    paths = exchange.exchange_paths(project, AgentRole.CODE_REVIEWER, "reviews/01-some-task-review-1")
+    paths = exchange.exchange_paths(project, "reviews", "code_reviewer-01-some-task-review-1")
     paths.message.parent.mkdir(parents=True, exist_ok=True)
     exchange.deposit(paths.answer, "REVIEW_PASS\n")  # a deposit the earlier attempt never read
     sender = DepositingSender(replies=[])
@@ -453,13 +453,13 @@ def test_the_task_end_sweep_removes_an_orphan_call_and_keeps_another_task_s(tmp_
         "PLAN_REVIEW_PASS", encoding="utf-8")
     (project / ".ai-factory" / "reviews" / "01-some-task-implementer-1.md").write_text(
         "Did the work.", encoding="utf-8")
-    orphan = exchange.exchange_paths(project, AgentRole.CODE_REVIEWER, "reviews/01-some-task-review-9")
-    other = exchange.exchange_paths(project, AgentRole.CODE_REVIEWER, "reviews/02-other-task-review-1")
+    orphan = exchange.exchange_paths(project, "reviews", "code_reviewer-01-some-task-review-9")
+    other = exchange.exchange_paths(project, "reviews", "code_reviewer-02-other-task-review-1")
     for paths in (orphan, other):
         paths.message.parent.mkdir(parents=True, exist_ok=True)
         paths.message.write_text("an earlier message", encoding="utf-8")
         paths.sent.write_text("", encoding="utf-8")
-    paths = exchange.exchange_paths(project, AgentRole.CODE_REVIEWER, "reviews/01-some-task-review-1")
+    paths = exchange.exchange_paths(project, "reviews", "code_reviewer-01-some-task-review-1")
     paths.message.parent.mkdir(parents=True, exist_ok=True)
     deposit(paths.answer, "REVIEW_PASS\n")  # the review this resume does take
 

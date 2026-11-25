@@ -6,6 +6,7 @@ from __future__ import annotations
 import shlex
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from . import courier
@@ -17,9 +18,25 @@ from .ports import AgentRole
 _COVER = "You have a new assignment: read {message} and follow its instructions."
 
 
+def how_to_answer(paths: ExchangePaths) -> str:
+    """The `## How to answer` section of a message: the answer command and the
+    call's answer path, the one home of the recipe's wording."""
+    command = answer_command()
+    return "\n".join([
+        "## How to answer",
+        "",
+        f"Give the result to the command "
+        f"`{shlex.quote(str(command))} {shlex.quote(str(paths.answer))}`, whose input is the "
+        "result: pipe the result into that command. Your reply in this chat is not read. "
+        "Where the instructions call the last message the result, this is it.",
+        "",
+    ])
+
+
 class HeadAgentBackend:
-    """A head as a runtime a role takes: one message per call, one wait for its
-    answer, and no process of the run's own.
+    """A head as a runtime a role takes, or as the callee of a call that is no
+    role: one message per call, one wait for its answer, and no process of the
+    run's own.
 
     The call's three files live under the exchange placement. A call whose
     answer is already deposited returns it with no send; a call whose marker
@@ -48,12 +65,34 @@ class HeadAgentBackend:
     ) -> tuple[str, str]:
         if exchange is None:
             raise ValueError("exchange")
-        paths = exchange_paths(Path(cwd), role, exchange)
+        directory, _, last = exchange.rpartition("/")
+        paths = exchange_paths(Path(cwd), directory, f"{role.value}-{last}")
+        return self._exchange(paths, lambda: self._write_message(paths, role, prompt, cwd, instructions))
+
+    def call(
+        self,
+        project_dir: Path,
+        directory: str,
+        stem: str,
+        compose: Callable[[ExchangePaths], str],
+    ) -> tuple[str, str]:
+        """The call of a head that is no role: `compose` builds the whole
+        message from the call's paths, and the result is the answer's text with
+        the session identity."""
+        paths = exchange_paths(project_dir, directory, stem)
+
+        def write() -> None:
+            paths.message.write_text(compose(paths), encoding="utf-8")
+
+        return self._exchange(paths, write)
+
+    def _exchange(self, paths: ExchangePaths, write: Callable[[], None]) -> tuple[str, str]:
+        """Send and wait: `write` lays the message down on a fresh call only."""
         paths.message.parent.mkdir(parents=True, exist_ok=True)
         if paths.answer.exists():
             return self._answer_of(paths)
         if not paths.sent.exists():
-            self._write_message(paths, role, prompt, cwd, instructions)
+            write()
             result = self._send(self.identity, _COVER.format(message=paths.message))
             if not result.sent:
                 raise HeadNotReachedError(
@@ -75,8 +114,7 @@ class HeadAgentBackend:
 
     def _write_message(self, paths: ExchangePaths, role: AgentRole, prompt: str,
                        cwd: str, instructions: str) -> None:
-        command = answer_command()
-        message = "\n".join([
+        head = "\n".join([
             f"This is the {role.value} turn of the project at {cwd}.",
             "",
             "## Instructions",
@@ -87,12 +125,5 @@ class HeadAgentBackend:
             "",
             prompt,
             "",
-            "## How to answer",
-            "",
-            f"Give the result to the command "
-            f"`{shlex.quote(str(command))} {shlex.quote(str(paths.answer))}`, whose input is the "
-            "result: pipe the result into that command. Your reply in this chat is not read. "
-            "Where the instructions call the last message the result, this is it.",
-            "",
         ])
-        paths.message.write_text(message, encoding="utf-8")
+        paths.message.write_text(head + "\n" + how_to_answer(paths), encoding="utf-8")

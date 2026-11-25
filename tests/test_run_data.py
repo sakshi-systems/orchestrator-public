@@ -9,6 +9,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from orchestrator.observations import entry_id
+from orchestrator.run_data import owed_phase, undisposed_entries
+from tests import closure_tree
 from tests.conftest import git_environment
 from tests.run_tree import build
 
@@ -933,3 +936,88 @@ def test_a_halt_over_the_run_s_data_prints_its_first_line(tmp_path):
     assert result.returncode == 1
     assert result.stdout == b""
     assert result.stderr == b"Sidecar is not valid JSON\n"
+
+
+# The owed rule: a phase owes a closure when every task of it is done and an
+# entry of its deferred observations has no disposition.
+
+
+def _owed_project(tmp_path, *phases):
+    return closure_tree.build(tmp_path, roadmap=closure_tree.phase_roadmap(*phases))
+
+
+def test_a_phase_half_run_to_the_breakpoint_owes_nothing(tmp_path):
+    """The tasks past `---STOP---` are open, so the phase is not wholly done;
+    a predicate that read the default parse would hide them and return 1."""
+    project = _owed_project(tmp_path, (1, (
+        "- [x] **1.1 — Alpha** — the done task",
+        "",
+        "---STOP---",
+        "",
+        "- [ ] **1.2 — Beta** — the open task past the marker",
+    )))
+    closure_tree.lay_done_task(project, "1.1 — Alpha")
+
+    assert owed_phase(project, "ROADMAP.md") is None
+
+
+def test_a_task_under_no_phase_heading_never_owes(tmp_path):
+    """The section that names no phase comes first and holds a done task with
+    an undisposed entry; were its task grouped under no phase it would owe
+    first, and the result would not be the Phase 2 below it."""
+    roadmap = "\n".join([
+        "# Roadmap",
+        "",
+        "## Tests",
+        "",
+        "- [x] **Cover Alpha** — a flat task, done",
+        "",
+        "## Phase 2 — the phase 2",
+        "",
+        "- [x] **2.1 — Beta** — the done task",
+        "",
+    ])
+    project = closure_tree.build(tmp_path, roadmap=roadmap)
+    closure_tree.lay_done_task(project, "Cover Alpha", seq=1)
+    beta = closure_tree.lay_done_task(project, "2.1 — Beta", seq=2)
+
+    assert owed_phase(project, "ROADMAP.md") == 2
+    assert undisposed_entries(project, "ROADMAP.md", 2) == [beta.entry]
+
+
+def test_the_oldest_wholly_done_phase_owes_first(tmp_path):
+    project = _owed_project(
+        tmp_path,
+        (1, ("- [x] **1.1 — Alpha** — done",)),
+        (2, ("- [x] **2.1 — Beta** — done",)),
+        (3, ("- [ ] **3.1 — Gamma** — open",)),
+    )
+    closure_tree.lay_done_task(project, "1.1 — Alpha", seq=1)
+    closure_tree.lay_done_task(project, "2.1 — Beta", seq=2)
+
+    assert owed_phase(project, "ROADMAP.md") == 1
+
+
+def test_an_entry_disposed_by_its_marker_alone_is_disposed(tmp_path):
+    project = _owed_project(tmp_path, (1, ("- [x] **1.1 — Alpha** — done",)))
+    closure_tree.lay_done_task(project, "1.1 — Alpha", variant=closure_tree.MARKER)
+
+    assert owed_phase(project, "ROADMAP.md") is None
+    assert undisposed_entries(project, "ROADMAP.md", 1) == []
+
+
+def test_an_entry_disposed_by_its_record_alone_is_disposed(tmp_path):
+    project = _owed_project(tmp_path, (1, ("- [x] **1.1 — Alpha** — done",)))
+    closure_tree.lay_done_task(project, "1.1 — Alpha", variant=closure_tree.RECORD)
+
+    assert owed_phase(project, "ROADMAP.md") is None
+    assert undisposed_entries(project, "ROADMAP.md", 1) == []
+
+
+def test_an_entry_with_no_marker_and_no_record_is_listed_by_its_id(tmp_path):
+    project = _owed_project(tmp_path, (1, ("- [x] **1.1 — Alpha** — done",)))
+    alpha = closure_tree.lay_done_task(project, "1.1 — Alpha")
+
+    assert alpha.entry == entry_id(None, alpha.stem, alpha.affects, alpha.text)
+    assert undisposed_entries(project, "ROADMAP.md", 1) == [alpha.entry]
+    assert owed_phase(project, "ROADMAP.md") == 1

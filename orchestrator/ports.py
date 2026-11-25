@@ -165,6 +165,13 @@ class ImplementerResultProtocol(Protocol):
         ...
 
 
+class StepKindProtocol(Protocol):
+    """The port of one step kind of a scenario: run one step with the step's
+    value and options, and return the outcome the step ended in."""
+
+    def __call__(self, value: str, options: Mapping[str, str]) -> str: ...
+
+
 class VerifyKind(NamedTuple):
     """Everything that depends on the verify choice (review vs. test run)."""
     step: str
